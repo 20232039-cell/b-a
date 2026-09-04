@@ -1,0 +1,77 @@
+# ── 일꾼 저장소(공개)에서 도는 워크플로. 데이터는 비공개 저장소에 있고 매 잡마다 work/ 로 받아 와
+# 그 안에서 돌린 뒤 되돌려 보낸다. 공개 저장소라 Actions 분이 무료다.
+# 필요한 것: 이 저장소 Settings → Secrets and variables → Actions 에 DATA_TOKEN
+# (데이터 저장소의 Contents 를 읽고 쓸 수 있는 파인그레인 토큰).
+# 주간 갱신 — 신상·품절·재입고·삭제만. 매주 월요일 03:00 KST (일요일 18:00 UTC).
+#
+# 하는 일: scripts/weekly_update.py(목록 스캔 → 신상 상세 → 사라진 것·품절인 것 상세 확인) →
+# 신상 중 설명 짧은 것 OCR(이미 한 상품은 건너뜀) → 태그 재생성 → 커밋.
+# 설명·소재 변경은 쫓지 않는다(사람 결정 2026-09-02). 비용: 러너 하나 30~40분/주 ≈ 월 150분.
+#
+# 브랜드가 300개로 늘면: --workers 를 늘려도 호스트당 1초 예의는 지켜지므로 시간은 브랜드 수에
+# 비례하지 않고 가장 큰 매장 하나에 비례한다. 러너 시간이 6시간(잡 한도)에 가까워지면 OCR 처럼
+# 매트릭스(브랜드 묶음)로 나눈다.
+
+name: weekly-update
+
+on:
+  schedule:
+    - cron: "0 18 * * 0"
+  workflow_dispatch:
+    inputs:
+      brands:
+        description: "공백으로 나눈 slug 목록. 비우면 전부"
+        required: false
+        default: ""
+
+env:
+  DATA_BRANCH: crawl/cafe24-full-catalog
+
+permissions:
+  contents: write
+
+concurrency:
+  group: weekly-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: work
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - name: 데이터 저장소(비공개) 받기
+        uses: ./.github/actions/data-repo
+        with:
+          token: ${{ secrets.DATA_TOKEN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: deps (requests · bs4 · lxml · tesseract kor)
+        run: |
+          pip install -q requests beautifulsoup4 lxml
+          sudo apt-get update -q
+          sudo apt-get install -y -q tesseract-ocr tesseract-ocr-kor
+      - name: 목록 스캔 · 신상 · 품절 · 재입고 · 삭제
+        run: |
+          python scripts/weekly_update.py --workers 12 ${{ inputs.brands && format('--brands {0}', inputs.brands) || '' }}
+      - name: 신상 OCR (설명 짧은 것만, 이미 한 상품은 건너뜀)
+        run: python scripts/ocr_detail_images.py --max-images 3 --procs 2
+      - name: 태그 재생성
+        run: python scripts/tag_items.py | head -20
+      - name: commit & push (rebase 후, 3회 재시도)
+        shell: bash
+        run: |
+          git config user.name "layer-weekly-bot"
+          git config user.email "weekly@layer.invalid"
+          git add data/crawl/ data/products_full.csv data/product_tags_full.json
+          git diff --cached --quiet && { echo "변화 없음"; exit 0; }
+          git commit -m "주간 갱신 $(date -u +%Y-%m-%d) — 신상·품절·재입고·삭제 (Actions)"
+          for i in 1 2 3; do
+            git pull --rebase origin "$DATA_BRANCH" && git push && exit 0
+            echo "푸시 실패, 재시도 $i"; sleep 10
+          done
+          exit 1

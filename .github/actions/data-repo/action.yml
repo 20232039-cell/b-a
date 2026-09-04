@@ -1,0 +1,30 @@
+# 비공개 데이터 저장소를 work/ 에 받아 두고, 이 저장소(일꾼)의 스크립트를 그 위에 얹는다.
+# 스크립트는 ROOT = 파일의 부모의 부모 로 data/ 를 찾으므로, work/scripts 에 두면 work/data 를 본다.
+name: 데이터 저장소 준비
+description: 비공개 데이터 저장소를 받고 일꾼 스크립트를 얹는다
+inputs:
+  token:
+    description: 데이터 저장소에 읽고 쓸 수 있는 토큰 (secrets.DATA_TOKEN)
+    required: true
+  repo:
+    description: owner/repo
+    required: false
+    default: 20232039-cell/layer-brand-agent
+  branch:
+    description: 작업 가지
+    required: false
+    default: crawl/cafe24-full-catalog
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        set -e
+        git clone --depth 1 --branch "${{ inputs.branch }}" \
+          "https://x-access-token:${{ inputs.token }}@github.com/${{ inputs.repo }}.git" work
+        rm -rf work/scripts
+        cp -r "$GITHUB_WORKSPACE/scripts" work/scripts
+        cd work
+        git config user.name "layer-runner-bot"
+        git config user.email "runner@layer.invalid"
+        echo "데이터 저장소 준비됨 — $(ls data/crawl/*.jsonl | wc -l)개 브랜드"

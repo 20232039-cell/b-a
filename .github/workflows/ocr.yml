@@ -1,0 +1,190 @@
+# ── 일꾼 저장소(공개)에서 도는 워크플로. 데이터는 비공개 저장소에 있고 매 잡마다 work/ 로 받아 와
+# 그 안에서 돌린 뒤 되돌려 보낸다. 공개 저장소라 Actions 분이 무료다.
+# 필요한 것: 이 저장소 Settings → Secrets and variables → Actions 에 DATA_TOKEN
+# (데이터 저장소의 Contents 를 읽고 쓸 수 있는 파인그레인 토큰).
+# 상세 이미지 OCR — 브랜드(×조각) 단위로 러너에 나눠 돌린다.
+#
+# 왜 Actions 인가: 대상 3,943건·9,552장을 4코어 한 대에서 돌리면 4시간이다(장당 1.5초).
+# 러너 20개에 브랜드를 나누면 20분 안팎. 에이전트 세션 컨테이너는 조용해지면 회수되어
+# 몇 시간짜리 일을 맡길 자리가 아니다(2026-09-02).
+#
+# 조각(shards): kirsh(1,800건)·badblood(1,160건)는 한 러너에서 2~3시간이라 첫 실행(run 1)에서
+# 이 둘만 끝나지 못하고 취소됐다. shards=6 이면 브랜드마다 6개 러너가 product_no 순으로 나눠 본다.
+# 조각 결과는 _parts/<brand>.<k>.jsonl 로 올리고 collect 가 brand 파일 하나로 합친다.
+#
+# 이어받기: scripts/ocr_detail_images.py 는 data/crawl/ocr/<brand>.jsonl 에 이미 있는 상품을
+# 건너뛴다. 결과를 브랜치에 커밋하므로 다시 돌려도 남은 것만 한다.
+#
+# 푸시 전 pull: run 1 의 collect 가 커밋까지 하고 푸시에서 실패했다 — 도는 사이 사람이 같은 브랜치에
+# 푸시해서 non-fast-forward. 아티팩트에서 손으로 건졌지만, 이제 rebase 후 푸시하고 세 번 재시도한다.
+#
+# 비용: 비공개 저장소 무료 한도 2,000분/월. 한 번 전체 돌리면 300~500분쯤 쓴다 —
+# 자동 스케줄로 걸지 않고 손으로 실행한다(workflow_dispatch).
+
+name: ocr-detail-images
+
+on:
+  workflow_dispatch:
+    inputs:
+      brands:
+        description: "공백으로 나눈 slug 목록. 비우면 data/crawl/*.jsonl 전부"
+        required: false
+        default: ""
+      max_images:
+        description: "상품당 읽을 상세 이미지 수(앞에서부터)"
+        required: false
+        default: "3"
+      all:
+        description: "true 면 설명 길이와 무관하게 상세 이미지가 있는 상품 전부"
+        required: false
+        default: "false"
+      shards:
+        description: "브랜드마다 몇 조각으로 나눌지 (큰 브랜드만 돌릴 때 6 정도)"
+        required: false
+        default: "1"
+      select:
+        description: "short(설명 짧은 것) | no-size(사이즈 표 없는 옷) | all"
+        required: false
+        default: "short"
+
+env:
+  DATA_BRANCH: crawl/cafe24-full-catalog
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ocr-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: work
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 데이터 저장소(비공개) 받기
+        uses: ./.github/actions/data-repo
+        with:
+          token: ${{ secrets.DATA_TOKEN }}
+      - id: plan
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.brands }}" ]; then
+            list=$(printf '%s\n' ${{ inputs.brands }})
+          else
+            list=$(ls data/crawl/*.jsonl | xargs -n1 basename | sed 's/\.jsonl$//' | grep -v '^_')
+          fi
+          n="${{ inputs.shards }}"; [ -z "$n" ] && n=1
+          matrix=$(printf '%s\n' $list | python3 -c '
+          import sys, json
+          n = int(sys.argv[1])
+          print(json.dumps({"include": [{"brand": b, "shard": k} for b in sys.stdin.read().split() for k in range(1, n + 1)]}))' "$n")
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "브랜드 $(printf '%s\n' $list | wc -l)곳 × 조각 $n"
+
+  ocr:
+    needs: plan
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: work
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 데이터 저장소(비공개) 받기
+        uses: ./.github/actions/data-repo
+        with:
+          token: ${{ secrets.DATA_TOKEN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: tesseract (kor+eng)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q tesseract-ocr tesseract-ocr-kor
+          pip install -q requests
+      - name: OCR ${{ matrix.brand }} ${{ matrix.shard }}/${{ inputs.shards }}
+        run: |
+          ALL=""; [ "${{ inputs.all }}" = "true" ] && ALL="--all"
+          N="${{ inputs.shards }}"; [ -z "$N" ] && N=1
+          python scripts/ocr_detail_images.py --brands "${{ matrix.brand }}" \
+            --max-images "${{ inputs.max_images }}" --procs 1 $ALL \
+            --shard "${{ matrix.shard }}/$N" --out-dir _parts --select "${{ inputs.select || 'short' }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ocr-${{ matrix.brand }}-${{ matrix.shard }}
+          path: work/_parts/*.jsonl
+          if-no-files-found: ignore
+          retention-days: 7
+
+  collect:
+    needs: ocr
+    if: always()
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: work
+    steps:
+      - uses: actions/checkout@v4
+      - name: 데이터 저장소(비공개) 받기
+        uses: ./.github/actions/data-repo
+        with:
+          token: ${{ secrets.DATA_TOKEN }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ocr-*
+          path: work/_parts
+          merge-multiple: true
+      - name: merge parts into data/crawl/ocr
+        shell: bash
+        run: |
+          mkdir -p data/crawl/ocr
+          python3 - <<'PY'
+          import json, glob, os
+          from collections import defaultdict
+          parts = defaultdict(list)
+          for p in sorted(glob.glob("_parts/*.jsonl")):
+              brand = os.path.basename(p).rsplit(".", 2)[0]   # <brand>.<k>.jsonl
+              parts[brand].append(p)
+          n = t = new = 0
+          for brand, files in parts.items():
+              dst = f"data/crawl/ocr/{brand}.jsonl"
+              have = {}
+              if os.path.exists(dst):
+                  for l in open(dst, encoding="utf-8"):
+                      if l.strip():
+                          d = json.loads(l); have[d["product_no"]] = d
+              for p in files:
+                  for l in open(p, encoding="utf-8"):
+                      if l.strip():
+                          d = json.loads(l)
+                          if d["product_no"] not in have:
+                              have[d["product_no"]] = d; new += 1
+              with open(dst, "w", encoding="utf-8") as f:
+                  for d in have.values():
+                      f.write(json.dumps(d, ensure_ascii=False) + "\n")
+              n += len(have); t += sum(1 for d in have.values() if d["ocr_text"])
+          print(f"OCR 결과 상품 {n} · 글 나온 상품 {t} · 이번에 새로 {new}")
+          PY
+      - name: commit & push (rebase 후, 3회 재시도)
+        shell: bash
+        run: |
+          git config user.name "layer-ocr-bot"
+          git config user.email "ocr@layer.invalid"
+          git add data/crawl/ocr/
+          git diff --cached --quiet && { echo "변화 없음"; exit 0; }
+          git commit -m "OCR 결과 — $(ls data/crawl/ocr/*.jsonl | wc -l)개 브랜드 (Actions)"
+          for i in 1 2 3; do
+            git pull --rebase origin "$DATA_BRANCH" && git push && exit 0
+            echo "푸시 실패, 재시도 $i"; sleep 10
+          done
+          exit 1
