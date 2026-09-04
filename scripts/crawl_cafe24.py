@@ -566,6 +566,29 @@ def extract_size_from_tables(soup) -> dict[str, list[float]]:
             if len(cols) > len(best):
                 best = cols
             break
+        else:
+            # 전치 표 — 라벨이 첫 「열」에 있고 사이즈가 첫 행에 있다(diafvine, 2026-09-04 사람 지적):
+            #     　　　　 M(38)  L(40)  XL(42)
+            #     a 어깨   48.5   50     51.5
+            #     e 총장   65.5   67     68.5
+            # 라벨 앞의 그림 기호(a·b·c)는 떼고 읽는다.
+            cols = {}
+            for r in rows:
+                if len(r) < 3:
+                    continue
+                lab = re.sub(r"^[a-eA-E가-마][\.\)]?\s+", "", (r[0] or "").strip())
+                lab = re.sub(r"[().\s]", "", lab).lower()
+                if not _KNOWN.match(lab) or lab in cols:
+                    continue
+                vals = []
+                for cell in r[1:]:
+                    m = re.fullmatch(r"\s*(\d{1,3}(?:\.\d{1,2})?)\s*(?:cm)?\s*", cell or "")
+                    if m and 3 <= float(m.group(1)) <= 200:
+                        vals.append(float(m.group(1)))
+                if len(vals) >= 1:
+                    cols[lab] = vals[:8]
+            if len(cols) >= 2 and len(cols) > len(best):
+                best = cols
     return best
 
 
