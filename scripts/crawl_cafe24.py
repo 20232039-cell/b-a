@@ -753,6 +753,17 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
                                                               #   (Size & Fit Guide 가 <table> 이 아니라 div 격자다)
         for el in soup.select(sel):
             _collect(el, parts)
+    # 기본정보 표의 「상품간략설명」 칸은 표가 아니라 글이다. coor 는 DETAIL·SIZE 를 통째로 여기에 넣는데,
+    # 표를 지우는 _clean_text 와 300자 넘는 값을 버리는 spec 사이에서 사라져 932벌 전부 본문 0자였다
+    # (2026-09-04 사람이 화면으로 확인해 줬다 — 페이지에는 DETAIL·SIZE 아코디언이 멀쩡히 보인다).
+    BRIEF = re.compile(r"상품\s*간략\s*설명|간략\s*설명|상품\s*요약|product\s*(summary|description)", re.I)
+    for tr in soup.select(".xans-product-detaildesign tr, .xans-product-detail tr"):
+        cells = tr.find_all(["th", "td"])
+        if len(cells) < 2 or not BRIEF.search(cells[0].get_text(" ", strip=True)):
+            continue
+        t = re.sub(r"\s+", " ", cells[1].get_text(" ", strip=True))
+        if len(t) >= 15 and not POLICY.search(t) and t not in parts and not any(t in x for x in parts):
+            parts.append(t)
     body_text = " ".join(parts)
     ld_text = _strip_tags(ld.get("description", ""))
     if POLICY.search(ld_text):
