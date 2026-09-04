@@ -526,8 +526,34 @@ _ROW_LEAD = r"(?:\s*(?:size)?\s*(?:small|medium|large|x-?small|x-?large|free)?\s
 _KNOWN = re.compile(r"^(?:" + SIZE_LABELS[1:-1] + r"|crotch|inseam|rise|arm|암홀|밑위|가슴둘레|허리둘레|밑단둘레|어깨너비|소매길이|가슴단면)", re.I)
 
 
+def _head_labels(head: str) -> list[list[str]]:
+    """표 머리 낱말을 라벨 목록으로 — 두 낱말 라벨을 붙이지 않은 안, 붙인 안 차례로 돌려준다."""
+    out: list[list[str]] = []
+    for merge in (False, True):
+        if "/" in head:
+            words = [w.strip(" ()") for w in head.split("/") if w.strip(" ()")]       # 「총장 / 어깨 너비 / 소매 길이」
+        else:
+            words = [w for w in re.split(r"\s+", head) if w]
+            if merge:
+                merged, i = [], 0
+                while i < len(words):
+                    pair = (words[i].lower(), words[i + 1].lower()) if i + 1 < len(words) else None
+                    if pair in _COMPOUND:
+                        merged.append(words[i] + words[i + 1]); i += 2
+                    else:
+                        merged.append(words[i]); i += 1
+                words = merged
+        words = [w for w in words if w.lower() not in ("size", "사이즈", "cm", "size(cm)")]   # 머리의 「SIZE」 칸은 라벨이 아니다
+        labels = [re.sub(r"[().\s]", "", w).lower() for w in words]
+        labels = [re.sub(r"l(?:ength)?$", "", l) if l.startswith("sleeve") and l != "sleeve" else l for l in labels]
+        if labels and labels not in out:
+            out.append(labels)
+    return out
+
+
 def extract_size_matrix(t: str) -> dict[str, list[float]]:
     best: dict[str, list[float]] = {}
+    best_score = (0, 0)
     for h in _HEADER_MARK.finditer(t):
         # 머리: 표식 뒤 낱말들(숫자 아닌 토큰) — 첫 사이즈 행(이름 + 숫자)이 시작되는 곳까지, 최대 10개
         # 낱말은 통째로 먹는다(공백 없이) — 「Hem」의 m 을 사이즈 M 으로 잘라 읽던 버그(2026-09-04)
@@ -535,41 +561,31 @@ def extract_size_matrix(t: str) -> dict[str, list[float]]:
         if not m:
             continue
         head = m.group(1).strip().strip("()")
-        if "/" in head:
-            words = [w.strip(" ()") for w in head.split("/") if w.strip(" ()")]       # 「총장 / 어깨 너비 / 소매 길이」
-        else:
-            words = [w for w in re.split(r"\s+", head) if w]
-            merged, i = [], 0
-            while i < len(words):
-                pair = (words[i].lower(), words[i + 1].lower()) if i + 1 < len(words) else None
-                if pair in _COMPOUND:
-                    merged.append(words[i] + words[i + 1]); i += 2
-                else:
-                    merged.append(words[i]); i += 1
-            words = merged
-        words = [w for w in words if w.lower() not in ("size", "사이즈", "cm", "size(cm)")]   # 머리의 「SIZE」 칸은 라벨이 아니다
-        labels = [re.sub(r"[().\s]", "", w).lower() for w in words]
-        labels = [re.sub(r"l(?:ength)?$", "", l) if l.startswith("sleeve") and l != "sleeve" else l for l in labels]
-        if sum(1 for l in labels if _KNOWN.match(l)) < 2:
-            continue
-        n = len(labels)
-        row_rx = re.compile(r"\s*(" + _SIZE_TOKEN + r")" + _ROW_LEAD + r"((?:" + _NUM + r"\s*(?:cm)?\s*[/,|]?\s*){" + str(n - 1) + r"}" + _NUM + r")(?!\d)", re.I)
-        cols: dict[str, list[float]] = {l: [] for l in labels}
-        pos = h.end() + m.end()
-        got = 0
-        while got < 8:
-            r = row_rx.match(t, pos)
-            if not r:
-                break
-            nums = [float(x) for x in re.findall(_NUM, r.group(2))][:n]
-            if len(nums) < n or not all(3 <= x <= 200 for x in nums):
-                break
-            for l, x in zip(labels, nums):
-                cols[l].append(x)
-            got += 1
-            pos = r.end()
-        if got and got >= len(next(iter(best.values()), [])):
-            best = {l: v for l, v in cols.items() if v and _KNOWN.match(l)}
+        # 「SLEEVE LENGTH」를 한 칸으로 볼지 두 칸으로 볼지는 표마다 다르다. depound 는 한 칸(소매 길이)이고,
+        # dnsr 의 「SHOULDER CHEST SLEEVE LENGTH / M 49 55 58 60」은 네 칸이다(2026-09-04 OCR 실패 286건에서 발견).
+        # 둘 다 시도해 숫자 칸 수가 맞아떨어지는 쪽을 쓴다 — 붙인 쪽을 뒤에 둬서 같은 줄 수면 붙인 쪽이 이긴다.
+        for labels in _head_labels(head):
+            if sum(1 for l in labels if _KNOWN.match(l)) < 2:
+                continue
+            n = len(labels)
+            row_rx = re.compile(r"\s*(" + _SIZE_TOKEN + r")" + _ROW_LEAD + r"((?:" + _NUM + r"\s*(?:cm)?\s*[/,|:;]?\s*){" + str(n - 1) + r"}" + _NUM + r")(?!\d)", re.I)
+            cols: dict[str, list[float]] = {l: [] for l in labels}
+            pos = h.end() + m.end()
+            got = 0
+            while got < 8:
+                r = row_rx.match(t, pos)
+                if not r:
+                    break
+                nums = [float(x) for x in re.findall(_NUM, r.group(2))][:n]
+                if len(nums) < n or not all(3 <= x <= 200 for x in nums):
+                    break
+                for l, x in zip(labels, nums):
+                    cols[l].append(x)
+                got += 1
+                pos = r.end()
+            keep = {l: v for l, v in cols.items() if v and _KNOWN.match(l)}
+            if got and (got, len(keep)) >= best_score:
+                best, best_score = keep, (got, len(keep))
     return best
 
 

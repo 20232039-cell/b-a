@@ -58,10 +58,13 @@ def fix_value(label: str, raw: str, girth: bool = False) -> float | None:
     if girth:
         v = v / 2   # 「가슴둘레 111」은 둘레 — 국내 표기 기준(단면)으로 맞춘다(rough-side, 2026-09-04)
     lo, hi = RANGES.get(label, (3, 200))
-    if v > hi and raw.isdigit() and len(raw) == 3:
-        v = v / 10          # 소수점이 떨어진 세 자리(355 → 35.5)
-    if v > hi and raw.isdigit() and len(raw) == 4:
-        v = v / 100         # 「3225」 같은 것은 못 살린다 → 범위 밖으로 버려진다
+    # 소수점이 떨어진 숫자(355 → 35.5, 3500 → 35.0, 10400 → 104.0) — 범위에 들어올 때까지 10 으로 나눈다.
+    # 「3225」처럼 어느 자리로도 안 맞는 것은 범위 밖으로 버려진다.
+    if raw.isdigit():
+        for _ in range(3):
+            if v <= hi:
+                break
+            v = v / 10
     return v if lo <= v <= hi else None
 
 
@@ -82,22 +85,38 @@ def parse_matrix(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] |
             continue
         names, cols = [], {c: [] for c in labels}
         for row in lines[i + 1:i + 12]:
-            r = re.sub(r"[|ㅣ]", " ", row).strip().replace("cm", " ").replace("CM", " ")   # frizmworks 표는 세로선(|)으로 칸을 나눈다
+            # 세로선(|)은 칸 구분(frizmworks). 콜론·세미콜론은 OCR 이 세로선이나 점을 잘못 읽은 것이다
+            # — 「M 49 55 58: 60」(dnsr, 2026-09-04) 처럼 한 글자 때문에 표 한 장을 통째로 버리고 있었다.
+            r = re.sub(r"[|ㅣ:;=_]", " ", row).strip()
+            # OCR 이 cm 을 em·cem·c¢m·om 으로 흘려 쓴다(easy-no-easy) — 숫자 뒤에 붙은 것만 지운다
+            r = re.sub(r"(?<=\d)\s*(?:cm|cem|c[^\w\s]m|em|om|¢m|crn)\b", " ", r, flags=re.I)
             r = re.sub(r"\s+", " ", r)
-            m = re.match(rf"^\(?({SIZE_NAME})\)?\s+((?:{NUM}\s*){{{len(labels)},{len(labels)+1}}})\s*$", r, re.I)
-            if not m:
-                if names:      # 표가 끝났다
-                    break
-                continue
-            nums = re.findall(NUM, m.group(2))[:len(labels)]
+            # 사이즈 이름: 「1」「M」뿐 아니라 「1 SIZE」「1 SIZE [9]」(easy-no-easy) 도 한 칸이다.
+            # 숫자 뒤에 남는 부스러기(「Th (cm)」 — kirsh)는 버린다.
+            m = re.match(rf"^\(?({SIZE_NAME})\)?(?:\s*size)?(?:\s*[\[(][^\])]{{0,8}}[\])])?\s+"
+                         rf"((?:{NUM}\s*){{{len(labels)},{len(labels)+1}}})\s*(?:\D{{0,10}})?$", r, re.I)
+            if m:
+                nums = re.findall(NUM, m.group(2))[:len(labels)]
+                nm = m.group(1)
+            else:
+                # 빈 칸을 「-」로 두는 표(민소매의 SLEEVE — dnsr) 는 칸 수가 맞을 때만 받는다
+                tok = r.split()
+                nm, cells = (tok[0], tok[1:]) if tok else ("", [])
+                if len(cells) != len(labels) or not re.fullmatch(SIZE_NAME, nm, re.I) \
+                        or not all(re.fullmatch(rf"{NUM}|[-–—]", c) for c in cells) \
+                        or not any(re.fullmatch(NUM, c) for c in cells):
+                    if names:      # 표가 끝났다
+                        break
+                    continue
+                nums = cells
             if len(nums) < len(labels):
                 continue
-            nm = m.group(1).upper()
+            nm = nm.upper()
             if re.fullmatch(r"[0O]{2}[0-9OM]", nm):
                 nm = nm.replace("O", "0").replace("M", "2")   # 「OOM」= 002 (kirsh 표기)
             names.append(nm)
             for c, raw in zip(labels, nums):
-                cols[c].append(fix_value(c, raw))
+                cols[c].append(None if raw in ("-", "–", "—") else fix_value(c, raw))
         if names and (best is None or len(names) > len(best[0])):
             best = (names, cols)
     if not best:
