@@ -21,7 +21,7 @@ import csv
 import glob
 import json
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -153,17 +153,75 @@ def from_ocr(text: str) -> tuple[list[str] | None, dict[str, list[float]]]:
     return None, rows
 
 
-def normalize_html(st: dict) -> dict[str, list[float]]:
+def normalize_html(st: dict, brand: str = "", girth_keys: set | None = None) -> dict[str, list[float]]:
     out: dict[str, list[float]] = {}
     for k, vals in st.items():
         c = canon_label(k)
         if not c or c in out:
             continue
-        girth = "둘레" in k or "circum" in k.lower()
+        girth = "둘레" in k or "circum" in k.lower() or (girth_keys is not None and (brand, c) in girth_keys)
         vs = [v for v in (fix_value(c, str(x), girth) for x in vals) if v is not None]
         if vs:
             out[c] = vs
     return out
+
+
+# 라벨별 「둘레로 보이는」 문턱 — 이 위로 브랜드 중앙값이 오면 그 브랜드는 둘레로 재는 것이다.
+# 라벨에 「둘레」라고 써 주는 매장만 반으로 나누고 있었더니, 영어 라벨을 쓰는 moif 는 chest 132·137·142 가
+# 범위 밖이라 통째로 버려졌다(2026-09-04 사람 지적: 「단면 쓰는 곳도 전체 쓰는 곳도 있다」).
+GIRTH_MIN = {"가슴": 75, "허리": 55, "엉덩이": 70, "밑단": 60, "허벅지": 45, "어깨": 75}
+
+
+def brand_girth(crawl_dir) -> set[tuple[str, str]]:
+    """브랜드×라벨 중 둘레로 재는 것을 값 분포로 가려낸다."""
+    import statistics
+    vals = defaultdict(list)
+    for p in sorted(crawl_dir.glob("*.jsonl")):
+        if p.name.startswith("_"):
+            continue
+        for l in p.read_text(encoding="utf-8").splitlines():
+            if not l.strip():
+                continue
+            d = json.loads(l)
+            st = d.get("size_table")
+            if not isinstance(st, dict):
+                continue
+            for k, xs in st.items():
+                c = canon_label(k)
+                if not c or c not in GIRTH_MIN or "둘레" in k:
+                    continue
+                for x in xs:
+                    if isinstance(x, (int, float)):
+                        vals[(d["brand_slug"], c)].append(float(x))
+    out = set()
+    for key, xs in vals.items():
+        if len(xs) >= 20 and statistics.median(xs) >= GIRTH_MIN[key[1]]:
+            out.add(key)
+    return out
+
+
+def shop_wide_tables(crawl_dir, rows: dict) -> set[tuple[str, str]]:
+    """매장 공용 안내표를 가려낸다 — 키링·베레모·청바지·티셔츠가 전부 같은 값을 갖는 것
+    (wkndrs·espionage·noice, 가슴 [22,23,…,32], 753벌).
+    「같은 표가 여러 벌」만으로는 안 된다 — 색만 다른 같은 옷이 스무 벌인 브랜드가 흔해서 dunst·insilence 까지
+    잘렸다(2026-09-04 1차 시도, 1,456벌 손실). 품목 서넛에 걸쳐 같은 표가 나올 때만 공용표로 본다."""
+    seen = defaultdict(lambda: [0, set()])
+    for p in sorted(crawl_dir.glob("*.jsonl")):
+        if p.name.startswith("_"):
+            continue
+        for l in p.read_text(encoding="utf-8").splitlines():
+            if not l.strip():
+                continue
+            d = json.loads(l)
+            st = d.get("size_table")
+            if not (isinstance(st, dict) and st):
+                continue
+            r = rows.get((d["brand_slug"], str(d["product_no"])))
+            key = (d["brand_slug"], json.dumps(st, sort_keys=True, ensure_ascii=False))
+            seen[key][0] += 1
+            if r and r.get("category"):
+                seen[key][1].add(r["category"])
+    return {k for k, (n, cats) in seen.items() if n >= 10 and len(cats) >= 3}
 
 
 def main():
@@ -177,6 +235,12 @@ def main():
             if l.strip():
                 d = json.loads(l)
                 ocr[(d["brand_slug"], str(d["product_no"]))] = d.get("ocr_text") or ""
+    girth_keys = brand_girth(CRAWL)
+    shared = shop_wide_tables(CRAWL, rows)
+    if girth_keys:
+        print("둘레로 재는 브랜드×라벨:", sorted(f"{b}/{l}" for b, l in girth_keys))
+    if shared:
+        print("매장 공용 표로 판단해 버림:", sorted({b for b, _ in shared}))
     out: dict[str, dict] = {}
     src = Counter()
     per_brand_html, per_brand_ocr, per_brand_tot = Counter(), Counter(), Counter()
@@ -194,8 +258,8 @@ def main():
             per_brand_tot[k[0]] += 1
             st = d.get("size_table")
             sizes, names, source = {}, None, None
-            if isinstance(st, dict) and st:
-                sizes = normalize_html(st)
+            if isinstance(st, dict) and st and (k[0], json.dumps(st, sort_keys=True, ensure_ascii=False)) not in shared:
+                sizes = normalize_html(st, k[0], girth_keys)
                 source = "html"
             if len(sizes) < 2 and ocr.get(k):
                 names2, sizes2 = from_ocr(ocr[k])
