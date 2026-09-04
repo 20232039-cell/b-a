@@ -31,6 +31,10 @@ on:
         description: "size(사이즈 없는 것) | material(소재 없는 것) | any | none"
         required: false
         default: "any"
+      mode:
+        description: "collect(상품 수집) | lookbook(룩북에 상품 링크가 있는지 조사)"
+        required: false
+        default: "collect"
 
 env:
   DATA_BRANCH: crawl/cafe24-full-catalog
@@ -91,6 +95,10 @@ jobs:
           python -m playwright install --with-deps chromium
       - name: ${{ matrix.brand }} 열기
         run: |
+          if [ "${{ inputs.mode }}" = "lookbook" ]; then
+            python scripts/browser_collect.py --brands "${{ matrix.brand }}" --lookbook
+            exit 0
+          fi
           ONLY=""
           case "${{ inputs.only_missing }}" in
             size|material|any) ONLY="--only-missing ${{ inputs.only_missing }}" ;;
@@ -100,7 +108,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: browser-${{ matrix.brand }}
-          path: work/data/crawl/browser/*.jsonl
+          path: |
+            work/data/crawl/browser/*.jsonl
+            work/data/crawl/browser/lookbook_survey.json
           if-no-files-found: ignore
           retention-days: 7
 

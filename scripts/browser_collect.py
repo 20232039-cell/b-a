@@ -108,8 +108,61 @@ def open_details(page) -> None:
         pass
 
 
+LOOKWORD = re.compile(r"룩북|룩\b|컬렉션|코디|스타일링|LOOKBOOK|COLLECTION|EDITORIAL|STYLING|LOOK", re.I)
+PRODUCT = re.compile(r"/product/(?!list\.html)[^\"'\s>]*?/(\d+)/|product_no=(\d+)")
+
+
+def survey_lookbook(page, base: str) -> dict:
+    """룩북 페이지에 「이 룩의 상품」 링크가 붙어 있는지 본다.
+
+    왜 중요한가(2026-09-04): 지금 우리에게 없는 것은 사진이 아니라 정답표다. 룩 사진은
+    14,174장 있는데 어느 룩에 어느 상품이 쓰였는지를 아는 경우가 262건뿐이다. 룩북에
+    상품 링크가 붙어 있으면 그 표를 공짜로 얻는다.
+
+    정적 HTML 로는 확인이 안 된다 — insilence·frizmworks 는 메뉴가, lmood 는 룩북 내용이
+    자바스크립트다. lmood 룩북에서 찾은 상품 링크 23개는 전부 /product/list.html 카테고리
+    링크였다(개별 상품 0개). 그래서 브라우저로 본다."""
+    out = {"base": base, "menu": [], "pages": []}
+    try:
+        page.goto(base + "/", wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_timeout(2500)
+    except Exception:
+        return out
+    seen = []
+    for a in page.query_selector_all("a"):
+        try:
+            t = " ".join((a.inner_text() or "").split())
+            href = a.get_attribute("href") or ""
+        except Exception:
+            continue
+        if not href or href.startswith("#") or "/product/list" in href:
+            continue
+        if LOOKWORD.search(t) or LOOKWORD.search(href):
+            full = href if href.startswith("http") else base + ("" if href.startswith("/") else "/") + href
+            if full not in seen:
+                seen.append(full)
+    out["menu"] = seen[:6]
+    for u in seen[:3]:
+        try:
+            page.goto(u, wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_timeout(2000)
+            for _ in range(4):
+                page.evaluate("window.scrollBy(0, document.body.scrollHeight/4)")
+                page.wait_for_timeout(400)
+            html = page.content()
+        except Exception:
+            continue
+        nos = {m[0] or m[1] for m in PRODUCT.findall(html)}
+        imgs = len(page.query_selector_all("img"))
+        out["pages"].append({"url": u, "product_nos": sorted(nos)[:40],
+                             "n_products": len(nos), "n_images": imgs})
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--lookbook", action="store_true",
+                    help="상품을 열지 않고, 브랜드 룩북 페이지에 상품 링크가 있는지만 조사한다")
     ap.add_argument("--brands", required=True)
     ap.add_argument("--limit", type=int, default=50, help="브랜드마다 최대 상품 수")
     ap.add_argument("--delay", type=float, default=1.2)
@@ -117,6 +170,7 @@ def main():
                     help="size: 사이즈 없는 것만 · material: 소재 태그 없는 것만 · any: 둘 중 하나라도 없는 것")
     args = ap.parse_args()
     from playwright.sync_api import sync_playwright
+
 
     sizes, mats = {}, {}
     p = DATA / "product_sizes.json"
@@ -139,6 +193,30 @@ def main():
     with sync_playwright() as pw:
         browser = pw.chromium.launch(**launch)
         page = browser.new_page(user_agent=UA, viewport={"width": 1400, "height": 1000})
+        if args.lookbook:
+            res = {}
+            for brand in [b for b in args.brands.split(",") if b]:
+                src = CRAWL / f"{brand}.jsonl"
+                if not src.exists():
+                    continue
+                base = ""
+                for l in src.read_text(encoding="utf-8").splitlines():
+                    if l.strip():
+                        m = re.match(r"(https?://[^/]+)", json.loads(l).get("source_url") or "")
+                        if m:
+                            base = m.group(1); break
+                if not base:
+                    continue
+                r = survey_lookbook(page, base)
+                res[brand] = r
+                best = max((p["n_products"] for p in r["pages"]), default=0)
+                print(f"  {brand}: 룩 메뉴 {len(r['menu'])}개 · 상품 링크 최대 {best}개", flush=True)
+                time.sleep(args.delay)
+            OUT.mkdir(parents=True, exist_ok=True)
+            (OUT / "lookbook_survey.json").write_text(json.dumps(res, ensure_ascii=False, indent=1), encoding="utf-8")
+            print(f"\n{OUT / 'lookbook_survey.json'} 에 남겼다")
+            browser.close()
+            return
         for brand in [b for b in args.brands.split(",") if b]:
             src = CRAWL / f"{brand}.jsonl"
             if not src.exists():
