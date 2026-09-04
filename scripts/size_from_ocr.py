@@ -73,9 +73,62 @@ def fix_value(label: str, raw: str, girth: bool = False) -> float | None:
     return round(v, 1) if lo <= v <= hi else None
 
 
+def parse_slots(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] | None:
+    """머리줄의 칸 「자리」로 값을 맞춘다 — 라벨 하나가 깨져도 나머지가 산다.
+
+    parse_matrix 는 알아본 라벨 수만큼만 값을 가져간다. 그런데 OCR 이 라벨 하나를
+    통째로 흘려 쓰면(kirsh 「(cm) Be 허리 엉덩이 앞밑위 허벅지 밑단」 — Be 는 총장)
+    라벨 5 · 값 6 이 되어 값이 한 칸씩 밀리고, 밀린 값이 범위를 벗어나 표 전체가 버려진다.
+
+    그래서 머리줄을 「아는 라벨 + 모르는 칸」의 자리 목록으로 읽고, 값 개수가 자리
+    개수와 같을 때만 자리대로 짝지어 아는 라벨만 취한다. 모르는 칸의 값은 버린다 —
+    무엇인지 모르는 수를 아무 라벨에나 붙이는 것보다 비우는 편이 낫다.
+    """
+    UNIT = re.compile(r"^[(\[]?\s*(?:cm|size|사이즈|단위|inch|in)\s*[)\]]?$", re.I)
+    best = None
+    for i, ln in enumerate(lines):
+        head = re.sub(r"[|ㅣ]", " ", ln).strip()
+        toks = [t for t in head.split() if t]
+        while toks and UNIT.match(toks[0]):
+            toks.pop(0)
+        if len(toks) < 3:
+            continue
+        slots = [ALIAS.get(re.sub(r"\s+", "", t).lower()) for t in toks]
+        known = [c for c in slots if c]
+        if len(known) < 2 or len(set(known)) != len(known):
+            continue
+        names, cols = [], {c: [] for c in known}
+        for row in lines[i + 1:i + 12]:
+            r = re.sub(r"[|ㅣ:;=_]", " ", row).strip()
+            r = re.sub(r"(?<=\d)\s*(?:cm|cem|em|om|crn)\b", " ", r, flags=re.I)
+            tok = re.sub(r"\s+", " ", r).split()
+            if len(tok) != len(slots) + 1:
+                if names:
+                    break
+                continue
+            nm, cells = tok[0], tok[1:]
+            if not re.fullmatch(SIZE_NAME, nm, re.I) or not all(
+                    re.fullmatch(rf"{NUM_CELL}|[-–—]", c) for c in cells):
+                if names:
+                    break
+                continue
+            names.append(nm.upper())
+            for c, raw in zip(slots, cells):
+                if c:
+                    cols[c].append(None if raw in ("-", "–", "—") else fix_value(c, raw))
+        if names and (best is None or len(names) > len(best[0])):
+            best = (names, cols)
+    if not best:
+        return None
+    names, cols = best
+    sizes = {c: v for c, v in cols.items() if any(x is not None for x in v)}
+    return (names, sizes) if sizes else None
+
+
 def parse_matrix(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] | None:
     """헤더 줄(정식 라벨 ≥2) + 사이즈 행들. 가장 많은 행을 얻는 헤더를 고른다."""
     best = None
+    best_score = (0, 0)
     for i, ln in enumerate(lines):
         low = ln.lower()
         if not re.search(r"size|사이즈|\(00\)|\(07\)|cm", low) and len(LABEL_RX.findall(ln)) < 2:
@@ -122,7 +175,13 @@ def parse_matrix(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] |
             names.append(nm)
             for c, raw in zip(labels, nums):
                 cols[c].append(None if raw in ("-", "–", "—") else fix_value(c, raw))
-        if names and (best is None or len(names) > len(best[0])):
+        # 라벨 수를 먼저 본다. 행 수만 보면 설명 문장이 진짜 머리줄을 이긴다 —
+        # kirsh 「ㆍ 암홀, 밑단 뒷부분 밴딩」(라벨 2)이 「(cm) 총장 어깨 가슴」(라벨 3)을
+        # 눌러서 {'밑단': [41, 43]} 한 칸만 남았다(2026-09-04, 100건이 이 꼴이었다).
+        # 표의 머리줄은 라벨이 많고, 문장은 어쩌다 두 개가 걸린다.
+        score = (len(labels), len(names))
+        if names and (best is None or score > best_score):
+            best_score = score
             best = (names, cols)
     if not best:
         return None
@@ -262,6 +321,11 @@ def from_ocr(text: str) -> tuple[list[str] | None, dict[str, list[float]]]:
     flat = parse_flat(text)
     if flat and len(flat[1]) >= 2:
         return flat[0], clean_ocr(flat[1])
+    # 라벨 하나가 깨져 칸이 밀린 표 — 자리로 맞춘다(parse_slots 주석)
+    for cand in (lines, resegment(text)):
+        slot = parse_slots(cand)
+        if slot and len(slot[1]) >= 2:
+            return slot[0], clean_ocr({k: list(vs) for k, vs in slot[1].items()})
     return None, clean_ocr(parse_rows(text))
 
 
