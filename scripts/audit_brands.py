@@ -31,6 +31,7 @@ KEY_LABELS = ("어깨", "가슴", "총장", "허리")
 def load():
     rows = {(r["brand_slug"], str(r["product_no"])): r
             for r in csv.DictReader(open(DATA / "products_full.csv", encoding="utf-8-sig"))}
+
     sizes = json.loads((DATA / "product_sizes.json").read_text(encoding="utf-8"))
     u2k = {r["source_url"]: k for k, r in rows.items()}
     crawl: dict[tuple, dict] = {}
@@ -50,6 +51,10 @@ def main():
     ap.add_argument("--brands", nargs="*")
     args = ap.parse_args()
     rows, sizes, u2k, crawl = load()
+    # 앱이 실제로 읽는 값으로 재야 한다. detail_text(HTML 본문)만 보면 그림으로 설명하는 매장이
+    # 통째로 「글 없음」이 된다 — dnsr 은 DETAIL·FABRIC·SIZE 를 전부 그림에 넣지만 OCR 이 읽어
+    # 소재 태그가 90% 다(2026-09-04 사람 지적). 그래서 소재 태그 유무로 잰다.
+    tags = json.loads((DATA / "product_tags_full.json").read_text(encoding="utf-8"))
     sized = {u2k[u] for u in sizes if u in u2k}
 
     # 라벨별 중앙값 — 브랜드 중앙값이 크게 벗어나면 재는 기준이 다르거나 표가 밀린 것이다.
@@ -86,7 +91,7 @@ def main():
     shop_chart = Counter(b for (b, _), (n, c) in shared.items() if n >= 10 and len(c) >= 3)
 
     brands = args.brands or sorted({k[0] for k in rows})
-    print(f"{'브랜드':20s} {'옷':>5s} {'사이즈':>6s} {'본문':>6s} {'그림':>6s}  주의")
+    print(f"{'브랜드':20s} {'옷':>5s} {'사이즈':>6s} {'소재':>6s} {'그림':>6s}  주의")
     flagged = []
     for b in brands:
         ks = [k for k in rows if k[0] == b and rows[k].get("category") in GARM]
@@ -94,7 +99,7 @@ def main():
             continue
         n = len(ks)
         sz = sum(1 for k in ks if k in sized) / n
-        txt = sum(1 for k in ks if len(crawl.get(k, {}).get("detail_text") or "") >= 100) / n
+        txt = sum(1 for k in ks if ((tags.get(rows[k]["source_url"]) or {}).get("tags") or {}).get("material")) / n
         img = sum(1 for k in ks if crawl.get(k, {}).get("detail_images")) / n
         notes = []
         g = brand_gender.get(b, "UNISEX")
@@ -109,8 +114,8 @@ def main():
             notes.append(f"매장 공용표 {shop_chart[b]}종 (걸러내는 중)")
         if sz < 0.5:
             notes.append("사이즈 절반 미만")
-        if txt < 0.3:
-            notes.append("본문 거의 없음")
+        if txt < 0.5:
+            notes.append("소재를 못 얻음")
         line = f"{b:20s} {n:5d} {sz:6.0%} {txt:6.0%} {img:6.0%}  {' · '.join(notes)}"
         print(line)
         if notes:
