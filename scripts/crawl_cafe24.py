@@ -956,6 +956,10 @@ CSV_FIELDS = [
     "product_no", "category_path", "gallery_count", "options",
     # 주간 갱신(weekly_update.py)이 채운다 — 매장이 내린 상품(연속 2주 목록에서 사라지고 상세 404). 지난 상품에 두되 링크가 죽었다는 표시
     "delisted", "last_seen",
+    # 상세가 아예 없는 상품 — 상세 그림 0 이고 설명도 50자 미만. 매장 페이지에 정말로 아무것도 없다
+    # (품절된 옛 상품이 대부분). 지우지 않고 표시만 한다: 앱 목록과 수집률 분모에서 빼고 레코드는 남긴다
+    # — 지워도 다음 주간 갱신이 목록에서 다시 주워 오고, 「지난 상품」 탭에는 이름·가격·대표컷이면 충분하다.
+    "detail_empty",
 ]
 CATEGORY_LABEL = {"tops": "Tops", "outer": "Outerwear", "bottoms": "Pants", "dress": "Dresses", "skirt": "Skirts",
                   "shoes": "Shoes", "bags": "Bags", "accessories": "Accessories", "suiting": "Suiting", "other": ""}
@@ -1041,6 +1045,8 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
                 "options": " | ".join(d.get("options", [])),
                 "delisted": "1" if d.get("delisted") else "",
                 "last_seen": d.get("last_seen", ""),
+                "detail_empty": "1" if (not d.get("detail_images") and len(d.get("detail_text") or "") < 50
+                                        and len(d.get("description") or "") < 50) else "",
             })
             per_brand[slug] = per_brand.get(slug, 0) + 1
     with OUT_CSV.open("w", encoding="utf-8-sig", newline="") as f:
