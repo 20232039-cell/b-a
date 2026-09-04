@@ -173,7 +173,7 @@ jobs:
           git diff --cached --quiet && { echo "변화 없음"; exit 0; }
           git commit -m "OCR 결과 — $(ls data/crawl/ocr/*.jsonl | wc -l)개 브랜드 (Actions)"
           for i in 1 2 3; do
-            git pull --rebase origin "$DATA_BRANCH" && git push && exit 0
+            git pull --rebase --autostash origin "$DATA_BRANCH" && git push && exit 0
             echo "푸시 실패, 재시도 $i"; sleep 10
           done
           exit 1
