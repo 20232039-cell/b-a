@@ -525,8 +525,48 @@ _COMPOUND = [("sleeve", "length"), ("소매", "길이"), ("어깨", "너비"), (
 # 소수점 두 자리도 받는다 — 「31.75」 한 칸 때문에 그 아래 사이즈 줄을 통째로 버렸다(far-from-what, 2026-09-04)
 _NUM = r"\d{1,3}(?:\.\d{1,2})?"
 # 사이즈 이름 뒤에 올 수 있는 것: 「(여성용)」「size small」「|」「:」 — badblood·rough-side(2026-09-04)
-_ROW_LEAD = r"(?:\s*(?:size)?\s*(?:small|medium|large|x-?small|x-?large|free)?\s*(?:\([^)]{0,12}\))?\s*[:：\-|]?\s*)"
+# 그리고 「1 size 29-30 81 102 …」처럼 라벨에 없는 인치 표기가 한 칸 끼기도 한다(rough-side). 이 칸을
+# 값으로 세면 그 줄이 통째로 버려지거나(size {}) 라벨이 한 칸씩 밀린다(기장 95·어깨 116cm).
+_ROW_LEAD = r"(?:\s*(?:size)?\s*(?:small|medium|large|x-?small|x-?large|free)?\s*(?:\([^)]{0,12}\))?\s*[:：\-|]?\s*(?:\d{1,2}\s*[-~]\s*\d{1,2}\s+)?)"
 _KNOWN = re.compile(r"^(?:" + SIZE_LABELS[1:-1] + r"|crotch|inseam|rise|arm|암홀|밑위|가슴둘레|허리둘레|밑단둘레|어깨너비|소매길이|가슴단면)", re.I)
+
+
+def extract_size_from_tables(soup) -> dict[str, list[float]]:
+    """진짜 <table> 이면 칸 단위로 읽는다. 글자열로 펴면 라벨에 없는 칸이 첫 라벨로 밀려 들어간다 —
+    rough-side 는 첫 칸이 「1 size 95」(95·100·105 는 한국 사이즈 번호)라 843벌이 통째로 한 칸씩
+    어긋나 있었다(어깨 116cm, 기장 95cm — 2026-09-04). 칸 자리는 어긋날 수가 없다:
+        ['Size cm', '기장', '가슴둘레', '어깨', '소매']
+        ['1 size 95', '68',  '116',   '49',  '28.5']
+    """
+    best: dict[str, list[float]] = {}
+    for tb in soup.find_all("table"):
+        rows = []
+        for tr in tb.find_all("tr"):
+            cells = [c.get_text(" ", strip=True) for c in tr.find_all(["th", "td"])]
+            if any(cells):
+                rows.append(cells)
+        if len(rows) < 2:
+            continue
+        for hi, head in enumerate(rows[:3]):
+            labels = [re.sub(r"[().\s]", "", c).lower() for c in head]
+            known = [i for i, l in enumerate(labels) if _KNOWN.match(l)]
+            if len(known) < 2:
+                continue
+            cols: dict[str, list[float]] = {}
+            for r in rows[hi + 1:hi + 10]:
+                if len(r) != len(head):
+                    continue
+                for i in known:
+                    m = re.fullmatch(r"\s*(\d{1,3}(?:\.\d{1,2})?)\s*(?:cm)?\s*", r[i] or "")
+                    if not m:
+                        continue
+                    v = float(m.group(1))
+                    if 3 <= v <= 200:
+                        cols.setdefault(labels[i], []).append(v)
+            if len(cols) > len(best):
+                best = cols
+            break
+    return best
 
 
 def _head_labels(head: str) -> list[list[str]]:
@@ -779,7 +819,10 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
         description = (ld_text if len(ld_text) >= 100 or len(ld_text) >= len(body_text) else body_text)[:4000]
     description_source = "json-ld" if description == ld_text[:4000] and ld_text else ("html" if body_text else "")
     detail_text = body_text[:4000]
-    size_table = extract_size_table(str(soup))   # 환산표를 걷어낸 문서에서 — 위 decompose 참고
+    # 표가 진짜 <table> 이면 칸 단위가 정확하다. 글자열 파서는 그 다음이다.
+    size_table = extract_size_from_tables(soup)
+    if len(size_table) < 2:
+        size_table = extract_size_table(str(soup))   # 환산표를 걷어낸 문서에서 — 위 decompose 참고
 
     # 상세 이미지 — 이미지로만 설명하는 매장(matin-kim 1,170건 글 0자)의 설명은 여기 들어 있다.
     # OCR(scripts/ocr_detail_images.py)의 입력. 대표컷·갤러리·아이콘·스킨 자산은 뺀다.
@@ -835,7 +878,8 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
 
 # ─── 브랜드 하나 전체 ───
 
-def crawl_brand(http: PoliteSession, shop: Shop, refresh: bool, log, refetch_ids: set[int] | None = None) -> dict:
+def crawl_brand(http: PoliteSession, shop: Shop, refresh: bool, log, refetch_ids: set[int] | None = None,
+                refetch_force: bool = False) -> dict:
     out_path = CRAWL_DIR / f"{shop.slug}.jsonl"
     done: dict[int, dict] = {}
     if out_path.exists() and not refresh:
@@ -869,7 +913,9 @@ def crawl_brand(http: PoliteSession, shop: Shop, refresh: bool, log, refetch_ids
         todo = []
         for no in sorted(refetch_ids):
             # 이미 새 파서로 받은 행(size_table 필드가 있다)은 건너뛴다 — 중간에 멈춰도 이어서 간다.
-            if "size_table" in done.get(no, {}):
+            # --refetch-force 는 그 판단을 무시한다: 파서를 고친 뒤 같은 상품을 다시 읽어야 할 때 쓴다
+            # (rough-side 843벌은 size_table 필드가 있지만 값이 한 칸씩 밀려 있었다, 2026-09-04).
+            if not refetch_force and "size_table" in done.get(no, {}):
                 continue
             prev = done.get(no, {}).get("source_url", "")
             todo.append((no, prev if product_no_of(prev) else f"{shop.base}/product/detail.html?product_no={no}"))
@@ -921,6 +967,15 @@ def crawl_brand(http: PoliteSession, shop: Shop, refresh: bool, log, refetch_ids
             d["category_names"] = [shop.categories.get(c, str(c)) for c in cates]
             d["brand_slug"] = shop.slug
             d["crawled_at"] = datetime.now(KST).strftime("%Y-%m-%dT%H:%M:%S")
+            # 마지막 줄이 이기므로, 새로 받은 값이 빈 채로 옛 값을 덮으면 데이터가 사라진다.
+            # 매장이 품절 상품의 사이즈 아코디언을 내리는 경우가 있어 실제로 일어난다(rough-side).
+            prev_st = (done.get(no) or {}).get("size_table")
+            if prev_st and not d.get("size_table"):
+                d["size_table"] = prev_st
+                d["size_table_kept"] = True
+            for k in ("detail_text", "description"):
+                if len(d.get(k) or "") < len((done.get(no) or {}).get(k) or "") // 2:
+                    d[k] = (done.get(no) or {}).get(k)
             f.write(json.dumps(d, ensure_ascii=False) + "\n")
             f.flush()
             done[no] = d
@@ -1066,6 +1121,7 @@ def main():
     ap.add_argument("--refresh", action="store_true", help="이미 받은 상품도 다시 받는다")
     ap.add_argument("--build-csv", action="store_true", help="크롤 없이 jsonl → CSV 만")
     ap.add_argument("--refetch-ids", help="slug<TAB>product_no 목록 파일 — 그 상품만 새 파서로 다시 받는다")
+    ap.add_argument("--refetch-force", action="store_true", help="이미 size_table 필드가 있어도 다시 받는다(파서를 고친 뒤)")
     args = ap.parse_args()
 
     CRAWL_DIR.mkdir(parents=True, exist_ok=True)
@@ -1111,7 +1167,7 @@ def main():
 
     summaries = []
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        futs = {ex.submit(crawl_brand, http, shop, args.refresh, log, refetch.get(shop.slug) if refetch else None): shop for shop in shops}
+        futs = {ex.submit(crawl_brand, http, shop, args.refresh, log, refetch.get(shop.slug) if refetch else None, args.refetch_force): shop for shop in shops}
         for fut in as_completed(futs):
             shop = futs[fut]
             try:
