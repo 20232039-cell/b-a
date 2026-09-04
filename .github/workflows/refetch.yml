@@ -31,6 +31,10 @@ on:
         description: "러너(묶음) 수 — 계정 동시 실행 한도 20"
         required: false
         default: "20"
+      max_minutes:
+        description: "브랜드 하나에 쓸 시간 상한(분). 느린 매장이 run 전체를 붙잡지 않게 한다"
+        required: false
+        default: "45"
 
 env:
   DATA_BRANCH: crawl/cafe24-full-catalog
@@ -111,7 +115,8 @@ jobs:
       - name: 묶음 ${{ matrix.bucket }} (요청 ${{ matrix.load }})
         run: |
           python scripts/refetch_sizes.py --brands all --fields "${{ inputs.fields }}" \
-            --select "${{ inputs.select }}" --units "${{ matrix.units }}" --out-dir _parts
+            --select "${{ inputs.select }}" --units "${{ matrix.units }}" --out-dir _parts \
+            --max-minutes "${{ inputs.max_minutes || '45' }}"
       - uses: actions/upload-artifact@v4
         with:
           name: refetch-b${{ matrix.bucket }}

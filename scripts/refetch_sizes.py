@@ -39,7 +39,7 @@ def wants(d: dict, select: str, cat: str) -> bool:
 
 
 def refetch(http: cc.PoliteSession, shop: cc.Shop, only_missing: bool, log, fields=("size",), select="no-size", cats=None,
-            shard=(0, 1), out_dir: Path | None = None) -> dict:
+            shard=(0, 1), out_dir: Path | None = None, max_minutes: float = 0) -> dict:
     """shard=(k, n): 대상을 product_no 순으로 n등분해 k번째만. out_dir 를 주면 본 파일을 건드리지 않고 갱신한 행만
     out_dir/<slug>.<k>.jsonl 에 쓴다 — Actions 러너 여럿이 같은 브랜드를 나눠 받을 때(collect 가 합친다)."""
     path = cc.CRAWL_DIR / f"{shop.slug}.jsonl"
@@ -56,7 +56,13 @@ def refetch(http: cc.PoliteSession, shop: cc.Shop, only_missing: bool, log, fiel
     todo = todo[k::n]
     touched: list[int] = []
     got = fail = 0
+    started = time.time()
+    # 한 매장이 유독 느리면 그 브랜드만 접고 나머지를 살린다 — amomento 는 259건에 요청당 25초가 걸려
+    # (우리 대기는 1초다) 묶음 하나가 전체 run 을 108분 붙잡았다(2026-09-04). 나머지 11묶음은 32분 안에 끝났다.
     for i, no in enumerate(todo, 1):
+        if max_minutes and (time.time() - started) / 60 > max_minutes:
+            log(f"[{shop.slug}] 시간 상한 {max_minutes:.0f}분 초과 — {i - 1}/{len(todo)} 에서 접는다(나머지는 다음 실행에)")
+            break
         d = rows[no]
         url = d.get("source_url", "")
         url = url if cc.product_no_of(url) else f"{shop.base}/product/detail.html?product_no={no}"
@@ -105,6 +111,7 @@ def main():
     ap.add_argument("--select", default="no-size", choices=["no-size", "short-desc-or-no-size", "garments", "all"])
     ap.add_argument("--shard", default="1/1", help="k/n (Actions 샤딩)")
     ap.add_argument("--out-dir", help="갱신 행만 조각 파일로 (collect 가 합침)")
+    ap.add_argument("--max-minutes", type=float, default=0, help="브랜드 하나에 쓸 시간 상한(분) — 넘으면 그 브랜드만 접는다")
     ap.add_argument("--plan", action="store_true", help="브랜드별 대상 수만 JSON 으로 출력 (매트릭스 계획용)")
     ap.add_argument("--units", help="러너 하나가 동시에 맡을 (브랜드:k/n) 묶음, 쉼표로 — 계정 동시 실행 한도(20잡) 안에서 처리량을 올린다")
     args = ap.parse_args()
@@ -141,7 +148,7 @@ def main():
             with lock:
                 print(f"{time.strftime('%H:%M:%S')} {m}", flush=True)
         with ThreadPoolExecutor(max_workers=max(1, len(units))) as ex:
-            for fut in as_completed([ex.submit(refetch, http, sh, False, ulog, fields, args.select, cats.get(sh.slug), shard_u, out_dir) for sh, shard_u in units]):
+            for fut in as_completed([ex.submit(refetch, http, sh, False, ulog, fields, args.select, cats.get(sh.slug), shard_u, out_dir, args.max_minutes) for sh, shard_u in units]):
                 fut.result()
         return
     if args.plan:
@@ -160,7 +167,7 @@ def main():
             print(f"{time.strftime('%H:%M:%S')} {m}", flush=True)
 
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        for fut in as_completed([ex.submit(refetch, http, sh, args.only_missing, log, fields, args.select, cats.get(sh.slug), shard, out_dir) for sh in shops]):
+        for fut in as_completed([ex.submit(refetch, http, sh, args.only_missing, log, fields, args.select, cats.get(sh.slug), shard, out_dir, args.max_minutes) for sh in shops]):
             fut.result()
 
 
