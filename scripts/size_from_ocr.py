@@ -224,12 +224,20 @@ def parse_flat(text: str) -> tuple[list[str], dict[str, list[float]]] | None:
 def drop_inches(st: dict[str, list]) -> dict[str, list]:
     """cm 과 inch 를 나란히 적은 표 — 「가슴 [59.0, 23.2]」는 두 사이즈가 아니라 한 값의 두 단위다
     (59.0 / 23.2 = 2.54). far-from-what 51개 표가 전부 이 꼴이었다(2026-09-04)."""
+    def num(x):
+        try:
+            return float(str(x).replace(",", "."))
+        except (TypeError, ValueError):
+            return None
+
     out = {}
     for k, v in st.items():
         if not isinstance(v, list) or len(v) < 2:
             out[k] = v
             continue
-        inch = {j for i, a in enumerate(v) for j, b in enumerate(v)
+        # 브라우저가 거둔 표는 값이 문자열이다(「61」) — 숫자로 못 읽는 칸은 그냥 남긴다
+        ns = [num(x) for x in v]
+        inch = {j for i, a in enumerate(ns) for j, b in enumerate(ns)
                 if i != j and a and b and abs(a / b - 2.54) < 0.04}
         out[k] = [x for j, x in enumerate(v) if j not in inch] if inch else v
     return out

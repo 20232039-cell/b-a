@@ -40,8 +40,21 @@ def find_exe() -> str | None:
 
 
 def read_table(page) -> dict[str, list[str]]:
-    """치수 낱말이 든 표를 찾아 {라벨: [값…]} 로. 정방향(헤더가 라벨)·전치(첫 칸이 라벨) 둘 다."""
-    for t in page.query_selector_all("table"):
+    """치수 낱말이 든 표를 찾아 {라벨: [값…]} 로. 정방향(헤더가 라벨)·전치(첫 칸이 라벨) 둘 다.
+    상세는 iframe 안에 있는 스킨이 있어 page.frames 를 모두 본다."""
+    for fr in list(page.frames):
+        got = _read_table_in(fr)
+        if got:
+            return got
+    return {}
+
+
+def _read_table_in(page) -> dict[str, list[str]]:
+    try:
+        tables = page.query_selector_all("table")
+    except Exception:
+        return {}
+    for t in tables:
         txt = t.inner_text() or ""
         if not SIZE_WORD.search(txt):
             continue
@@ -71,20 +84,48 @@ def read_table(page) -> dict[str, list[str]]:
     return {}
 
 
+def open_details(page) -> None:
+    """상세를 실제로 그리게 만든다.
+
+    diafvine 은 사이즈표가 DETAILS 탭 안에 있어, 페이지만 열고 기다리면 #prdDetail 이
+    공백 문자 8~10자뿐이다(2026-09-04 사람이 화면으로 확인). 탭을 누르고 끝까지 내려
+    게으른 이미지·표까지 그려지게 한다."""
+    for label in ("DETAILS", "상세정보", "상세보기", "DETAIL", "SIZE", "사이즈"):
+        try:
+            el = page.get_by_text(label, exact=False).first
+            if el and el.is_visible(timeout=800):
+                el.click(timeout=1500)
+                page.wait_for_timeout(700)
+                break
+        except Exception:
+            continue
+    try:
+        for _ in range(6):
+            page.evaluate("window.scrollBy(0, document.body.scrollHeight/5)")
+            page.wait_for_timeout(450)
+        page.evaluate("window.scrollTo(0, 0)")
+    except Exception:
+        pass
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--brands", required=True)
     ap.add_argument("--limit", type=int, default=50, help="브랜드마다 최대 상품 수")
     ap.add_argument("--delay", type=float, default=1.2)
-    ap.add_argument("--only-missing", action="store_true",
-                    help="사이즈가 이미 있는 상품은 건너뛴다")
+    ap.add_argument("--only-missing", choices=["size", "material", "any"], default="",
+                    help="size: 사이즈 없는 것만 · material: 소재 태그 없는 것만 · any: 둘 중 하나라도 없는 것")
     args = ap.parse_args()
     from playwright.sync_api import sync_playwright
 
-    sizes = {}
+    sizes, mats = {}, {}
     p = DATA / "product_sizes.json"
-    if args.only_missing and p.exists():
+    if args.only_missing in ("size", "any") and p.exists():
         sizes = json.loads(p.read_text(encoding="utf-8"))
+    p3 = DATA / "product_tags_full.json"
+    if args.only_missing in ("material", "any") and p3.exists():
+        tg = json.loads(p3.read_text(encoding="utf-8"))
+        mats = {u for u, v in tg.items() if (v.get("tags") or {}).get("material")}
 
     OUT.mkdir(parents=True, exist_ok=True)
     exe = find_exe()
@@ -105,22 +146,40 @@ def main():
                 continue
             recs = [json.loads(l) for l in src.read_text(encoding="utf-8").splitlines() if l.strip()]
             todo = [d for d in recs if d.get("source_url")]
-            if args.only_missing:
+            if args.only_missing == "size":
                 todo = [d for d in todo if d["source_url"] not in sizes]
+            elif args.only_missing == "material":
+                todo = [d for d in todo if d["source_url"] not in mats]
+            elif args.only_missing == "any":
+                todo = [d for d in todo if d["source_url"] not in sizes or d["source_url"] not in mats]
             todo = todo[:args.limit]
             got_t = got_i = 0
             with (OUT / f"{brand}.jsonl").open("a", encoding="utf-8") as fh:
                 for d in todo:
                     try:
                         page.goto(d["source_url"], wait_until="domcontentloaded", timeout=60000)
-                        page.wait_for_timeout(2500)
+                        page.wait_for_timeout(1500)
+                        open_details(page)
+                        try:
+                            page.wait_for_load_state("networkidle", timeout=8000)
+                        except Exception:
+                            pass
                         table = read_table(page)
+                        # 프레임·선택자를 모두 보고 가장 긴 글을 쓴다 — 첫 선택자가 빈 껍데기인
+                        # 스킨이 있다(diafvine #prdDetail 이 공백 문자 8자).
                         desc = ""
-                        for sel in ("#prdDetail", ".xans-product-detail", ".detailArea", "body"):
-                            el = page.query_selector(sel)
-                            if el:
-                                desc = " ".join((el.inner_text() or "").split())[:6000]
-                                break
+                        for fr in list(page.frames):
+                            for sel in ("#prdDetail", ".xans-product-detail", ".detailArea",
+                                        "#detail", ".prd-detail", "body"):
+                                try:
+                                    el = fr.query_selector(sel)
+                                except Exception:
+                                    continue
+                                if not el:
+                                    continue
+                                t = " ".join((el.inner_text() or "").split())
+                                if len(t) > len(desc):
+                                    desc = t[:8000]
                         imgs = []
                         for im in page.query_selector_all("img"):
                             s = im.get_attribute("src") or im.get_attribute("data-src") or ""

@@ -28,9 +28,9 @@ on:
         required: false
         default: "60"
       only_missing:
-        description: "true 면 사이즈가 이미 있는 상품은 건너뛴다"
+        description: "size(사이즈 없는 것) | material(소재 없는 것) | any | none"
         required: false
-        default: "true"
+        default: "any"
 
 env:
   DATA_BRANCH: crawl/cafe24-full-catalog
@@ -91,7 +91,10 @@ jobs:
           python -m playwright install --with-deps chromium
       - name: ${{ matrix.brand }} 열기
         run: |
-          ONLY=""; [ "${{ inputs.only_missing }}" = "true" ] && ONLY="--only-missing"
+          ONLY=""
+          case "${{ inputs.only_missing }}" in
+            size|material|any) ONLY="--only-missing ${{ inputs.only_missing }}" ;;
+          esac
           python scripts/browser_collect.py --brands "${{ matrix.brand }}" \
             --limit "${{ inputs.limit }}" $ONLY
       - uses: actions/upload-artifact@v4
