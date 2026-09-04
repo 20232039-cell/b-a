@@ -129,8 +129,11 @@ jobs:
           # 예의: 한 브랜드를 N조각으로 나누면 같은 호스트를 N군데서 두드린다. 조각마다 대기를 N배로
           # 늘려야 매장이 받는 요청이 초당 2회로 유지된다(2026-09-04, 재수집 때 20초 응답을 겪고 정리).
           D=$(python3 -c "print(0.5*$N)")
+          # 공용 이미지 CDN(cafe24img)은 매장 원본 서버가 아니라 카페24가 수만 매장에 쓰는 곳이라
+          # 조금 빠르게 받는다. 사이즈 없는 상품 그림의 38%(프리즘웍스는 81%)가 여기서 온다.
+          C=$(python3 -c "print(0.25*$N)")
           python scripts/ocr_detail_images.py --brands "${{ matrix.brand }}" \
-            --max-images "${{ inputs.max_images }}" --procs 4 --delay "$D" $ALL \
+            --max-images "${{ inputs.max_images }}" --procs 4 --delay "$D" --cdn-delay "$C" $ALL \
             --shard "${{ matrix.shard }}/$N" --out-dir _parts --select "${{ inputs.select || 'short' }}"
       - uses: actions/upload-artifact@v4
         with:

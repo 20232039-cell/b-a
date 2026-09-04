@@ -52,8 +52,21 @@ _last: dict[str, float] = {}
 _lock = threading.Lock()
 
 
-def polite_get(url: str, delay: float) -> bytes | None:
+# 매장 원본 서버와 공용 이미지 CDN 을 같은 잣대로 묶을 이유가 없다. 상세 이미지의 상당수는
+# 카페24가 수만 매장에 공용으로 쓰는 이미지 서버에서 온다(프리즘웍스 81% · 다이아프바인 99%,
+# 2026-09-04 실측). 매장 도메인은 지금 속도 그대로 두고, 공용 CDN 만 조금 빠르게 받는다.
+CDN_HOSTS = ("cafe24img.poxo.com", "img.cafe24.com")
+CDN_SUFFIX = (".cafe24img.com", ".poxo.com")
+
+
+def is_cdn(host: str) -> bool:
+    return host in CDN_HOSTS or host.endswith(CDN_SUFFIX)
+
+
+def polite_get(url: str, delay: float, cdn_delay: float | None = None) -> bytes | None:
     host = urlparse(url).netloc
+    if cdn_delay is not None and is_cdn(host):
+        delay = cdn_delay
     with _lock:
         wait = delay - (time.monotonic() - _last.get(host, 0))
         if wait > 0:
@@ -155,7 +168,7 @@ HINT_NAME = re.compile(r"size|detail|info|spec|measure|fabric|\uc0ac\uc774\uc988
 
 def process_brand(slug: str, only_short: bool, max_images: int, delay: float, log,
                   shard: tuple[int, int] = (0, 1), out_dir: Path | None = None, select: str = "short",
-                  workers: int = 1) -> dict:
+                  workers: int = 1, cdn_delay: float | None = None) -> dict:
     """shard=(k, n): 대상을 product_no 순으로 n등분해 k번째만 본다 — kirsh(1,800건)처럼 큰 브랜드를
     러너 여럿에 나눌 때. out_dir 를 주면 crawl/ocr/<slug>.jsonl 대신 out_dir/<slug>.<k>.jsonl 조각으로 쓴다
     (Actions 의 collect 가 조각을 합친다). 이미 끝난 상품 판단은 항상 crawl/ocr/<slug>.jsonl 기준."""
@@ -196,7 +209,7 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
             rest = [u for u in cand if u not in hinted]
             picked = hinted[:max_images] + rest[-(max_images - len(hinted[:max_images])):] if max_images > len(hinted[:max_images]) else hinted[:max_images]
             for url in picked:
-                data = polite_get(url, delay)
+                data = polite_get(url, delay, cdn_delay)
                 if not data or len(data) < MIN_BYTES:
                     continue
                 with wlock:
@@ -237,6 +250,7 @@ def main():
     ap.add_argument("--max-images", type=int, default=MAX_IMAGES)
     ap.add_argument("--procs", type=int, default=3, help="동시에 볼 브랜드 수 (tesseract 가 CPU 를 쓴다 — 코어 수 이하로)")
     ap.add_argument("--delay", type=float, default=0.5)
+    ap.add_argument("--cdn-delay", type=float, default=0.25, help="공용 이미지 CDN(cafe24img) 에만 쓰는 대기")
     ap.add_argument("--shard", default="1/1", help="k/n — 대상을 n등분해 k번째(1부터)만 (Actions 샤딩)")
     ap.add_argument("--out-dir", help="조각 파일을 쓸 폴더 (crawl/ocr/<slug>.jsonl 대신 <slug>.<k>.jsonl)")
     ap.add_argument("--select", default="short", choices=["short", "all", "no-size"], help="short=설명 짧은 것(기본) · all=전부 · no-size=사이즈 표 없는 옷")
@@ -262,7 +276,7 @@ def main():
         # 하나만 쓰고 있었다. 호스트 속도는 polite_get 이 호스트별로 잠가 지킨다.
         inner = args.procs if len(slugs) == 1 else 1
         outer = 1 if len(slugs) == 1 else args.procs
-        futs = [ex.submit(process_brand, s, not args.all, args.max_images, args.delay, log, shard, out_dir, select, inner) for s in slugs]
+        futs = [ex.submit(process_brand, s, not args.all, args.max_images, args.delay, log, shard, out_dir, select, inner, args.cdn_delay) for s in slugs]
         for fut in as_completed(futs):
             try:
                 results.append(fut.result())
