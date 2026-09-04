@@ -382,6 +382,10 @@ def load_categories(http: PoliteSession, shop: Shop, soup: BeautifulSoup, html_t
         shop.product_urls.setdefault(no, href)
 
 
+# 임직원·사내·관계자 전용 칸은 손님이 살 수 있는 상품이 아니다. 목록에서 아예 뺀다(사람 결정 2026-09-04).
+PRIVATE_CATE = re.compile(r"임직원|직원|사내|스태프|관계자|가족|비공개|staff|employee|internal|wholesale|b2b", re.I)
+
+
 def crawl_category_lists(http: PoliteSession, shop: Shop, max_pages: int = 80) -> None:
     """목록을 훑어 product_no → 카테고리 소속을 얻는다. 사이트맵이 없었으면 상품 URL 도 여기서 채운다."""
     pending = sorted(shop.categories)
@@ -391,6 +395,10 @@ def crawl_category_lists(http: PoliteSession, shop: Shop, max_pages: int = 80) -
         if cate_no in visited:
             continue
         visited.add(cate_no)
+        name = shop.categories.get(cate_no, "")
+        if name and PRIVATE_CATE.search(str(name)):
+            shop.errors.append(f"임직원 전용으로 보여 건너뜀: {name} (cate_no={cate_no})")
+            continue
         for list_path in sorted(shop.list_paths):
             _crawl_one_list(http, shop, cate_no, list_path, max_pages)
         pending += [c for c in shop.categories if c not in visited and c not in pending]
@@ -459,7 +467,7 @@ SIZE_LABELS = (r"(총\s*장|총\s*기장|기장|어깨\s*너비|어깨|가슴\s*
                r"허벅지\s*단면|허벅지|밑단\s*단면|밑단|엉덩이|힙|sleeve\s*length|total\s*length|shoulder\s*width|chest\s*width|"
                r"length|shoulder|chest|sleeve|waist|hip|thigh|hem|rise|inseam)")
 # 「Length - 61cm Shoulder - 55cm」(anotheryouth)처럼 붙임표로 잇는 표기도 읽는다
-SIZE_RX = re.compile(SIZE_LABELS + r"\s*(?:\([^)]{0,20}\))?\s*[:：\-–—]?\s*((?:\d{1,3}(?:\.\d)?\s*(?:cm)?\s*[/,|]?\s*){1,8})", re.I)
+SIZE_RX = re.compile(SIZE_LABELS + r"\s*(?:\([^)]{0,20}\))?\s*[:：\-–—]?\s*((?:\d{1,4}(?:\.\d)?\s*(?:cm|mm)?\s*[/,|]?\s*){1,8})", re.I)
 
 
 def parse_json_ld_product(html_text: str) -> dict:
@@ -485,11 +493,14 @@ def extract_size_table(html_text: str) -> dict[str, list[float]]:
     t = re.sub(r'<script type="application/ld\+json">.*?</script>', " ", html_text, flags=re.S)
     t = htmlmod.unescape(re.sub(r"<[^>]+>", " ", t))
     t = re.sub(r"[ \t\r\n]+", " ", t)
+    # 밀리미터로 적는 매장(mischief 「SIZE(mm) S 허리 345 기장 1020」)은 10 으로 나눈다.
+    mm = bool(re.search(r"(?:size|사이즈|단위)\s*[（(]?\s*mm\s*[)）]?", t, re.I))
+    lo, hi = (30, 2000) if mm else (3, 200)
     rows: dict[str, list[float]] = {}
     for m in SIZE_RX.finditer(t):
         label = re.sub(r"\s+", "", m.group(1)).lower()
-        nums = [float(x) for x in re.findall(r"\d{1,3}(?:\.\d)?", m.group(2))]
-        nums = [n for n in nums if 3 <= n <= 200]
+        nums = [float(x) for x in re.findall(r"\d{1,4}(?:\.\d)?" if mm else r"\d{1,3}(?:\.\d)?", m.group(2))]
+        nums = [n / 10 if mm else n for n in nums if lo <= n <= hi]
         if nums and label not in rows:
             rows[label] = nums[:8]
     if len(rows) < 2:
@@ -716,6 +727,7 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
     for sel in ("#prdDetail", "#details", ".xans-product-additional", ".product-detail-block", ".xans-product-detaildesign", "#prdInfo",
                 ".more-info-content", ".more-infos",          # open-yy: 아코디언 DETAILS(소재·핏·혼용률)
                 ".accordion-cont", ".md-info-accordion",      # divein: 디테일 + SIZE(cm) 표
+                ".accordion-desc", ".accordion-list",         # lecyto: PRODUCT INFO(혼용률) + SIZE GUIDE
                 ".prd-detail-desc-list", ".size-guide",       # rough-side: 제품 설명 탭 + 사이즈 가이드 탭
                 ".detailArea"):                               # coor: 상품간략설명 + Detail 실측
         for el in soup.select(sel):
@@ -742,7 +754,7 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
     SKIP_IMG = re.compile(r"\.(gif|svg)(\?|$)|/ico_|icon|btn_|logo|blank|spacer|txt_naver|sizeguide|img\.echosting\.cafe24\.com|/skin/|badge|arrow|\.png\?v=", re.I)
     detail_images: list[str] = []
     for el in soup.select("#prdDetail, #details, .xans-product-detaildesign, .xans-product-additional, .product-detail-block, .xans-product-detail, "
-                          ".more-info-content, .accordion-cont, .prd-detail-desc-list, .detailArea"):
+                          ".more-info-content, .accordion-cont, .accordion-desc, .prd-detail-desc-list, .detailArea"):
         for img in el.select("img"):
             src = img.get("ec-data-src") or img.get("data-src") or img.get("data-original") or img.get("src") or ""
             src = _fix_url(src.strip(), shop.base)
@@ -812,6 +824,13 @@ def crawl_brand(http: PoliteSession, shop: Shop, refresh: bool, log, refetch_ids
     shop.base = f"{final.scheme}://{final.netloc}"
     load_categories(http, shop, BeautifulSoup(home.text, "lxml"), home.text)
 
+    # 회원 전용으로 이미 확인된 상품은 다시 열지 않는다(사람 결정 2026-09-04)
+    mo_path = CRAWL_DIR / "_members_only.json"
+    mo_all = json.loads(mo_path.read_text(encoding="utf-8")) if mo_path.exists() else {}
+    members_only: set[int] = set(mo_all.get(shop.slug, []))
+    if members_only:
+        log(f"[{shop.slug}] 회원 전용 {len(members_only)}건은 건너뛴다")
+
     if refetch_ids is not None:
         # 지정한 상품만 다시 받는다 — 설명·상세 이미지·주소를 새 파서로 채우는 용도(2026-09-02).
         # 저장된 주소에 식별자가 있으면 그 주소, 없으면 cafe24 공통 주소(detail.html?product_no=).
@@ -831,7 +850,7 @@ def crawl_brand(http: PoliteSession, shop: Shop, refresh: bool, log, refetch_ids
     else:
         enumerate_by_sitemap(http, shop)
         crawl_category_lists(http, shop)
-        todo = [(no, u) for no, u in shop.product_urls.items() if no not in done]
+        todo = [(no, u) for no, u in shop.product_urls.items() if no not in done and no not in members_only]
     log(f"[{shop.slug}] 카테고리 {len(shop.categories)} · 상품 URL {len(shop.product_urls)} ({shop.enumerated_by}) · 받을 것 {len(todo)} · 이미 {len(done)}")
 
     fetched = 0
@@ -853,8 +872,10 @@ def crawl_brand(http: PoliteSession, shop: Shop, refresh: bool, log, refetch_ids
                 shop.failures.append({"product_no": no, "url": url, "reason": f"http {getattr(r, 'status_code', 'ERR')}"})
                 continue
             if len(r.text) < 2000 and "member/login" in r.text:
-                # 회원 전용 상품 — badblood 206건. 받을 수 없는 게 맞다.
+                # 회원 전용 상품 — badblood 104건. 받을 수 없는 게 맞고, 다음부터는 열지도 않는다
+                # (사람 결정 2026-09-04). _members_only.json 에 남겨 다음 실행이 건너뛴다.
                 failed += 1
+                members_only.add(no)
                 shop.failures.append({"product_no": no, "url": url, "reason": "members-only"})
                 continue
             d = parse_detail(r.text, url, shop)
@@ -878,6 +899,9 @@ def crawl_brand(http: PoliteSession, shop: Shop, refresh: bool, log, refetch_ids
     if shop.failures:
         (CRAWL_DIR / f"_failures_{shop.slug}.jsonl").write_text(
             "\n".join(json.dumps(x, ensure_ascii=False) for x in shop.failures) + "\n", encoding="utf-8")
+    if members_only:
+        mo_all[shop.slug] = sorted(members_only)
+        mo_path.write_text(json.dumps(mo_all, ensure_ascii=False, indent=1), encoding="utf-8")
     summary = {
         "slug": shop.slug, "ok": True, "base": shop.base, "enumerated_by": shop.enumerated_by,
         "categories": len(shop.categories), "product_urls": len(shop.product_urls),
