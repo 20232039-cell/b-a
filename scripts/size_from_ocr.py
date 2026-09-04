@@ -153,11 +153,32 @@ def from_ocr(text: str) -> tuple[list[str] | None, dict[str, list[float]]]:
     return None, rows
 
 
+def sweep_all(st: dict) -> bool:
+    """표 전체가 못 쓰는 경우 — 라벨이 한둘뿐인데 값이 일곱 개 넘게 붙어 있다(매장 공용 안내표거나
+    한 라벨이 표를 통째로 쓸어담은 것). kamien 「총장 [41, 37.5, 31, 39, 51, 109]」이 그 예다."""
+    return len(st) <= 2 and any(isinstance(v, list) and len(v) > 6 for v in st.values())
+
+
+def bad_label(xs: list) -> bool:
+    """사이즈 값은 한 방향으로만 간다(S→M→L). 오르락내리락하면 그 라벨이 두 칸을 섞어 읽은 것이다 —
+    glowny 「length [26, 30, 27, 31]」(앞기장·뒤기장), insilence 「밑단단면 [22.7, 5.0, 23.2, 5.0]」
+    (22.75 가 쪼개짐). 표 전체가 아니라 그 라벨만 버린다 — 나머지 라벨은 멀쩡하다(2026-09-04).
+    """
+    nums = [x for x in xs if isinstance(x, (int, float))]
+    if len(nums) < 4:
+        return False
+    return not (all(a <= b for a, b in zip(nums, nums[1:])) or all(a >= b for a, b in zip(nums, nums[1:])))
+
+
 def normalize_html(st: dict, brand: str = "", girth_keys: set | None = None) -> dict[str, list[float]]:
+    if sweep_all(st):
+        return {}
     out: dict[str, list[float]] = {}
     for k, vals in st.items():
         c = canon_label(k)
         if not c or c in out:
+            continue
+        if bad_label(vals if isinstance(vals, list) else []):
             continue
         girth = "둘레" in k or "circum" in k.lower() or (girth_keys is not None and (brand, c) in girth_keys)
         vs = [v for v in (fix_value(c, str(x), girth) for x in vals) if v is not None]
