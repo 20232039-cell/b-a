@@ -30,6 +30,7 @@ CRAWL = DATA / "crawl"
 OCR = CRAWL / "ocr"
 OUT = DATA / "product_sizes.json"
 
+GARMENT_LABELS = {"Tops", "Pants", "Outerwear", "Knitwear", "Shirts", "Denim", "Skirts", "Dresses"}
 LABELS = json.loads((DATA / "size_labels.json").read_text(encoding="utf-8"))
 RANGES = LABELS["_ranges_cm"]
 ALIAS: dict[str, str] = {}
@@ -245,6 +246,21 @@ def shop_wide_tables(crawl_dir, rows: dict) -> set[tuple[str, str]]:
     return {k for k, (n, cats) in seen.items() if n >= 10 and len(cats) >= 3}
 
 
+# 색만 다른 같은 옷 — 소재·사이즈·디테일이 같다(사람 확인 2026-09-04). 한쪽에만 표가 있으면 물려준다.
+_COLOR = re.compile(
+    r"[\s_\-\(\[/]*(black|white|ivory|beige|navy|blue|grey|gray|charcoal|khaki|olive|brown|cream|pink|red|"
+    r"green|melange|sand|stone|mocha|camel|burgundy|purple|yellow|orange|silver|gold|light|dark|deep|washed|"
+    r"블랙|화이트|아이보리|베이지|네이비|블루|그레이|차콜|카키|올리브|브라운|크림|핑크|레드|그린|멜란지|샌드|모카|카멜|버건디|퍼플)"
+    r"[\s_\-\)\]/]*", re.I)
+
+
+def color_base(name: str) -> str:
+    """상품 이름에서 색 이름과 대괄호를 걷어낸 알맹이 — 같은 옷의 다른 색을 한 묶음으로 묶는 열쇠."""
+    n = re.sub(r"\[[^\]]*\]", "", name or "")
+    n = _COLOR.sub(" ", n)
+    return re.sub(r"\s+", " ", re.sub(r"[^0-9A-Za-z가-힣]+", " ", n)).strip().lower()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--report", action="store_true")
@@ -296,6 +312,27 @@ def main():
             out[r["source_url"]] = {"brand_slug": k[0], "source": source, "size_names": names, "sizes": sizes}
             src[source] += 1
             (per_brand_html if source == "html" else per_brand_ocr)[k[0]] += 1
+    # 색만 다른 형제에게서 사이즈를 물려받는다 — 같은 옷이라 실측이 같다. 어디서 왔는지 남긴다.
+    by_base = defaultdict(list)
+    for k, r in rows.items():
+        by_base[(k[0], color_base(r["name"]))].append(r)
+    lent = 0
+    for key, sibs in by_base.items():
+        if len(sibs) < 2 or not key[1]:
+            continue
+        donor = next((s for s in sibs if s["source_url"] in out), None)
+        if not donor:
+            continue
+        base_entry = out[donor["source_url"]]
+        for r in sibs:
+            if r["source_url"] in out or r.get("category") not in GARMENT_LABELS:
+                continue
+            out[r["source_url"]] = {"brand_slug": r["brand_slug"], "source": "sibling",
+                                    "sibling_of": donor["source_url"],
+                                    "size_names": base_entry["size_names"], "sizes": base_entry["sizes"]}
+            lent += 1
+    if lent:
+        print(f"색만 다른 형제에게서 물려받은 사이즈 {lent}벌")
     OUT.write_text(json.dumps(out, ensure_ascii=False, indent=0), encoding="utf-8")
     print(f"사이즈 있는 상품 {len(out)} / {len(rows)} ({len(out)/len(rows):.0%}) — html {src['html']} · ocr {src['ocr']} → {OUT}")
     lab = Counter(c for e in out.values() for c in e["sizes"])
