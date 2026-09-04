@@ -68,8 +68,30 @@ def polite_get(url: str, delay: float) -> bytes | None:
     return None
 
 
+MAX_W = 1200
+
+
+def preprocess(data: bytes) -> bytes:
+    """흑백 + 가로 1200px 로 줄인다. tesseract 가 픽셀 수에 비례해 느려지는데, 상세 이미지는
+    1800px 짜리도 흔하다 — 줄여도 글자 수는 그대로였다(2026-09-04 실측: 4.3s → 1.5s, 1367자 동일)."""
+    try:
+        from PIL import Image
+        import io
+        im = Image.open(io.BytesIO(data))
+        w, h = im.size
+        im = im.convert("L")
+        if w > MAX_W:
+            im = im.resize((MAX_W, max(1, int(h * MAX_W / w))), Image.LANCZOS)
+        buf = io.BytesIO()
+        im.save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception:
+        return data
+
+
 def ocr_bytes(data: bytes) -> str:
     """tesseract 로 한 장. --psm 6(균일 블록)이 상품 상세의 세로 긴 이미지에 가장 안정적이었다."""
+    data = preprocess(data)
     with tempfile.NamedTemporaryFile(suffix=".img", delete=True) as f:
         f.write(data)
         f.flush()
@@ -90,6 +112,18 @@ def ocr_bytes(data: bytes) -> str:
     joined = "\n".join(lines)
     words = re.findall(r"[가-힣]{2,}|[A-Za-z]{3,}", joined)
     return joined if len(words) >= 3 else ""
+
+
+def _has_size_table(text: str) -> bool:
+    """size_from_ocr 의 파서로 표가 잡히는지 — 잡히면 남은 그림을 읽을 이유가 없다."""
+    try:
+        from size_from_ocr import from_ocr
+    except Exception:
+        return False
+    try:
+        return len(from_ocr(text)[1]) >= 2
+    except Exception:
+        return False
 
 
 def load_latest(path: Path) -> dict[int, dict]:
@@ -120,7 +154,8 @@ HINT_NAME = re.compile(r"size|detail|info|spec|measure|fabric|\uc0ac\uc774\uc988
 
 
 def process_brand(slug: str, only_short: bool, max_images: int, delay: float, log,
-                  shard: tuple[int, int] = (0, 1), out_dir: Path | None = None, select: str = "short") -> dict:
+                  shard: tuple[int, int] = (0, 1), out_dir: Path | None = None, select: str = "short",
+                  workers: int = 1) -> dict:
     """shard=(k, n): 대상을 product_no 순으로 n등분해 k번째만 본다 — kirsh(1,800건)처럼 큰 브랜드를
     러너 여럿에 나눌 때. out_dir 를 주면 crawl/ocr/<slug>.jsonl 대신 out_dir/<slug>.<k>.jsonl 조각으로 쓴다
     (Actions 의 collect 가 조각을 합친다). 이미 끝난 상품 판단은 항상 crawl/ocr/<slug>.jsonl 기준."""
@@ -145,10 +180,13 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
             continue
         todo.append(d)
     todo = todo[k::n]
+    want_size = select == "no-size"
     log(f"[{slug}] OCR 대상 {len(todo)} (이미 {len(done)}, 조각 {k + 1}/{n})")
     n_img = n_txt = 0
-    with out.open("a", encoding="utf-8") as f:
-        for i, d in enumerate(todo, 1):
+    counters = {"img": 0, "txt": 0, "done": 0, "early": 0}
+    wlock = threading.Lock()
+
+    def one(d: dict) -> str:
             texts, imgs = [], []
             # 소재·디테일·사이즈표는 상세 이미지의 「뒤쪽」에 오는 경우가 많다(사람 지적 2026-09-04).
             # 앞에서 자르면 착용컷만 읽고 정작 필요한 표를 놓친다. 그래서 뒤에서부터 고르되,
@@ -161,19 +199,34 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
                 data = polite_get(url, delay)
                 if not data or len(data) < MIN_BYTES:
                     continue
-                n_img += 1
+                with wlock:
+                    counters["img"] += 1
                 t = ocr_bytes(data)
                 imgs.append({"url": url, "chars": len(t)})
                 if t:
                     texts.append(t)
+                # 사이즈 표를 이미 얻었으면 남은 그림은 읽지 않는다 — 표는 대개 한 장에 다 있는데,
+                # 12장을 끝까지 읽느라 시간의 절반을 버리고 있었다(2026-09-04).
+                if want_size and texts and _has_size_table("\n".join(texts)):
+                    with wlock:
+                        counters["early"] += 1
+                    break
             ocr_text = "\n".join(texts)[:6000]
-            if ocr_text:
-                n_txt += 1
-            f.write(json.dumps({"brand_slug": slug, "product_no": d["product_no"], "ocr_text": ocr_text, "images": imgs}, ensure_ascii=False) + "\n")
-            f.flush()
-            if i % 100 == 0:
-                log(f"[{slug}] … {i}/{len(todo)} · 글 나온 상품 {n_txt}")
-    log(f"[{slug}] 끝 — 상품 {len(todo)} · 이미지 {n_img} · 글 나온 상품 {n_txt}")
+            with wlock:
+                counters["done"] += 1
+                if ocr_text:
+                    counters["txt"] += 1
+                if counters["done"] % 100 == 0:
+                    log(f"[{slug}] … {counters['done']}/{len(todo)} · 글 나온 상품 {counters['txt']} · 표 얻고 조기 종료 {counters['early']}")
+            return json.dumps({"brand_slug": slug, "product_no": d["product_no"], "ocr_text": ocr_text, "images": imgs}, ensure_ascii=False)
+
+    with out.open("a", encoding="utf-8") as f:
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+            for line in ex.map(one, todo):
+                f.write(line + "\n")
+                f.flush()
+    n_img, n_txt = counters["img"], counters["txt"]
+    log(f"[{slug}] 끝 — 상품 {len(todo)} · 이미지 {n_img} · 글 나온 상품 {n_txt} · 조기 종료 {counters['early']}")
     return {"slug": slug, "products": len(todo), "images": n_img, "with_text": n_txt}
 
 
@@ -203,9 +256,13 @@ def main():
 
     started = time.time()
     results = []
-    with ThreadPoolExecutor(max_workers=args.procs) as ex:
+    with ThreadPoolExecutor(max_workers=max(1, args.procs)) as ex:
         select = "all" if args.all else args.select
-        futs = [ex.submit(process_brand, s, not args.all, args.max_images, args.delay, log, shard, out_dir, select) for s in slugs]
+            # 브랜드가 하나면(Actions 는 잡마다 한 브랜드) 그 안에서 상품을 나눠 돌린다 — 러너 4코어를
+        # 하나만 쓰고 있었다. 호스트 속도는 polite_get 이 호스트별로 잠가 지킨다.
+        inner = args.procs if len(slugs) == 1 else 1
+        outer = 1 if len(slugs) == 1 else args.procs
+        futs = [ex.submit(process_brand, s, not args.all, args.max_images, args.delay, log, shard, out_dir, select, inner) for s in slugs]
         for fut in as_completed(futs):
             try:
                 results.append(fut.result())

@@ -20,9 +20,9 @@ on:
         required: false
         default: "false"
       shards:
-        description: "브랜드마다 몇 조각으로 나눌지"
+        description: "(미사용 — 조각 수는 브랜드의 그림 수로 자동 결정한다)"
         required: false
-        default: "1"
+        default: ""
       select:
         description: "short(설명 짧은 것) | no-size(사이즈 표 없는 옷) | all"
         required: false
@@ -56,17 +56,46 @@ jobs:
         shell: bash
         run: |
           if [ -n "${{ inputs.brands }}" ]; then
-            list=$(printf '%s\n' ${{ inputs.brands }})
+            list="${{ inputs.brands }}"
           else
-            list=$(ls data/crawl/*.jsonl | xargs -n1 basename | sed 's/\.jsonl$//' | grep -v '^_')
+            list=$(ls data/crawl/*.jsonl | xargs -n1 basename | sed 's/\.jsonl$//' | grep -v '^_' | tr '\n' ' ')
           fi
-          n="${{ inputs.shards }}"; [ -z "$n" ] && n=1
-          matrix=$(printf '%s\n' $list | python3 -c '
-          import sys, json
-          n = int(sys.argv[1])
-          print(json.dumps({"include": [{"brand": b, "shard": k} for b in sys.stdin.read().split() for k in range(1, n + 1)]}))' "$n")
+          # 조각 수를 브랜드마다 「읽을 그림 수」로 정한다. 예전엔 모든 브랜드를 똑같이 n등분해서,
+          # 프리즘웍스 한 잡이 2,200장을 혼자 들고 전체 시간을 정했다(2026-09-04).
+          matrix=$(MAXI="${{ inputs.max_images }}" SEL="${{ inputs.select || 'short' }}" LIST="$list" python3 - <<'PY'
+          import json, os, re, glob, math
+          SKIP = re.compile(r"shipping|delivery|notice|issue|exchange|refund|return|banner|event|coupon|logo|icon|배송|공지|교환|반품", re.I)
+          maxi = int(os.environ.get("MAXI") or 5)
+          sel = os.environ.get("SEL") or "short"
+          slugs = os.environ["LIST"].split() or [os.path.basename(p)[:-6] for p in glob.glob("data/crawl/*.jsonl")]
+          PER = 700          # 잡 하나가 맡을 그림 수 목표
+          inc = []
+          for b in slugs:
+              path = f"data/crawl/{b}.jsonl"
+              if not os.path.exists(path):
+                  continue
+              latest = {}
+              for l in open(path, encoding="utf-8"):
+                  if l.strip():
+                      d = json.loads(l); latest[d["product_no"]] = d
+              imgs = 0
+              for d in latest.values():
+                  if (d.get("price") or 0) <= 1000 or not d.get("detail_images"):
+                      continue
+                  if sel == "no-size" and d.get("size_table"):
+                      continue
+                  cand = [u for u in d["detail_images"] if not SKIP.search(u.rsplit("/", 1)[-1])]
+                  imgs += min(maxi, len(cand))
+              if not imgs:
+                  continue
+              n = max(1, min(12, math.ceil(imgs / PER)))
+              for k in range(1, n + 1):
+                  inc.append({"brand": b, "shard": k, "shards": n})
+          print(json.dumps({"include": inc}))
+          PY
+          )
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
-          echo "브랜드 $(printf '%s\n' $list | wc -l)곳 × 조각 $n"
+          echo "$matrix" | python3 -c "import json,sys; m=json.load(sys.stdin)['include']; print('잡', len(m), '· 브랜드', len({e['brand'] for e in m}))"
 
   ocr:
     needs: plan
@@ -92,13 +121,16 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q tesseract-ocr tesseract-ocr-kor
-          pip install -q requests
-      - name: OCR ${{ matrix.brand }} ${{ matrix.shard }}
+          pip install -q requests pillow
+      - name: OCR ${{ matrix.brand }} ${{ matrix.shard }}/${{ matrix.shards }}
         run: |
           ALL=""; [ "${{ inputs.all }}" = "true" ] && ALL="--all"
-          N="${{ inputs.shards }}"; [ -z "$N" ] && N=1
+          N="${{ matrix.shards }}"
+          # 예의: 한 브랜드를 N조각으로 나누면 같은 호스트를 N군데서 두드린다. 조각마다 대기를 N배로
+          # 늘려야 매장이 받는 요청이 초당 2회로 유지된다(2026-09-04, 재수집 때 20초 응답을 겪고 정리).
+          D=$(python3 -c "print(0.5*$N)")
           python scripts/ocr_detail_images.py --brands "${{ matrix.brand }}" \
-            --max-images "${{ inputs.max_images }}" --procs 1 $ALL \
+            --max-images "${{ inputs.max_images }}" --procs 4 --delay "$D" $ALL \
             --shard "${{ matrix.shard }}/$N" --out-dir _parts --select "${{ inputs.select || 'short' }}"
       - uses: actions/upload-artifact@v4
         with:
