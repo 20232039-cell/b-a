@@ -1,20 +1,10 @@
-# ── 일꾼 저장소(공개)에서 도는 워크플로. 데이터는 비공개 저장소에 있고 매 잡마다 work/ 로 받아 와
-# 그 안에서 돌린 뒤 되돌려 보낸다. 공개 저장소라 Actions 분이 무료다.
-# 필요한 것: 이 저장소 Settings → Secrets and variables → Actions 에 DATA_TOKEN
-# (데이터 저장소의 Contents 를 읽고 쓸 수 있는 파인그레인 토큰).
-# 상세 보정 — 고른 상품만 상세를 다시 열어 사이즈 표·설명을 채운다. 러너에서 돌리는 이유: 세션 컨테이너는
-# 조용해지면 회수돼 35분짜리 일을 중간에 잃는다(2026-09-03 실제로 한 번 잃음).
+# 상세 보정 — 고른 상품만 상세를 다시 열어 사이즈 표·설명을 채운다.
+# 일꾼 저장소(공개)에서 돌고, 데이터는 비공개 저장소에서 work/ 로 받아 그 안에서 작업한 뒤 되돌려 보낸다.
+# 필요한 것: Settings → Secrets and variables → Actions 에 DATA_TOKEN.
 #
-# 병렬: 20개 묶음(계정 동시 실행 한도)에 브랜드를 통째로 나눠 담고, 묶음 하나가 서로 다른 브랜드를 스레드로
-# 동시에 받는다. 한 브랜드는 절대 여러 묶음으로 갈리지 않는다 — 갈리면 호스트당 1초 예의가 깨진다
-# (2026-09-04 run 4: 던스트 10조각·프리즘웍스 7조각이 러너 10대에서 동시에 같은 서버를 두드려 응답이
-#  2초→20초로 늘고 두 묶음이 120분 제한에 걸려 취소됨. 거절(429/403)은 없었다).
-# 조각은 갱신한 행만 _parts/<brand>.<k>.jsonl 로 올리고 collect 가 본 파일에 합친다.
-#
-# select:
-#   no-size                 옷인데 사이즈 표가 없는 것
-#   short-desc-or-no-size   JSON-LD 요약(≤300자)만 있는 것 + 위 (2026-09-03 1회 보정)
-#   all                     전부
+# 병렬: 20개 묶음에 브랜드를 통째로 나눠 담고, 묶음 하나가 서로 다른 브랜드를 스레드로 동시에 받는다.
+# 한 브랜드는 절대 여러 묶음으로 갈리지 않는다 — 갈리면 호스트당 1초 예의가 깨진다
+# (2026-09-04 run 4: 던스트 10조각이 러너 10대에 흔어져 응답이 2초→20초로 늦어졌다).
 
 name: refetch-detail
 
@@ -32,7 +22,7 @@ on:
       select:
         description: "no-size | short-desc-or-no-size | garments | all"
         required: false
-        default: "short-desc-or-no-size"
+        default: "no-size"
       per_shard:
         description: "조각 하나가 맡을 상품 수(브랜드당 조각은 최대 10)"
         required: false
@@ -46,7 +36,7 @@ env:
   DATA_BRANCH: crawl/cafe24-full-catalog
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: refetch-${{ github.ref }}
@@ -75,21 +65,13 @@ jobs:
         run: |
           python scripts/refetch_sizes.py --brands ${{ inputs.brands }} --plan --select "${{ inputs.select }}" > plan.json
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
-          # 계정 동시 실행 한도가 20잡이라(2026-09-04 실측: 79 대기·20 실행) 잡을 늘려도 빨라지지 않는다.
-          # 그래서 (브랜드, 조각) 단위를 20개 묶음에 고르게 나눠 담고, 러너 하나가 묶음 안의 단위를 스레드로 동시에 돈다.
-          # 호스트당 1초 예의는 그대로, 큰 브랜드는 최대 10조각(호스트당 10줄 — 사람 결정 2026-09-04).
           import json, math
           plan = json.load(open("plan.json"))
           per = int("${{ inputs.per_shard }}" or 300)
           buckets = int("${{ inputs.buckets }}" or 20)
-          # 한 브랜드의 조각은 반드시 같은 묶음에 넣는다 — 묶음이 갈리면 러너마다 따로 PoliteSession 을 들어
-          # 같은 호스트에 초당 5~10회가 나간다(2026-09-04 run 4 에서 실측: 거절은 없었지만 응답이 20초로 늘어
-          # 두 묶음이 120분 제한에 걸림). 한 묶음 안에서는 PoliteSession 이 호스트당 1초를 지키므로 안전하다.
-          # 묶음 하나가 걸리는 시간 ≈ 그 묶음에서 가장 큰 브랜드의 상품 수 × 요청 간격(서로 다른 브랜드는 스레드로 동시에).
           brands = [(b, n) for b, n in sorted(plan.items(), key=lambda x: -x[1]) if n > 0]
-          # LPT: 브랜드 통째로 가장 한가한 묶음에 넣되, 부하는 "묶음 안 최대 브랜드 크기"로 잰다(병렬이라 합이 아니다).
           groups = [[] for _ in range(buckets)]; peak = [0] * buckets
-          MAX_THREADS = 8   # 러너 하나가 동시에 볼 호스트 수 — 이보다 많으면 파싱(GIL)이 밀린다
+          MAX_THREADS = 8
           for brand, n in brands:
               cand = [j for j in range(buckets) if len(groups[j]) < MAX_THREADS] or list(range(buckets))
               i = min(cand, key=lambda j: (max(peak[j], n), len(groups[j])))
@@ -101,12 +83,9 @@ jobs:
                   continue
               units = ",".join(f"{b}:{k}/{sh}" for b, sh, _ in g for k in range(1, sh + 1))
               inc.append({"bucket": i + 1, "units": units, "load": sum(n for _, _, n in g)})
-          loads = peak
           print("matrix=" + json.dumps({"include": inc}))
-          print(f"jobs={len(inc)}")
-          print("묶음별 요청 수:", loads, file=__import__("sys").stderr)
+          print("묶음별 최대 브랜드:", peak, file=__import__("sys").stderr)
           PY
-          echo "잡 $(python3 -c 'import json;print(sum(1 for v in json.load(open("plan.json")).values() if v>0))')개 브랜드"
 
   refetch:
     needs: plan
@@ -202,7 +181,7 @@ jobs:
           git config user.email "refetch@layer.invalid"
           git add data/crawl/ data/products_full.csv data/product_sizes.json data/product_tags_full.json
           git diff --cached --quiet && { echo "변화 없음"; exit 0; }
-          git commit -m "상세 보정 $(date -u +%Y-%m-%d) — ${{ inputs.select }} · ${{ inputs.fields }} (Actions, 병렬)"
+          git commit -m "상세 보정 $(date -u +%Y-%m-%d) — ${{ inputs.select }} · ${{ inputs.fields }} (Actions)"
           for i in 1 2 3; do
             git pull --rebase origin "$DATA_BRANCH" && git push && exit 0
             echo "푸시 실패, 재시도 $i"; sleep 10
