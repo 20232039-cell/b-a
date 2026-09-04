@@ -37,6 +37,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
 CRAWL = DATA / "crawl"
 OCR = CRAWL / "ocr"
+BROWSER = CRAWL / "browser"
 VOCAB = DATA / "vocab_aliases.json"
 OUT = DATA / "product_tags_full.json"
 
@@ -212,6 +213,18 @@ def main():
     for slug, items in sorted(by_brand.items()):
         crawl = load_latest(CRAWL / f"{slug}.jsonl")
         ocr = load_latest(OCR / f"{slug}.jsonl")
+        # 브라우저로 거둔 설명글 — 탭 안에 있어 requests 로는 빈 껍데기만 오는 매장이 있다.
+        # perenn 은 설명글이 8자였는데 탭을 누르고 내려서 받으니 40벌이 치수·소재까지 들어
+        # 있었다(2026-09-04). 주소로 맞춘다 — product_no 는 브라우저 기록에 없을 수 있다.
+        brw: dict[str, str] = {}
+        bp = BROWSER / f"{slug}.jsonl"
+        if bp.exists():
+            for l in bp.read_text(encoding="utf-8").splitlines():
+                if l.strip():
+                    b = json.loads(l)
+                    t = (b.get("description") or "").strip()
+                    if b.get("source_url") and len(t) > len(brw.get(b["source_url"], "")):
+                        brw[b["source_url"]] = t
         for r in items:
             d = crawl.get(str(r["product_no"]), {})
             o = ocr.get(str(r["product_no"]), {})
@@ -221,8 +234,13 @@ def main():
                 desc = desc + "\n" + dt   # JSON-LD 요약과 본문 글이 다르면 둘 다 읽는다(2026-09-03)
             sbody, scolor = spec_texts(d.get("spec"))
             otext = o.get("ocr_text") or ""
-            body = "\n".join(t for t in (desc, sbody, otext) if t)
-            sources = [s for s, t in (("json-ld" if d.get("description_source") == "json-ld" else "html", desc), ("spec", sbody), ("ocr", otext)) if t]
+            btext = brw.get(r["source_url"], "")
+            if btext and btext[:200] != desc[:200]:
+                pass          # 브라우저 글은 따로 붙인다 — 원래 글과 겹치면 아래에서 무시된다
+            else:
+                btext = ""
+            body = "\n".join(t for t in (desc, sbody, otext, btext) if t)
+            sources = [s for s, t in (("json-ld" if d.get("description_source") == "json-ld" else "html", desc), ("spec", sbody), ("ocr", otext), ("browser", btext)) if t]
             quality = quality_of(body)
             color_text = " ".join(t for t in (r["name"], r.get("representative_color", ""), scolor) if t)
             tags = tagger.tag(r["category"], r["name"], body, color_text, quality)
