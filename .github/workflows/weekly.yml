@@ -7,10 +7,6 @@
 # 하는 일: scripts/weekly_update.py(목록 스캔 → 신상 상세 → 사라진 것·품절인 것 상세 확인) →
 # 신상 중 설명 짧은 것 OCR(이미 한 상품은 건너뜀) → 태그 재생성 → 커밋.
 # 설명·소재 변경은 쫓지 않는다(사람 결정 2026-09-02). 비용: 러너 하나 30~40분/주 ≈ 월 150분.
-#
-# 브랜드가 300개로 늘면: --workers 를 늘려도 호스트당 1초 예의는 지켜지므로 시간은 브랜드 수에
-# 비례하지 않고 가장 큰 매장 하나에 비례한다. 러너 시간이 6시간(잡 한도)에 가까워지면 OCR 처럼
-# 매트릭스(브랜드 묶음)로 나눈다.
 
 name: weekly-update
 
@@ -28,7 +24,7 @@ env:
   DATA_BRANCH: crawl/cafe24-full-catalog
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: weekly-${{ github.ref }}
