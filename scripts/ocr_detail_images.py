@@ -115,6 +115,10 @@ def load_categories() -> dict[tuple[str, int], str]:
         return {(r["brand_slug"], int(r["product_no"])): r["category"] for r in csv.DictReader(f)}
 
 
+# 파일 이름이 말해 주는 것 — 이런 그림은 순서와 무관하게 먼저 읽는다
+HINT_NAME = re.compile(r"size|detail|info|spec|measure|fabric|\uc0ac\uc774\uc988|\uc2e4\uce21", re.I)
+
+
 def process_brand(slug: str, only_short: bool, max_images: int, delay: float, log,
                   shard: tuple[int, int] = (0, 1), out_dir: Path | None = None, select: str = "short") -> dict:
     """shard=(k, n): 대상을 product_no 순으로 n등분해 k번째만 본다 — kirsh(1,800건)처럼 큰 브랜드를
@@ -146,7 +150,13 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
     with out.open("a", encoding="utf-8") as f:
         for i, d in enumerate(todo, 1):
             texts, imgs = [], []
-            picked = [u for u in d["detail_images"] if not SKIP_NAME.search(u.rsplit("/", 1)[-1])][:max_images]
+            # 소재·디테일·사이즈표는 상세 이미지의 「뒤쪽」에 오는 경우가 많다(사람 지적 2026-09-04).
+            # 앞에서 자르면 착용컷만 읽고 정작 필요한 표를 놓친다. 그래서 뒤에서부터 고르되,
+            # 파일 이름에 size/detail/info 가 든 그림은 어디에 있든 먼저 읽는다.
+            cand = [u for u in d["detail_images"] if not SKIP_NAME.search(u.rsplit("/", 1)[-1])]
+            hinted = [u for u in cand if HINT_NAME.search(u)]
+            rest = [u for u in cand if u not in hinted]
+            picked = hinted[:max_images] + rest[-(max_images - len(hinted[:max_images])):] if max_images > len(hinted[:max_images]) else hinted[:max_images]
             for url in picked:
                 data = polite_get(url, delay)
                 if not data or len(data) < MIN_BYTES:
