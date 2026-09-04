@@ -27,6 +27,10 @@ on:
         description: "short(설명 짧은 것) | no-size(사이즈 표 없는 옷) | all"
         required: false
         default: "short"
+      redo:
+        description: "true 면 예전에 그림을 덜 읽고 끝난 상품도 다시 읽는다(사이즈 없는 것만)"
+        required: false
+        default: "false"
 
 env:
   DATA_BRANCH: crawl/cafe24-full-catalog
@@ -125,6 +129,7 @@ jobs:
       - name: OCR ${{ matrix.brand }} ${{ matrix.shard }}/${{ matrix.shards }}
         run: |
           ALL=""; [ "${{ inputs.all }}" = "true" ] && ALL="--all"
+          [ "${{ inputs.redo }}" = "true" ] && ALL="$ALL --redo"
           N="${{ matrix.shards }}"
           # 예의: 한 브랜드를 N조각으로 나누면 같은 호스트를 N군데서 두드린다. 조각마다 대기를 N배로
           # 늘려야 매장이 받는 요청이 초당 2회로 유지된다(2026-09-04, 재수집 때 20초 응답을 겪고 정리).

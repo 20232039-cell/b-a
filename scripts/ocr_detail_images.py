@@ -168,7 +168,7 @@ HINT_NAME = re.compile(r"size|detail|info|spec|measure|fabric|\uc0ac\uc774\uc988
 
 def process_brand(slug: str, only_short: bool, max_images: int, delay: float, log,
                   shard: tuple[int, int] = (0, 1), out_dir: Path | None = None, select: str = "short",
-                  workers: int = 1, cdn_delay: float | None = None) -> dict:
+                  workers: int = 1, cdn_delay: float | None = None, redo: bool = False) -> dict:
     """shard=(k, n): 대상을 product_no 순으로 n등분해 k번째만 본다 — kirsh(1,800건)처럼 큰 브랜드를
     러너 여럿에 나눌 때. out_dir 를 주면 crawl/ocr/<slug>.jsonl 대신 out_dir/<slug>.<k>.jsonl 조각으로 쓴다
     (Actions 의 collect 가 조각을 합친다). 이미 끝난 상품 판단은 항상 crawl/ocr/<slug>.jsonl 기준."""
@@ -181,6 +181,27 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
     if main.exists():
         done = {json.loads(l)["product_no"] for l in main.read_text(encoding="utf-8").splitlines() if l.strip()}
     cats = load_categories() if select == "no-size" else {}
+    # --redo: 예전에 「앞 3~5장만」 읽고 끝난 상품은 done 에 들어 있어 12장짜리 재시도에서 아예 빠진다.
+    # 사이즈가 아직 없고 읽은 그림이 읽을 수 있는 그림보다 적으면 done 에서 빼 다시 읽는다
+    # (2026-09-04: 사이즈 없는 옷 875벌 중 617벌이 이 경우였다 — far-from-what 은 11장 중 2장만 읽었다).
+    if redo:
+        sized_urls = set()
+        sp = CRAWL_DIR.parent / "product_sizes.json"
+        if sp.exists():
+            sized_urls = set(json.loads(sp.read_text(encoding="utf-8")))
+        read_n: dict[int, int] = {}
+        if main.exists():
+            for l in main.read_text(encoding="utf-8").splitlines():
+                if l.strip():
+                    o = json.loads(l)
+                    read_n[o["product_no"]] = len(o.get("images") or [])
+        for no, d in latest.items():
+            if no not in done or d.get("source_url") in sized_urls:
+                continue
+            avail = len([u for u in (d.get("detail_images") or []) if not SKIP_NAME.search(u.rsplit("/", 1)[-1])])
+            if read_n.get(no, 0) < min(max_images, avail):
+                done.discard(no)
+
     todo = []
     for no, d in sorted(latest.items(), key=lambda kv: int(kv[0])):
         if no in done or (d.get("price") or 0) <= 1000 or not d.get("detail_images"):
@@ -250,6 +271,7 @@ def main():
     ap.add_argument("--max-images", type=int, default=MAX_IMAGES)
     ap.add_argument("--procs", type=int, default=3, help="동시에 볼 브랜드 수 (tesseract 가 CPU 를 쓴다 — 코어 수 이하로)")
     ap.add_argument("--delay", type=float, default=0.5)
+    ap.add_argument("--redo", action="store_true", help="이미 읽었지만 그림을 덜 읽은 상품을 다시 읽는다(사이즈 없는 것만)")
     ap.add_argument("--cdn-delay", type=float, default=0.25, help="공용 이미지 CDN(cafe24img) 에만 쓰는 대기")
     ap.add_argument("--shard", default="1/1", help="k/n — 대상을 n등분해 k번째(1부터)만 (Actions 샤딩)")
     ap.add_argument("--out-dir", help="조각 파일을 쓸 폴더 (crawl/ocr/<slug>.jsonl 대신 <slug>.<k>.jsonl)")
@@ -276,7 +298,7 @@ def main():
         # 하나만 쓰고 있었다. 호스트 속도는 polite_get 이 호스트별로 잠가 지킨다.
         inner = args.procs if len(slugs) == 1 else 1
         outer = 1 if len(slugs) == 1 else args.procs
-        futs = [ex.submit(process_brand, s, not args.all, args.max_images, args.delay, log, shard, out_dir, select, inner, args.cdn_delay) for s in slugs]
+        futs = [ex.submit(process_brand, s, not args.all, args.max_images, args.delay, log, shard, out_dir, select, inner, args.cdn_delay, args.redo) for s in slugs]
         for fut in as_completed(futs):
             try:
                 results.append(fut.result())
