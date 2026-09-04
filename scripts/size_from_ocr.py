@@ -28,6 +28,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
 CRAWL = DATA / "crawl"
 OCR = CRAWL / "ocr"
+BROWSER = CRAWL / "browser"
 OUT = DATA / "product_sizes.json"
 
 GARMENT_LABELS = {"Tops", "Pants", "Outerwear", "Knitwear", "Shirts", "Denim", "Skirts", "Dresses"}
@@ -69,7 +70,7 @@ def fix_value(label: str, raw: str, girth: bool = False) -> float | None:
             if v <= hi:
                 break
             v = v / 10
-    return v if lo <= v <= hi else None
+    return round(v, 1) if lo <= v <= hi else None
 
 
 def parse_matrix(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] | None:
@@ -145,13 +146,110 @@ def parse_rows(text: str) -> dict[str, list[float]]:
     return out
 
 
+ROW_BREAK = re.compile(
+    r"(?i)(?<![\w.])((?:\d\s*)?size\s*[\[(][^\])]{1,8}[\])]|(?:\d\s*)?size\s*\d?"
+    r"|xxs|xs|s|m|l|xl|xxl|2xl|3xl|free|one\s*size)\s+(?=\d{1,3}(?:[.,]\d)?\s*(?:cm|em|om)?\s+\d)")
+
+
+def resegment(text: str) -> list[str]:
+    """OCR 이 표를 줄바꿈 없이 한 줄로 뭉쳐 놓으면 parse_matrix 가 「헤더 다음 줄」을 못 찾는다 —
+    easy-no-easy 45벌이 「SIZE 종장 어깨너비 가슴단면 1SIZE[M] 73.5cm 61cm …」 한 줄이었다.
+    사이즈 이름 뒤에 숫자가 오는 자리마다 줄을 끊어 표 모양을 되살린다(2026-09-04)."""
+    t = re.sub(r"[ \t]+", " ", text)
+    return [ln.strip() for ln in ROW_BREAK.sub(r"\n\1 ", t).splitlines() if ln.strip()]
+
+
+def parse_flat(text: str) -> tuple[list[str], dict[str, list[float]]] | None:
+    """헤더와 값이 한 줄에 이어 붙은 정방향 표. kamien 은 설명글에 이렇게 들어 있어 크롤러의
+    SIZE_RX 가 「SLEEVE 뒤의 숫자 전부」로 잘못 잘랐다(2026-09-04):
+        Size SIZE LENGTH SHOULDER CHEST SLEEVE 2 74 61 68 64 3 76 63 72 65
+    라벨 수(k)를 센 뒤 남은 낱말을 k+1 개씩 끊는다 — 첫 칸이 사이즈 이름, 나머지가 값이다.
+    「OS 36-48 40 33 42 54 111」처럼 값에 범위가 섞여도 칸 수로 맞으니 받는다."""
+    best = None
+    for m in re.finditer(r"(?i)\bsizes?\b", text):
+        tok = re.sub(r"[|ㅣ:;=]", " ", text[m.end():m.end() + 500]).split()
+        NUMISH = rf"{NUM_CELL}|{NUM_CELL}-{NUM_CELL}"
+        cols_raw: list[str | None] = []
+        i = 0
+        while i < len(tok) and not re.fullmatch(NUMISH, tok[i]):
+            if re.fullmatch(r"(?i)sizes?", tok[i]):
+                i += 1
+                continue
+            c = canon_label(tok[i])
+            # 못 알아본 낱말 뒤에 바로 숫자가 오면 그건 라벨이 아니라 첫 행의 사이즈 이름이다
+            # (kamien 「… LENGTH OS 36-48 40 …」의 OS).
+            if not c and i + 1 < len(tok) and re.fullmatch(NUMISH, tok[i + 1]):
+                break
+            cols_raw.append(c)
+            i += 1
+            if len(cols_raw) > 12:
+                break
+        # 같은 라벨이 두 칸일 때는 앞 칸만 쓴다 — 「(f)RISE (b)RISE」는 둘 다 밑위로 읽힌다
+        first: set[str] = set()
+        for j, c in enumerate(cols_raw):
+            if c and c in first:
+                cols_raw[j] = None
+            elif c:
+                first.add(c)
+        labels = [c for c in cols_raw if c]
+        k = len(cols_raw)
+        if len({c for c in labels}) < 2 or k < 2:
+            continue
+        names: list[str] = []
+        cols: dict[str, list[float]] = {}
+        while i + k < len(tok) + 1 and len(names) < 10:
+            chunk = tok[i:i + k + 1]
+            if len(chunk) < k + 1:
+                break
+            nm, vals = chunk[0], chunk[1:]
+            if not re.fullmatch(SIZE_NAME, nm, re.I):
+                break
+            if not all(re.fullmatch(rf"{NUM_CELL}|{NUM_CELL}-{NUM_CELL}|[-–—]", v) for v in vals):
+                break
+            names.append(nm.upper())
+            for c, raw in zip(cols_raw, vals):
+                if not c:
+                    continue
+                # 「36-48」(조절되는 허리)은 앞 값을 쓴다
+                raw = raw.split("-")[0] if re.fullmatch(rf"{NUM_CELL}-{NUM_CELL}", raw) else raw
+                v = None if raw in ("-", "–", "—") else fix_value(c, raw)
+                cols.setdefault(c, []).append(v)
+            i += k + 1
+        sizes = {c: v for c, v in cols.items() if any(x is not None for x in v)}
+        if names and len(sizes) >= 2 and (best is None or len(names) * len(sizes) > len(best[0]) * len(best[1])):
+            best = (names, sizes)
+    return best
+
+
+def drop_inches(st: dict[str, list]) -> dict[str, list]:
+    """cm 과 inch 를 나란히 적은 표 — 「가슴 [59.0, 23.2]」는 두 사이즈가 아니라 한 값의 두 단위다
+    (59.0 / 23.2 = 2.54). far-from-what 51개 표가 전부 이 꼴이었다(2026-09-04)."""
+    out = {}
+    for k, v in st.items():
+        if not isinstance(v, list) or len(v) < 2:
+            out[k] = v
+            continue
+        inch = {j for i, a in enumerate(v) for j, b in enumerate(v)
+                if i != j and a and b and abs(a / b - 2.54) < 0.04}
+        out[k] = [x for j, x in enumerate(v) if j not in inch] if inch else v
+    return out
+
+
 def from_ocr(text: str) -> tuple[list[str] | None, dict[str, list[float]]]:
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    mat = parse_matrix(lines)
-    if mat and len(mat[1]) >= 2:
-        return mat[0], {k: [v for v in vs] for k, vs in mat[1].items()}
-    rows = parse_rows(text)
-    return None, rows
+    for cand in (lines, resegment(text)):
+        mat = parse_matrix(cand)
+        if mat and len(mat[1]) >= 2:
+            return mat[0], clean_ocr({k: list(vs) for k, vs in mat[1].items()})
+    return None, clean_ocr(parse_rows(text))
+
+
+def clean_ocr(st: dict[str, list]) -> dict[str, list]:
+    """HTML 표에만 걸어 두었던 값 검사를 OCR 표에도 건다 — OCR 은 오히려 더 자주 두 칸을 섞어 읽는다.
+    「가슴 [60, 62.5, 65, 61.5]」(diafvine)처럼 오르락내리락하는 라벨만 버린다(2026-09-04)."""
+    if sweep_all(st):
+        return {}
+    return {k: v for k, v in st.items() if not bad_label(v)}
 
 
 def sweep_all(st: dict) -> bool:
@@ -174,6 +272,7 @@ def bad_label(xs: list) -> bool:
 def normalize_html(st: dict, brand: str = "", girth_keys: set | None = None) -> dict[str, list[float]]:
     if sweep_all(st):
         return {}
+    st = drop_inches(st)
     out: dict[str, list[float]] = {}
     for k, vals in st.items():
         c = canon_label(k)
@@ -272,6 +371,17 @@ def main():
             if l.strip():
                 d = json.loads(l)
                 ocr[(d["brand_slug"], str(d["product_no"]))] = d.get("ocr_text") or ""
+    # 브라우저로 거둔 것 — 자바스크립트가 그리는 표는 여기밖에 없다(diafvine).
+    brw: dict[str, dict] = {}
+    if BROWSER.exists():
+        for p2 in BROWSER.glob("*.jsonl"):
+            for l in p2.read_text(encoding="utf-8").splitlines():
+                if l.strip():
+                    d2 = json.loads(l)
+                    if d2.get("source_url"):
+                        brw[d2["source_url"]] = d2
+    if brw:
+        print(f"브라우저 기록 {len(brw)}건")
     girth_keys = brand_girth(CRAWL)
     shared = shop_wide_tables(CRAWL, rows)
     if girth_keys:
@@ -298,6 +408,28 @@ def main():
             if isinstance(st, dict) and st and (k[0], json.dumps(st, sort_keys=True, ensure_ascii=False)) not in shared:
                 sizes = normalize_html(st, k[0], girth_keys)
                 source = "html"
+            # 크롤러의 SIZE_RX 가 「라벨 뒤 숫자 전부」로 잘못 자른 표는 설명글에서 다시 읽는다 —
+            # kamien 은 표가 전부 설명글에 정방향으로 들어 있는데 59개가 그렇게 버려졌다(2026-09-04).
+            if len(sizes) < 2:
+                flat = parse_flat(d.get("description") or "")
+                if flat and len(clean_ocr(flat[1])) > len(sizes):
+                    sizes, names, source = clean_ocr(flat[1]), flat[0], "html"
+            # 브라우저가 본 표·설명글 — 서버 HTML 에 없던 것이 여기 있다
+            b = brw.get(r["source_url"])
+            if len(sizes) < 2 and b:
+                raw = b.get("size_table_raw") or {}
+                if raw:
+                    cand = normalize_html(raw, k[0], girth_keys)
+                    if len(cand) > len(sizes):
+                        sizes, names, source = cand, None, "browser"
+                if len(sizes) < 2:
+                    flat2 = parse_flat(b.get("description") or "")
+                    if flat2 and len(clean_ocr(flat2[1])) > len(sizes):
+                        sizes, names, source = clean_ocr(flat2[1]), flat2[0], "browser"
+                if len(sizes) < 2:
+                    n2, s2 = from_ocr(b.get("description") or "")
+                    if len(s2) > len(sizes):
+                        sizes, names, source = s2, n2, "browser"
             if len(sizes) < 2 and ocr.get(k):
                 names2, sizes2 = from_ocr(ocr[k])
                 if len(sizes2) > len(sizes):
@@ -311,7 +443,7 @@ def main():
                 names = names[:n]
             out[r["source_url"]] = {"brand_slug": k[0], "source": source, "size_names": names, "sizes": sizes}
             src[source] += 1
-            (per_brand_html if source == "html" else per_brand_ocr)[k[0]] += 1
+            (per_brand_html if source in ("html", "browser") else per_brand_ocr)[k[0]] += 1
     # 색만 다른 형제에게서 사이즈를 물려받는다 — 같은 옷이라 실측이 같다. 어디서 왔는지 남긴다.
     by_base = defaultdict(list)
     for k, r in rows.items():

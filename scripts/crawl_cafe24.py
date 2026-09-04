@@ -725,12 +725,24 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
     if not image:
         image = ogs[0] if ogs else ""
 
+    def _big(u: str) -> str:
+        return re.sub(r"/web/product/(extra/)?(small|medium|tiny)/",
+                      lambda mm: f"/web/product/{mm.group(1) or ''}big/", u)
+
     gallery = []
     for img in soup.select('img[src*="/web/product/extra/"], img[src*="/web/product/medium/"], img[src*="/web/product/small/"]'):
-        src = _fix_url(img.get("src", ""), shop.base)
-        src = re.sub(r"/web/product/(extra/)?(small|medium|tiny)/", lambda mm: f"/web/product/{mm.group(1) or ''}big/", src)
+        src = _big(_fix_url(img.get("src", ""), shop.base))
         if src and src != image and src not in gallery:
             gallery.append(src)
+    # img 태그가 아니라 스크립트 안에 사진 주소를 박아 두는 스킨이 있다 — coor 는 판매중 상품
+    # 페이지에도 선택자로 0장, 글에서 정규식으로 5장이 나왔다(932벌 중 781벌이 그래서 빈손,
+    # 오래된 상품일수록 심하다). img 태그로 못 얻었을 때만 글에서 줍는다(2026-09-04).
+    if not gallery:
+        for m in re.finditer(r"""['"]((?:https?:)?//[^'"\s]*?/web/product/(?:extra/)?"""
+                             r"""(?:big|medium|small)/[^'"\s]+?\.(?:jpg|jpeg|png|webp))['"]""", html_text, re.I):
+            src = _big(_fix_url(m.group(1), shop.base))
+            if src and src != image and src not in gallery:
+                gallery.append(src)
 
     # canonical 이 홈을 가리키는 스킨이 있다(anderssonbell.com → 664건 전부 홈, badblood, haleine).
     # 상품 식별자가 없는 canonical 은 버리고 실제로 연 주소를 쓴다.
