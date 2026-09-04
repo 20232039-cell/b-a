@@ -186,10 +186,17 @@ jobs:
                           d = json.loads(l); have[d["product_no"]] = d
               for p in files:
                   for l in open(p, encoding="utf-8"):
-                      if l.strip():
-                          d = json.loads(l)
-                          if d["product_no"] not in have:
-                              have[d["product_no"]] = d; new += 1
+                      if not l.strip():
+                          continue
+                      d = json.loads(l)
+                      old = have.get(d["product_no"])
+                      # 같은 상품이라도 그림을 더 읽었거나 글이 더 나온 쪽이 이긴다 — 예전엔 「이미 있으면 건너뛰기」라
+                      # --redo 로 3,056장을 다시 읽고도 collect 가 「변화 없음」으로 끝났다(2026-09-04 run 3).
+                      if old is None:
+                          have[d["product_no"]] = d; new += 1
+                      elif (len(d.get("images") or []), len(d.get("ocr_text") or "")) > \
+                           (len(old.get("images") or []), len(old.get("ocr_text") or "")):
+                          have[d["product_no"]] = d; new += 1
               with open(dst, "w", encoding="utf-8") as f:
                   for d in have.values():
                       f.write(json.dumps(d, ensure_ascii=False) + "\n")
