@@ -58,8 +58,22 @@ def canon_label(s: str) -> str | None:
     return ALIAS.get(re.sub(r"\s+", "", m.group(0)).lower()) if m else None
 
 
+RANGE_RX = re.compile(r"^\s*(\d+(?:[.,]\d+)?)\s*[~\-–—]\s*(\d+(?:[.,]\d+)?)\s*$")
+
+
 def fix_value(label: str, raw: str, girth: bool = False) -> float | None:
-    v = float(raw.replace(",", "."))
+    raw = str(raw).strip()
+    # 「33~40」 — 밴딩 허리처럼 늘어나는 칸. 브라우저가 받아온 표에 있고, 그대로 float()
+    # 하면 병합이 통째로 죽는다(2026-09-04). 한 칸에 한 수만 담는 구조라 가운뎃값을 쓴다 —
+    # 작은 쪽만 쓰면 「허리 33」이 되어 실제보다 훨씬 작게 보이고, 큰 쪽만 쓰면 그 반대다.
+    m = RANGE_RX.match(raw)
+    if m:
+        a, b = (float(x.replace(",", ".")) for x in m.groups())
+        raw = f"{(a + b) / 2:.1f}"
+    try:
+        v = float(raw.replace(",", "."))
+    except ValueError:
+        return None
     if girth:
         v = v / 2   # 「가슴둘레 111」은 둘레 — 국내 표기 기준(단면)으로 맞춘다(rough-side, 2026-09-04)
     lo, hi = RANGES.get(label, (3, 200))
