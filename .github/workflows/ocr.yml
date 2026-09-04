@@ -1,25 +1,6 @@
-# ── 일꾼 저장소(공개)에서 도는 워크플로. 데이터는 비공개 저장소에 있고 매 잡마다 work/ 로 받아 와
-# 그 안에서 돌린 뒤 되돌려 보낸다. 공개 저장소라 Actions 분이 무료다.
-# 필요한 것: 이 저장소 Settings → Secrets and variables → Actions 에 DATA_TOKEN
-# (데이터 저장소의 Contents 를 읽고 쓸 수 있는 파인그레인 토큰).
-# 상세 이미지 OCR — 브랜드(×조각) 단위로 러너에 나눠 돌린다.
-#
-# 왜 Actions 인가: 대상 3,943건·9,552장을 4코어 한 대에서 돌리면 4시간이다(장당 1.5초).
-# 러너 20개에 브랜드를 나누면 20분 안팎. 에이전트 세션 컨테이너는 조용해지면 회수되어
-# 몇 시간짜리 일을 맡길 자리가 아니다(2026-09-02).
-#
-# 조각(shards): kirsh(1,800건)·badblood(1,160건)는 한 러너에서 2~3시간이라 첫 실행(run 1)에서
-# 이 둘만 끝나지 못하고 취소됐다. shards=6 이면 브랜드마다 6개 러너가 product_no 순으로 나눠 본다.
-# 조각 결과는 _parts/<brand>.<k>.jsonl 로 올리고 collect 가 brand 파일 하나로 합친다.
-#
-# 이어받기: scripts/ocr_detail_images.py 는 data/crawl/ocr/<brand>.jsonl 에 이미 있는 상품을
-# 건너뛴다. 결과를 브랜치에 커밋하므로 다시 돌려도 남은 것만 한다.
-#
-# 푸시 전 pull: run 1 의 collect 가 커밋까지 하고 푸시에서 실패했다 — 도는 사이 사람이 같은 브랜치에
-# 푸시해서 non-fast-forward. 아티팩트에서 손으로 건졌지만, 이제 rebase 후 푸시하고 세 번 재시도한다.
-#
-# 비용: 비공개 저장소 무료 한도 2,000분/월. 한 번 전체 돌리면 300~500분쯤 쓴다 —
-# 자동 스케줄로 걸지 않고 손으로 실행한다(workflow_dispatch).
+# 상세 이미지에서 글자를 읽는다(tesseract kor+eng). 그림으로만 설명하는 매장의 소재·사이즈를 얻는다.
+# 일꾼 저장소(공개)에서 돌고, 데이터는 비공개 저장소에서 work/ 로 받아 그 안에서 작업한 뒤 되돌려 보낸다.
+# 필요한 것: Settings → Secrets and variables → Actions 에 DATA_TOKEN.
 
 name: ocr-detail-images
 
@@ -27,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       brands:
-        description: "공백으로 나눈 slug 목록. 비우면 data/crawl/*.jsonl 전부"
+        description: "공백으로 나눈 slug 목록. 비우면 전부"
         required: false
         default: ""
       max_images:
@@ -39,7 +20,7 @@ on:
         required: false
         default: "false"
       shards:
-        description: "브랜드마다 몇 조각으로 나눌지 (큰 브랜드만 돌릴 때 6 정도)"
+        description: "브랜드마다 몇 조각으로 나눌지"
         required: false
         default: "1"
       select:
@@ -51,7 +32,7 @@ env:
   DATA_BRANCH: crawl/cafe24-full-catalog
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: ocr-${{ github.ref }}
@@ -112,7 +93,7 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -y -q tesseract-ocr tesseract-ocr-kor
           pip install -q requests
-      - name: OCR ${{ matrix.brand }} ${{ matrix.shard }}/${{ inputs.shards }}
+      - name: OCR ${{ matrix.brand }} ${{ matrix.shard }}
         run: |
           ALL=""; [ "${{ inputs.all }}" = "true" ] && ALL="--all"
           N="${{ inputs.shards }}"; [ -z "$N" ] && N=1
@@ -144,7 +125,7 @@ jobs:
           pattern: ocr-*
           path: work/_parts
           merge-multiple: true
-      - name: merge parts into data/crawl/ocr
+      - name: 조각을 data/crawl/ocr 로 합치기
         shell: bash
         run: |
           mkdir -p data/crawl/ocr
@@ -153,7 +134,7 @@ jobs:
           from collections import defaultdict
           parts = defaultdict(list)
           for p in sorted(glob.glob("_parts/*.jsonl")):
-              brand = os.path.basename(p).rsplit(".", 2)[0]   # <brand>.<k>.jsonl
+              brand = os.path.basename(p).rsplit(".", 2)[0]
               parts[brand].append(p)
           n = t = new = 0
           for brand, files in parts.items():
@@ -175,12 +156,20 @@ jobs:
               n += len(have); t += sum(1 for d in have.values() if d["ocr_text"])
           print(f"OCR 결과 상품 {n} · 글 나온 상품 {t} · 이번에 새로 {new}")
           PY
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -q requests beautifulsoup4 lxml
+      - name: 사이즈 · 태그 재생성
+        run: |
+          python scripts/size_from_ocr.py | head -2
+          python scripts/tag_items.py | head -16
       - name: commit & push (rebase 후, 3회 재시도)
         shell: bash
         run: |
           git config user.name "layer-ocr-bot"
           git config user.email "ocr@layer.invalid"
-          git add data/crawl/ocr/
+          git add data/crawl/ocr/ data/product_sizes.json data/product_tags_full.json
           git diff --cached --quiet && { echo "변화 없음"; exit 0; }
           git commit -m "OCR 결과 — $(ls data/crawl/ocr/*.jsonl | wc -l)개 브랜드 (Actions)"
           for i in 1 2 3; do
