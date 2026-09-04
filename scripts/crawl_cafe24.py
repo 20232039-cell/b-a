@@ -514,13 +514,16 @@ def extract_size_table(html_text: str) -> dict[str, list[float]]:
 # (「size(cm) Length Shoulder Chest Sleeve.L / 1size 61 50 59 59」, 2026-09-03 사람 발견). SIZE_RX 는 「라벨 뒤
 # 숫자」만 봐서 이 표를 통째로 놓쳤다(rssc 370건 0%). 머리는 「size(cm)」 같은 표식 뒤에서 첫 사이즈 행이
 # 나오기 전까지의 낱말 전부다 — 모르는 낱말(Crotch)이 섞여도 자리를 지켜야 숫자가 옆 칸으로 밀리지 않는다.
-_SIZE_TOKEN = r"(?:xxs|xs|s|m|l|xl|xxl|2xl|3xl|free|f|os|one\s*size|\d{1,3}\s*size|\d{1,3})"
+# 「SIZE 2」처럼 이름이 뒤에 붙는 표기를 맨 앞에 둔다 — 안 그러면 SIZE 의 S 만 사이즈로 먹고 줄을 버린다
+# (far-from-what 「SIZE 2 42 115 30.5 19 / SIZE 3 …」에서 둘째 줄을 놓쳤다, 2026-09-04)
+_SIZE_TOKEN = r"(?:size\s*\d{1,3}|one\s*size|\d{1,3}\s*size|xxs|xs|s|m|l|xl|xxl|2xl|3xl|free|f|os|\d{1,3})"
 # 「▪ Size (Length / Chest / Shoulder / Arm) 2: 64 / 58.5 / 51 / 65.5」(9999archive 본문 글, 2026-09-03 사람 발견)도 여기서 잡는다
 # 「단위(=cm)」(perenn)·「단위 : cm」처럼 괄호 안에 = 나 : 가 끼는 표기도 표의 시작으로 본다.
-_HEADER_MARK = re.compile(r"(?:size\s*\(\s*cm\s*\)|사이즈\s*\(\s*cm\s*\)|size\s*guide\s*\(?\s*cm\s*\)?|\(\s*[=:]?\s*cm\s*\)|단위\s*[（(]?\s*[=:]?\s*cm\s*[)）]?|단위\s*[:：]\s*cm|size\s*\(cm\)|사이즈\s*표|size\s*chart|size\s*guide|size\s*info|size\s*cm\b|size\s*(?=\()|사이즈\s*(?=\())", re.I)
+_HEADER_MARK = re.compile(r"(?:size\s*\(\s*cm\s*\)|사이즈\s*\(\s*cm\s*\)|size\s*guide\s*\(?\s*cm\s*\)?|\(\s*[=:]?\s*cm\s*\)|단위\s*[（(]?\s*[=:]?\s*cm\s*[)）]?|단위\s*[:：]\s*cm|\(\s*unit\s*[:：]?\s*cm\s*\)|unit\s*[:：]\s*cm|size\s*\(cm\)|사이즈\s*표|size\s*chart|size\s*guide|size\s*info|size\s*cm\b|size\s*(?=\()|사이즈\s*(?=\())", re.I)
 # 두 낱말짜리 라벨 — 공백으로 쪼개면 칸 수가 어긋난다(depound 「SLEEVE LENGTH」, badblood 「어깨 너비」)
 _COMPOUND = [("sleeve", "length"), ("소매", "길이"), ("어깨", "너비"), ("가슴", "단면"), ("허리", "단면"), ("밑단", "단면"), ("허벅지", "단면"), ("total", "length"), ("shoulder", "width")]
-_NUM = r"\d{1,3}(?:\.\d)?"
+# 소수점 두 자리도 받는다 — 「31.75」 한 칸 때문에 그 아래 사이즈 줄을 통째로 버렸다(far-from-what, 2026-09-04)
+_NUM = r"\d{1,3}(?:\.\d{1,2})?"
 # 사이즈 이름 뒤에 올 수 있는 것: 「(여성용)」「size small」「|」「:」 — badblood·rough-side(2026-09-04)
 _ROW_LEAD = r"(?:\s*(?:size)?\s*(?:small|medium|large|x-?small|x-?large|free)?\s*(?:\([^)]{0,12}\))?\s*[:：\-|]?\s*)"
 _KNOWN = re.compile(r"^(?:" + SIZE_LABELS[1:-1] + r"|crotch|inseam|rise|arm|암홀|밑위|가슴둘레|허리둘레|밑단둘레|어깨너비|소매길이|가슴단면)", re.I)
@@ -745,7 +748,9 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
                 ".accordion-cont", ".md-info-accordion",      # divein: 디테일 + SIZE(cm) 표
                 ".accordion-desc", ".accordion-list",         # lecyto: PRODUCT INFO(혼용률) + SIZE GUIDE
                 ".prd-detail-desc-list", ".size-guide",       # rough-side: 제품 설명 탭 + 사이즈 가이드 탭
-                ".detailArea"):                               # coor: 상품간략설명 + Detail 실측
+                ".detailArea",                                # coor: 상품간략설명 + Detail 실측
+                "details.fa", ".ffw-simple-desc"):            # far-from-what: 상품간략설명 안의 <details> 아코디언
+                                                              #   (Size & Fit Guide 가 <table> 이 아니라 div 격자다)
         for el in soup.select(sel):
             _collect(el, parts)
     body_text = " ".join(parts)

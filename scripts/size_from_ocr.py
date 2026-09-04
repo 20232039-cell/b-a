@@ -41,6 +41,9 @@ for canon, als in LABELS.items():
 ALIAS_SORTED = sorted(ALIAS, key=len, reverse=True)
 LABEL_RX = re.compile("|".join(re.escape(a) for a in ALIAS_SORTED), re.I)
 NUM = r"\d{1,3}(?:[.,]\d)?"
+# 행렬 표의 칸에는 다섯 자리까지 받는다 — OCR 이 「104.0cm」를 「10400」으로 흘려 쓴다(easy-no-easy).
+# 머리에 정식 라벨이 둘 이상 있고 칸 수가 정확히 맞을 때만 쓰이는 자리라, 값 대신 가격이 끼어들 여지가 없다.
+NUM_CELL = r"\d{1,5}(?:[.,]\d)?"
 # 사이즈 이름은 느슨하게 — OCR 이 「002」를 「OOM」으로 읽는다(kirsh). 헤더(정식 라벨 ≥2)와 숫자 개수 일치가 지킨다
 SIZE_NAME = r"(?:xxs|xs|s|m|l|xl|xxl|2xl|3xl|free|f|one\s*size|os|[A-Za-z0-9]{1,4})"
 
@@ -94,17 +97,17 @@ def parse_matrix(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] |
             # 사이즈 이름: 「1」「M」뿐 아니라 「1 SIZE」「1 SIZE [9]」(easy-no-easy) 도 한 칸이다.
             # 숫자 뒤에 남는 부스러기(「Th (cm)」 — kirsh)는 버린다.
             m = re.match(rf"^\(?({SIZE_NAME})\)?(?:\s*size)?(?:\s*[\[(][^\])]{{0,8}}[\])])?\s+"
-                         rf"((?:{NUM}\s*){{{len(labels)},{len(labels)+1}}})\s*(?:\D{{0,10}})?$", r, re.I)
+                         rf"((?:{NUM_CELL}\s*){{{len(labels)},{len(labels)+1}}})\s*(?:\D{{0,10}})?$", r, re.I)
             if m:
-                nums = re.findall(NUM, m.group(2))[:len(labels)]
+                nums = re.findall(NUM_CELL, m.group(2))[:len(labels)]
                 nm = m.group(1)
             else:
                 # 빈 칸을 「-」로 두는 표(민소매의 SLEEVE — dnsr) 는 칸 수가 맞을 때만 받는다
                 tok = r.split()
                 nm, cells = (tok[0], tok[1:]) if tok else ("", [])
                 if len(cells) != len(labels) or not re.fullmatch(SIZE_NAME, nm, re.I) \
-                        or not all(re.fullmatch(rf"{NUM}|[-–—]", c) for c in cells) \
-                        or not any(re.fullmatch(NUM, c) for c in cells):
+                        or not all(re.fullmatch(rf"{NUM_CELL}|[-–—]", c) for c in cells) \
+                        or not any(re.fullmatch(NUM_CELL, c) for c in cells):
                     if names:      # 표가 끝났다
                         break
                     continue
