@@ -38,6 +38,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import requests
+from PIL import Image
 
 ROOT = Path(__file__).resolve().parent.parent
 CRAWL_DIR = ROOT / "data" / "crawl"
@@ -82,6 +83,10 @@ def polite_get(url: str, delay: float, cdn_delay: float | None = None) -> bytes 
 
 
 MAX_W = 1200
+MIN_W = 1400
+# 세로로 길게 이어붙인 상세 띠(kirsh 800x10958 등)까지 2배로 키우면 8.8M → 35M 픽셀이 된다.
+# 표가 든 이미지는 대개 2M 픽셀 안쪽이라 거기까지만 키운다.
+MAX_PIXELS = 3_500_000
 
 
 def preprocess(data: bytes) -> bytes:
@@ -95,6 +100,12 @@ def preprocess(data: bytes) -> bytes:
         im = im.convert("L")
         if w > MAX_W:
             im = im.resize((MAX_W, max(1, int(h * MAX_W / w))), Image.LANCZOS)
+        elif w < MIN_W and w * h <= MAX_PIXELS:
+            # 작은 이미지는 키운다. 줄이기만 하던 시절, 1000px 짜리 사이즈 표는 값이
+            # 통째로 뭉갰다(2026-09-04 diafvine: 1배 `M 405 305 165 % 2` → 2배
+            # `M 405 305 185 99 32`). 표의 글자는 8~10px 라 tesseract 가 필요로 하는
+            # 높이에 못 미친다 — 사진은 어차피 읽을 게 없으니 손해가 없다.
+            im = im.resize((w * 2, h * 2), Image.LANCZOS)
         buf = io.BytesIO()
         im.save(buf, format="PNG")
         return buf.getvalue()
@@ -102,9 +113,140 @@ def preprocess(data: bytes) -> bytes:
         return data
 
 
+def dark_bands(im, min_h=8, min_w=200, thr=120):
+    """검정 바탕 가로 띠의 (top, bottom) 목록.
+
+    사이즈 표의 머리줄(라벨이 든 줄)은 매장 절반이 검정 바탕에 흰 글자다. tesseract 는
+    어두운 바탕 글자를 못 읽어서, 값(2행·3행)은 멀쩡히 나오는데 라벨만 통째로 잡음이 됐다
+    (2026-09-04 diafvine 실측: 값 `M 405 305 185 99 32` 는 정확, 머리줄은 `on ern = oat a`).
+    라벨이 없으면 표가 성립하지 않으니 그 브랜드가 통째로 0% 가 된다.
+    """
+    from PIL import ImageStat
+    w, h = im.size
+    if w < min_w:
+        return []
+    means = [ImageStat.Stat(im.crop((0, y, w, y + 1))).mean[0] for y in range(h)]
+    runs, start = [], None
+    for i, m in enumerate(means):
+        if m < thr and start is None:
+            start = i
+        elif m >= thr and start is not None:
+            if i - start >= min_h:
+                runs.append((start, i))
+            start = None
+    if start is not None and h - start >= min_h:
+        runs.append((start, h))
+    # 사진(검은 옷)이 통째로 어두운 경우를 거른다 — 띠는 얇다
+    return [(a, b) for a, b in runs if b - a <= 90][:6]
+
+
+def ocr_dark_bands(im) -> str:
+    """어두운 띠만 잘라 3배로 키우고 반전해서 읽는다. 흰 글자가 검은 글자가 된다."""
+    from PIL import Image, ImageOps
+    out = []
+    from PIL import ImageStat
+    for a, b in dark_bands(im):
+        # 가로로도 잘라 낸다 — 표 머리줄 양옆의 흰 여백을 같이 뒤집으면 검은 판이 되어
+        # tesseract 가 줄 자체를 못 찾는다(2026-09-04: 안 자르면 결과 0자, 자르면 라벨 전부).
+        cols = [ImageStat.Stat(im.crop((x, a, x + 1, b))).mean[0] for x in range(im.width)]
+        dark_x = [x for x, m in enumerate(cols) if m < 150]
+        if not dark_x:
+            continue
+        x0, x1 = max(0, dark_x[0] - 2), min(im.width, dark_x[-1] + 3)
+        if x1 - x0 < 120:
+            continue
+        band = im.crop((x0, max(0, a - 2), x1, min(im.height, b + 2)))
+        band = band.resize((band.width * 3, band.height * 3), Image.LANCZOS)
+        band = ImageOps.invert(band)
+        # psm 은 한 값으로 고정하면 안 된다 — 같은 띠가 2px 여백 차이로 7 에서는 0자,
+        # 11(성긴 글자)에서는 라벨 전부가 나왔다(2026-09-04). 셋을 돌려 가장 긴 것을 쓴다.
+        best = ""
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=True) as f:
+            band.save(f.name)
+            for psm in ("7", "6", "11"):
+                try:
+                    t = subprocess.run(
+                        ["tesseract", f.name, "-", "-l", "kor+eng", "--psm", psm],
+                        capture_output=True, text=True, timeout=60,
+                        env={**os.environ, "OMP_THREAD_LIMIT": "1"},
+                    ).stdout
+                except (subprocess.TimeoutExpired, FileNotFoundError):
+                    continue
+                if len(t.strip()) > len(best):
+                    best = t
+        t = " ".join(best.split())
+        if len(re.sub(r"[^가-힣A-Za-z0-9]", "", t)) >= 4:
+            out.append(t)
+    return "\n".join(out)
+
+
+SIZE_HINT = re.compile(r"총장|어깨|가슴|소매|밑단|허리|허벅지|밑위|암홀|SIZE|실측|단면|길이", re.I)
+
+
+def ocr_slice(im, top, bot, scale=2, psm="6") -> str:
+    """이미지의 한 띠를 잘라 확대해서 읽는다."""
+    c = im.crop((0, top, im.width, bot))
+    if scale != 1:
+        c = c.resize((c.width * scale, c.height * scale), Image.LANCZOS)
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=True) as f:
+        c.save(f.name)
+        try:
+            return subprocess.run(
+                ["tesseract", f.name, "-", "-l", "kor+eng", "--psm", psm],
+                capture_output=True, text=True, timeout=90,
+                env={**os.environ, "OMP_THREAD_LIMIT": "1"},
+            ).stdout
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return ""
+
+
+def ocr_tall(im) -> str:
+    """세로로 긴 상세 띠 — 성기게 훑고, 표가 있을 만한 곳만 촘촘히 다시 읽는다.
+
+    통짜로 --psm 6 에 넣으면 큰 도식(옷 그림 + 화살표 라벨)과 표가 같은 「균일 블록」에
+    들어가 서로를 뭉갠다(2026-09-04 kirsh 800x9521: 통짜 114초에 337자, 표는 유실).
+    1500px 띠로 훑으면 「SIZE INFO / 어깨 / 소매 / 가슴 / 총장」까지는 나오지만 값이
+    깨지고, 같은 자리를 300px 조각 2배로 다시 읽으면 `총장 가슴 어깨 소매 / 1 46 37`
+    까지 정확히 나온다. 그래서 두 단계로 나눈다 — 성긴 훑기는 싸고, 정밀 판독은
+    걸린 띠에만 쓴다.
+    """
+    COARSE, FINE, OVER = 1500, 300, 40
+    out = []
+    for top in range(0, im.height, COARSE):
+        bot = min(im.height, top + COARSE)
+        rough = ocr_slice(im, top, bot, scale=1)
+        if not SIZE_HINT.search(rough):
+            out.append(rough)
+            continue
+        # 표가 있을 만한 띠 — 촘촘히 다시
+        fine = []
+        for y in range(top, bot, FINE - OVER):
+            fine.append(ocr_slice(im, y, min(bot, y + FINE), scale=2))
+        out.append("\n".join(fine))
+    return "\n".join(out)
+
+
 def ocr_bytes(data: bytes) -> str:
     """tesseract 로 한 장. --psm 6(균일 블록)이 상품 상세의 세로 긴 이미지에 가장 안정적이었다."""
     data = preprocess(data)
+    # 세로로 긴 띠는 통짜로 못 읽는다 — 두 단계 훑기로 넘긴다(ocr_tall 주석).
+    try:
+        from PIL import Image as _I
+        import io as _io
+        _im = _I.open(_io.BytesIO(data)).convert("L")
+        if _im.height >= 2200:
+            out = ocr_tall(_im)
+            bands = ocr_dark_bands(_im)
+            txt = re.sub(r"[ \t]+", " ", out)
+            txt = re.sub(r"\n{2,}", "\n", txt).strip()
+            lines = [ln for ln in txt.splitlines() if len(re.sub(r"[^가-힣A-Za-z0-9]", "", ln)) >= 2]
+            joined = "\n".join(lines)
+            if bands:
+                joined = bands + "\n" + joined
+            words = re.findall(r"[가-힣]{2,}|[A-Za-z]{3,}", joined)
+            return joined if len(words) >= 3 else ""
+    except Exception:
+        pass
     with tempfile.NamedTemporaryFile(suffix=".img", delete=True) as f:
         f.write(data)
         f.flush()
@@ -118,11 +260,21 @@ def ocr_bytes(data: bytes) -> str:
             ).stdout
         except (subprocess.TimeoutExpired, FileNotFoundError):
             return ""
+    bands = ""
+    try:
+        from PIL import Image as _I
+        import io as _io
+        bands = ocr_dark_bands(_I.open(_io.BytesIO(data)).convert("L"))
+    except Exception:
+        bands = ""
     txt = re.sub(r"[ \t]+", " ", out)
     txt = re.sub(r"\n{2,}", "\n", txt).strip()
     # 한 줄에 글자가 거의 없으면(장식·사진) 버린다
     lines = [ln for ln in txt.splitlines() if len(re.sub(r"[^가-힣A-Za-z0-9]", "", ln)) >= 2]
     joined = "\n".join(lines)
+    # 띠(라벨 줄)를 본문 앞에 둔다 — 표 파서는 「라벨 줄 다음에 값 줄」 순서를 본다.
+    if bands:
+        joined = bands + "\n" + joined
     words = re.findall(r"[가-힣]{2,}|[A-Za-z]{3,}", joined)
     return joined if len(words) >= 3 else ""
 

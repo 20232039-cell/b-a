@@ -184,6 +184,10 @@ def parse_flat(text: str) -> tuple[list[str], dict[str, list[float]]] | None:
             i += 1
             if len(cols_raw) > 12:
                 break
+        # 첫 라벨 앞에 붙은 낱말은 칸이 아니다 — 「SIZE CM 총장 …」의 CM 이 가짜 칸이 되어
+        # 값이 한 칸씩 밀렸다(9999archive, 2026-09-04).
+        while cols_raw and cols_raw[0] is None:
+            cols_raw.pop(0)
         # 같은 라벨이 두 칸일 때는 앞 칸만 쓴다 — 「(f)RISE (b)RISE」는 둘 다 밑위로 읽힌다
         first: set[str] = set()
         for j, c in enumerate(cols_raw):
@@ -204,14 +208,18 @@ def parse_flat(text: str) -> tuple[list[str], dict[str, list[float]]] | None:
             nm, vals = chunk[0], chunk[1:]
             if not re.fullmatch(SIZE_NAME, nm, re.I):
                 break
-            if not all(re.fullmatch(rf"{NUM_CELL}|{NUM_CELL}-{NUM_CELL}|[-–—]", v) for v in vals):
+            if not all(re.fullmatch(rf"{NUM_CELL}|{NUM_CELL}-{NUM_CELL}|\({NUM_CELL},{NUM_CELL}\)|[-–—]", v)
+                       for v in vals):
                 break
             names.append(nm.upper())
             for c, raw in zip(cols_raw, vals):
                 if not c:
                     continue
-                # 「36-48」(조절되는 허리)은 앞 값을 쓴다
-                raw = raw.split("-")[0] if re.fullmatch(rf"{NUM_CELL}-{NUM_CELL}", raw) else raw
+                # 「36-48」(조절되는 허리)과 「(74,78)」(9999archive 가 두 값을 괄호로 묶는다)은 앞 값을 쓴다
+                if re.fullmatch(rf"\({NUM_CELL},{NUM_CELL}\)", raw):
+                    raw = raw[1:].split(",")[0]
+                elif re.fullmatch(rf"{NUM_CELL}-{NUM_CELL}", raw):
+                    raw = raw.split("-")[0]
                 v = None if raw in ("-", "–", "—") else fix_value(c, raw)
                 cols.setdefault(c, []).append(v)
             i += k + 1
@@ -249,6 +257,11 @@ def from_ocr(text: str) -> tuple[list[str] | None, dict[str, list[float]]]:
         mat = parse_matrix(cand)
         if mat and len(mat[1]) >= 2:
             return mat[0], clean_ocr({k: list(vs) for k, vs in mat[1].items()})
+    # 설명글에만 걸어 두었던 정방향 표 읽기를 OCR 글에도 건다 — 「SIZE CM 총장 허리 … 1 114 40 …」
+    # 이 꼴이 OCR 글에 그대로 나오는데 243벌이 그래서 빠져 있었다(2026-09-04).
+    flat = parse_flat(text)
+    if flat and len(flat[1]) >= 2:
+        return flat[0], clean_ocr(flat[1])
     return None, clean_ocr(parse_rows(text))
 
 
