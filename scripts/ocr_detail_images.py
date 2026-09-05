@@ -113,7 +113,7 @@ def preprocess(data: bytes) -> bytes:
         return data
 
 
-def dark_bands(im, min_h=8, min_w=200, thr=120):
+def dark_bands(im, min_h=8, min_w=200, thr=150):
     """검정 바탕 가로 띠의 (top, bottom) 목록.
 
     사이즈 표의 머리줄(라벨이 든 줄)은 매장 절반이 검정 바탕에 흰 글자다. tesseract 는
@@ -125,7 +125,11 @@ def dark_bands(im, min_h=8, min_w=200, thr=120):
     w, h = im.size
     if w < min_w:
         return []
-    means = [ImageStat.Stat(im.crop((0, y, w, y + 1))).mean[0] for y in range(h)]
+    # 양옆 여백을 빼고 가운데만 잰다. 표 머리줄은 검은 판이지만 좌우에 흰 여백이 남아
+    # 줄 전체 평균이 문턱을 넘나들면서 한 띠가 둘로 쪼개졌다(2026-09-05 diafvine 1048:
+    # 536~572 한 줄이 (535,547)·(558,572) 로 갈려 라벨을 통째로 놓쳤다).
+    x0, x1 = int(w * 0.15), int(w * 0.85)
+    means = [ImageStat.Stat(im.crop((x0, y, x1, y + 1))).mean[0] for y in range(h)]
     runs, start = [], None
     for i, m in enumerate(means):
         if m < thr and start is None:
@@ -299,7 +303,10 @@ def ocr_cell_grid(small, src=None, ratio: float = 1.0, max_tables: int = 3) -> s
             h = rows[j]
             if len(h) < 2:
                 continue
-            if _is_value_row(h) or abs(len(h) - len(toks)) > 1:
+            # 칸 수는 딱 맞아야 한다. 하나만 어긋나도 라벨이 밀려 들어간다
+            # (2026-09-05 diafvine 1054: 머리줄 4칸 · 값 5칸 → 밑단 22.5·총장 53 처럼
+            # 한 칸씩 밀린 값이 나왔다. 없는 치수보다 틀린 치수가 나쁘다).
+            if _is_value_row(h) or len(h) != len(toks):
                 break
             head = h
             break
@@ -316,7 +323,7 @@ def ocr_cell_grid(small, src=None, ratio: float = 1.0, max_tables: int = 3) -> s
         n = len(toks)
         gap = 0
         while i < len(rows) and gap <= 2:
-            if _is_value_row(rows[i]) and abs(len(rows[i]) - n) <= 1:
+            if _is_value_row(rows[i]) and len(rows[i]) == n:
                 block.append(" ".join(t[4] for t in rows[i]))
                 gap = 0
             else:

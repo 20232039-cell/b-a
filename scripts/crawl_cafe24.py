@@ -283,7 +283,8 @@ ACC_TYPE_VOCAB = {
     "양말": ["양말", "socks", "삭스", "sock"],
     "스카프": ["스카프", "scarf", "머플러", "muffler", "넥워머", "neck warmer", "shawl"],
     "장갑": ["장갑", "glove", "글러브", "gloves", "미튼", "mitten", "암워머", "arm warmer"],
-    "헤어": ["헤어밴드", "hair band", "헤어핀", "hairpin", "바레트", "barrette", "스크런치",
+    "헤어": ["헤어밴드", "hair band", "headband", "head band", "hairband", "헤어 밴드",
+            "헤어핀", "hairpin", "바레트", "barrette", "스크런치",
             "커치프", "kerchief", "헤드랩", "headwrap", "두건", "반다나", "bandana",
             "scrunchie", "머리끈", "집게핀", "헤어 클립", "hair clip"],
     "아이웨어": ["선글라스", "sunglass", "안경", "eyewear", "glasses"],
@@ -1387,6 +1388,21 @@ CATEGORY_LABEL = {"tops": "Tops", "outer": "Outerwear", "bottoms": "Pants", "dre
                   "headwear": "Headwear", "jewelry": "Jewelry", "lifestyle": "Lifestyle", "pet": "Pet", "kids": "Kids", "other": ""}
 
 
+# 카페24가 매장을 만들 때 얹어 주는 견본 상점. 여기 상품은 「NYLON BACKPACK」·「REGULAR FIT
+# HOODIE」가 전부 28,000원인 카페24 기본 샘플이라 브랜드 상품이 아니다(2026-09-05 사람 지적:
+# low-classic 목록에 ecudemo199138.cafe24.com 9벌이 섞여 있었다).
+DEMO_HOST = re.compile(r"^(?:ecudemo\d*|sample\d*|demo\d*|test\d*)\.cafe24\.com$", re.I)
+
+
+def host_of(url: str) -> str:
+    return urlparse(url or "").netloc.lower()
+
+
+def registrable(host: str) -> str:
+    p = host.split(".")
+    return ".".join(p[-2:]) if len(p) >= 2 else host
+
+
 def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
     rows = []
     per_brand: dict[str, int] = {}
@@ -1395,6 +1411,7 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
     dropped_noimg = 0
     dropped_junk = 0
     dropped_kidpet = 0
+    dropped_demo = 0
     for path in sorted(CRAWL_DIR.glob("*.jsonl")):
         if path.name.startswith("_"):
             continue
@@ -1411,6 +1428,16 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
         # 아니다(dunst 의 LINK_0831.jpg 1,759건). 경로(/web/product/)로 가르면 depound 처럼
         # 자기 CDN(depound.cafe24.com/img/…)을 쓰는 매장의 진짜 사진 107장이 빠진다(2026-09-02).
         img_uses = collections.Counter(d.get("image_url", "") for d in latest.values())
+        # 한 브랜드는 제 도메인 하나(또는 en.· /shopN/ 같은 같은 도메인의 변형)를 쓴다.
+        # 다른 도메인이 소수로 끼어 있으면 그건 훑다가 흘러든 남의 매장이다.
+        host_uses = collections.Counter(host_of(d.get("source_url") or "") for d in latest.values())
+        main_reg = registrable(host_uses.most_common(1)[0][0]) if host_uses else ""
+        stray = {h for h, n in host_uses.items()
+                 if h and (DEMO_HOST.match(h)
+                           or (registrable(h) != main_reg and n / max(1, len(latest)) < 0.05))}
+        if stray:
+            print(f"[{slug}] 남의 매장에서 온 행을 뺀다: "
+                  + ", ".join(f"{h} {host_uses[h]}건" for h in sorted(stray)), file=sys.stderr)
         # 값이 통째로 1,000 아래면 그건 룩북이 아니라 외화 매장이다 — xlim 을 en.xlim.link
         # (cafe24 shop6, USD)로 훑은 탓에 921건 중 902건이 「90원」으로 들어와 아래 룩북 문턱에
         # 전멸했다(2026-09-04). 통화가 원이 아닌 매장은 걸러 낼 게 아니라 다시 받아야 한다.
@@ -1423,6 +1450,9 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
         for d in latest.values():
             # 상품이 아닌 행 — 룩북·캠페인 페이지가 가격 1원으로 /product/ 에 들어 있다
             # (dunst 「19 SPRING 'Here We Are'」 = 1원). build_products_seed.py 와 같은 문턱.
+            if host_of(d.get("source_url") or "") in stray:
+                dropped_demo += 1
+                continue
             if int(d.get("price") or 0) <= 1000:
                 continue
             # 상품 이름을 한 개인결제·룩북 페이지 — lecyto 「박민희 실장님 팀」 217건(가격 있음),
@@ -1496,7 +1526,7 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
         w = csv.DictWriter(f, fieldnames=CSV_FIELDS)
         w.writeheader()
         w.writerows(rows)
-    return len(rows), {"per_brand": per_brand, "dropped_dupe_image": dropped_dupe, "dropped_no_image": dropped_noimg, "dropped_junk_name": dropped_junk, "dropped_kids_pet": dropped_kidpet}
+    return len(rows), {"per_brand": per_brand, "dropped_dupe_image": dropped_dupe, "dropped_no_image": dropped_noimg, "dropped_junk_name": dropped_junk, "dropped_kids_pet": dropped_kidpet, "dropped_demo_shop": dropped_demo}
 
 
 # ─── main ───
