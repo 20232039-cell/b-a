@@ -68,7 +68,9 @@ def compile_alias(alias: str) -> re.Pattern:
     if _is_hangul(alias) and len(alias) == 2:
         return re.compile(rf"(?<![{HANGUL}]){a}")
     if re.fullmatch(r"[a-z0-9 /\-]+", alias.lower()):
-        return re.compile(rf"(?<![a-z0-9]){a}(?![a-z0-9])")
+        # 복수형 s 를 받는다 — 「Archive Long Sleeves」가 「long sleeve」에 안 걸려
+        # 상품명에 sleeve 723 · long 616 이 미등록으로 남아 있었다(2026-09-05).
+        return re.compile(rf"(?<![a-z0-9]){a}s?(?![a-z0-9])")
     return re.compile(a)
 
 
