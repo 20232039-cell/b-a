@@ -9,6 +9,16 @@
 name: refetch-detail
 
 on:
+  workflow_call:
+    inputs:
+      brands: {type: string, required: false, default: "all"}
+      fields: {type: string, required: false, default: "size,text"}
+      select: {type: string, required: false, default: "no-size"}
+      per_shard: {type: string, required: false, default: "250"}
+      buckets: {type: string, required: false, default: "20"}
+      max_minutes: {type: string, required: false, default: "45"}
+    secrets:
+      DATA_TOKEN: {required: true}
   workflow_dispatch:
     inputs:
       brands:
@@ -20,7 +30,7 @@ on:
         required: false
         default: "size,text"
       select:
-        description: "no-size | short-desc-or-no-size | no-detail-images | garments | all"
+        description: "no-size | short-desc-or-no-size | no-detail-images | garments | gaps | all"
         required: false
         default: "no-size"
       per_shard:

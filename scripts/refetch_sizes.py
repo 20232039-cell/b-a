@@ -25,9 +25,48 @@ from weekly_update import load_rows, save_rows  # noqa: E402
 GARMENT_CATS = {"Tops", "Pants", "Outerwear", "Knitwear", "Shirts", "Denim", "Skirts", "Dresses", ""}
 
 
+def _epoch(stamp: str) -> float:
+    try:
+        return time.mktime(time.strptime(stamp[:19], "%Y-%m-%dT%H:%M:%S"))
+    except Exception:
+        return 0.0
+
+
+_GAPS: set | None = None
+
+
+def _gap_urls() -> set:
+    """사이즈·소재·색·디테일 가운데 하나라도 빈 상품. 판독기의 --select gaps 와 같은 잣대다.
+
+    사람 지시(2026-09-05): 「html에 소재 디테일 있으면 그걸로 끝. 없으면 이미지 받아서 찾고」.
+    그래서 채우기 한 바퀴는 HTML 을 먼저 다시 열고, 그러고도 빈 것만 판독기로 넘긴다.
+    """
+    global _GAPS
+    if _GAPS is None:
+        root = cc.CRAWL_DIR.parent
+        sp, tp = root / "product_sizes.json", root / "product_tags_full.json"
+        have = set(json.loads(sp.read_text(encoding="utf-8"))) if sp.exists() else set()
+        tg = json.loads(tp.read_text(encoding="utf-8")) if tp.exists() else {}
+        _GAPS = {u for u, p in tg.items()
+                 if (u not in have or not (p or {}).get("tags", {}).get("material")
+                     or not (p or {}).get("tags", {}).get("color")
+                     or not ((p or {}).get("tags", {}).get("design_element")
+                             or (p or {}).get("tags", {}).get("construction")
+                             or (p or {}).get("tags", {}).get("hardware")))}
+    return _GAPS
+
+
 def wants(d: dict, select: str, cat: str) -> bool:
     if select == "all":
         return True
+    if select == "gaps":
+        # 매장에 예의: 한 번 다시 열어 보고도 안 채워진 상품을 네 시간마다 또 두드리지 않는다.
+        # 사흘은 지나야 다시 본다(그 사이 매장이 상세를 고쳤을 수 있다). 처음 도는 판에서는
+        # 아무도 이 표시가 없으니 전부 대상이 되고, 두 바퀴째부터는 새로 빈 것만 남는다.
+        seen = d.get("gaps_seen_at") or ""
+        if seen and (time.time() - _epoch(seen)) < 3 * 86400:
+            return False
+        return cat in GARMENT_CATS and d.get("source_url") in _gap_urls()
     if select == "garments":
         return cat in GARMENT_CATS          # 옷 전부(액세서리·가방·신발 제외) — 파서를 고친 뒤 한 번 다시 받을 때
     if select == "no-size":
@@ -83,6 +122,8 @@ def refetch(http: cc.PoliteSession, shop: cc.Shop, only_missing: bool, log, fiel
                     if nd.get(key) not in (None, "", [], {}):
                         d[key] = nd[key]
                 d["refetched_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+                if sel == "gaps":
+                    d["gaps_seen_at"] = d["refetched_at"]
                 touched.append(no)
                 if nd.get("size_table"):
                     got += 1
@@ -112,7 +153,7 @@ def main():
     ap.add_argument("--only-missing", action="store_true")
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--fields", default="size", help="size 또는 size,text")
-    ap.add_argument("--select", default="no-size", choices=["no-size", "short-desc-or-no-size", "no-detail-images", "garments", "all"])
+    ap.add_argument("--select", default="no-size", choices=["no-size", "short-desc-or-no-size", "no-detail-images", "garments", "gaps", "all"])
     ap.add_argument("--shard", default="1/1", help="k/n (Actions 샤딩)")
     ap.add_argument("--out-dir", help="갱신 행만 조각 파일로 (collect 가 합침)")
     ap.add_argument("--max-minutes", type=float, default=0, help="브랜드 하나에 쓸 시간 상한(분) — 넘으면 그 브랜드만 접는다")

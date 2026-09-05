@@ -5,6 +5,16 @@
 name: ocr-detail-images
 
 on:
+  workflow_call:
+    inputs:
+      brands: {type: string, required: false, default: ""}
+      max_images: {type: string, required: false, default: "3"}
+      all: {type: string, required: false, default: "false"}
+      shards: {type: string, required: false, default: ""}
+      select: {type: string, required: false, default: "short"}
+      redo: {type: string, required: false, default: "false"}
+    secrets:
+      DATA_TOKEN: {required: true}
   workflow_dispatch:
     inputs:
       brands:
@@ -236,12 +246,46 @@ jobs:
         run: |
           python scripts/size_from_ocr.py | head -2
           python scripts/tag_items.py | head -16
+          python scripts/size_gap_report.py || true
+          python scripts/missing_report.py || true
+      - name: 수집률 한 줄 (job summary)
+        shell: bash
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, csv, collections
+          NEW = {"siyazu","noirer","mardi-mercredi","margesherwood","nick-nicole","sinoon","grove",
+                 "vunque","loeuvre","xlim","stand-oil","osoi","koominseong","nonnod","miseki-seoul",
+                 "far-from-what","aoiro","junne","haiq","espionage","roaringrad"}
+          GAR = {"tops","outer","bottoms","dress","skirt","suiting"}
+          sz = json.load(open("data/product_sizes.json", encoding="utf-8"))
+          tg = json.load(open("data/product_tags_full.json", encoding="utf-8"))
+          c = collections.Counter()
+          for r in csv.DictReader(open("data/products_full.csv", encoding="utf-8-sig")):
+              if r["brand_slug"] in NEW or r["status"] != "ON_SALE":
+                  continue
+              u = r["source_url"]; t = (tg.get(u, {}) or {}).get("tags", {}) or {}
+              c["판매중"] += 1
+              if r["category_code"] in GAR:
+                  c["옷"] += 1
+                  if (sz.get(u) or {}).get("sizes"):
+                      c["사이즈"] += 1
+              if t.get("material"): c["소재"] += 1
+              if t.get("color"): c["색"] += 1
+              if t.get("design_element") or t.get("construction") or t.get("hardware"): c["디테일"] += 1
+          print("## 기존 47곳 · 판매중")
+          print(f"- 사이즈 {c['사이즈']:,}/{c['옷']:,} = {c['사이즈']/max(1,c['옷'])*100:.2f}%")
+          for k in ("소재", "색", "디테일"):
+              print(f"- {k} {c[k]:,}/{c['판매중']:,} = {c[k]/max(1,c['판매중'])*100:.2f}%")
+          PY
       - name: commit & push (rebase 후, 3회 재시도)
         shell: bash
         run: |
           git config user.name "layer-ocr-bot"
           git config user.email "ocr@layer.invalid"
-          git add data/crawl/ocr/ data/product_sizes.json data/product_tags_full.json
+          git add data/crawl/ocr/ data/product_sizes.json data/product_tags_full.json \
+                  data/_issues_existing_brands.csv data/size_unavailable.csv \
+                  data/_missing.csv data/_missing_existing.csv 2>/dev/null || true
+          git add -A data/crawl/ocr/ data/product_sizes.json data/product_tags_full.json
           git diff --cached --quiet && { echo "변화 없음"; exit 0; }
           git commit -m "OCR 결과 — $(ls data/crawl/ocr/*.jsonl | wc -l)개 브랜드 (Actions)"
           for i in 1 2 3; do
