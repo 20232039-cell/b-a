@@ -226,6 +226,28 @@ def ocr_tall(im) -> str:
     return "\n".join(out)
 
 
+SIZE_TAIL = re.compile(r"총장|어깨|가슴|소매|밑단|허리|밑위|암홀|허벅지|"
+                       r"size\s*guide|size\s*info|사이즈\s*정보|실측", re.I)
+
+
+def _cap(texts: list[str], limit: int = 12000) -> str:
+    """앞에서부터 잘라 내면 안 된다 — 사이즈 표는 상세 이미지 맨 끝에 있다.
+
+    6000자에서 앞부분만 남기던 시절 dnsr·easy-no-easy 는 「SIZE GUIDE (CM) SHOULDER
+    CHEST SLEEVE LENGTH / OS - 37.5 - 53」이 잘려 나가 「원본에 실측이 없다」로
+    세어졌다(사람이 화면으로 짚어 줌, 2026-09-05). 넘치면 표가 있는 쪽을 남긴다."""
+    full = "\n".join(texts)
+    if len(full) <= limit:
+        return full
+    tail = None
+    for m in SIZE_TAIL.finditer(full):
+        tail = m
+    if tail is None:
+        return full[:limit]
+    lo = max(0, tail.start() - limit // 3)
+    return full[:limit // 3] + "\n…\n" + full[lo:lo + (limit * 2) // 3]
+
+
 def ocr_bytes(data: bytes) -> str:
     """tesseract 로 한 장. --psm 6(균일 블록)이 상품 상세의 세로 긴 이미지에 가장 안정적이었다."""
     data = preprocess(data)
@@ -397,7 +419,7 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
                     with wlock:
                         counters["early"] += 1
                     break
-            ocr_text = "\n".join(texts)[:6000]
+            ocr_text = _cap(texts)
             with wlock:
                 counters["done"] += 1
                 if ocr_text:

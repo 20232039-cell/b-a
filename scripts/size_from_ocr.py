@@ -146,7 +146,9 @@ def parse_paren_slash(text: str) -> tuple[list[str], dict[str, list[float]]] | N
         # fix_value 가 가운뎃값을 쓰게 한다. 숫자만 긁으면 34 와 44 가 두 칸이 된다.
         num = r"\d{1,4}(?:[.,]\d{1,2})?"
         cell = rf"{num}(?:\s*[~\-–]\s*{num})?\s*(?:cm)?"
-        row_rx = re.compile(rf"\s*(?:\ufeff\s*)?({SIZE_NAME})\s*[l|I:\-–]?\s*"
+        # 보이지 않는 글자(\ufeff·\u200b)가 여러 개 붙기도 한다 — 하나만 허용했더니
+        # badblood 「… 밑단) \ufeff\ufeff S | 61 cm / …」를 놓쳤다(2026-09-05).
+        row_rx = re.compile(rf"[\ufeff\u200b\s]*({SIZE_NAME})\s*[l|I:\-–]?\s*"
                             rf"((?:{cell}\s*/\s*){{{n - 1}}}{cell})", re.I)
         names, cols = [], {c: [] for c in known}
         pos = m.end()
@@ -298,6 +300,10 @@ def parse_matrix(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] |
             # OCR 이 cm 을 em·cem·c¢m·om 으로 흘려 쓴다(easy-no-easy) — 숫자 뒤에 붙은 것만 지운다
             r = re.sub(r"(?<=\d)\s*(?:cm|cem|c[^\w\s]m|em|om|¢m|crn)\b", " ", r, flags=re.I)
             r = re.sub(r"(?<!\S)(\d[\d.,]*)/(\d[\d.,]*)(?!\S)", r"\1", r)   # 「35/19」= 겉/안
+            # 숫자 뒤에 한 글자만 붙은 것은 OCR 이 흘려 쓴 단위다 — diafvine 은 표가 그림이라
+            # 「39.5cm」이 「3950n」으로 온다(소수점은 떨어지고 cm 은 0n·07·0 이 된다).
+            # 글자만 떼면 기존 소수점 복원이 3950 → 395 → 39.5 로 되살린다(2026-09-05).
+            r = re.sub(r"(?<=\d)[A-Za-z가-힣](?=\s|$)", "", r)
             r = re.sub(r"\s+", " ", r)
             # 사이즈 이름: 「1」「M」뿐 아니라 「1 SIZE」「1 SIZE [9]」(easy-no-easy) 도 한 칸이다.
             # 숫자 뒤에 남는 부스러기(「Th (cm)」 — kirsh)는 버린다.
@@ -658,6 +664,10 @@ _COLOR = re.compile(
 def color_base(name: str) -> str:
     """상품 이름에서 색 이름과 대괄호를 걷어낸 알맹이 — 같은 옷의 다른 색을 한 묶음으로 묶는 열쇠."""
     n = re.sub(r"\[[^\]]*\]", "", name or "")
+    # 시즌 표기는 알맹이가 아니다 — 같은 옷을 한쪽만 「25FW 박스 플리츠 팬츠 차콜」로,
+    # 다른 쪽은 「박스 플리츠 팬츠 블랙」으로 올린다(rough-side). 그 접두사 하나 때문에
+    # 형제로 안 묶여 사이즈를 물려받지 못했다(사람이 링크로 짚어 줌, 2026-09-05).
+    n = re.sub(r"(?<![0-9A-Za-z])\d{2}\s*(?:fw|ss|su|aw|ps|s/s|f/w)(?![0-9A-Za-z])", " ", n, flags=re.I)
     n = _COLOR.sub(" ", n)
     return re.sub(r"\s+", " ", re.sub(r"[^0-9A-Za-z가-힣]+", " ", n)).strip().lower()
 

@@ -167,8 +167,13 @@ def main() -> None:
             for lab in set(first) & set(st):
                 a = [x for x in first[lab] if isinstance(x, (int, float))]
                 b = [x for x in st[lab] if isinstance(x, (int, float))]
-                n = min(len(a), len(b))
-                if n and any(abs(x - y) > 3 for x, y in zip(a[:n], b[:n])):
+                # 사이즈 벌 수가 다르면 맞댈 수 없다 — 한 벌짜리 [54] 와 세 벌짜리
+                # [42, 43.5, 45] 를 앞에서부터 짝지으면 멀쩡한 상품이 어긋난 것으로 잡힌다
+                # (9999archive 「Archive Long Sleeves」, 2026-09-05).
+                n = len(a)
+                if n != len(b) or not n:
+                    continue
+                if any(abs(x - y) > 3 for x, y in zip(a, b)):
                     fails["색만 다른 같은 옷인데 치수가 다름"].append(
                         (slug, f"{nm[:40]} {lab}: {a[:3]} vs {b[:3]}", u))
                     break

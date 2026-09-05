@@ -16,8 +16,16 @@
 안내(TEST2.jpg 399벌·ISSUE.jpg 359벌)는 잡히지만 컬렉션 배너는 2~4벌에만 쓰여
 문턱을 빠져나간다(2~4벌 공용이 515장). 룩 시험 6건 중 3건이 그래서 깨졌다.
 
-세 번째 기준은 사진의 모양이다. 배너는 가로로 넓고(비율 1.5+), 이어붙인 띠는 아주
-길고(0.35 미만), 착용샷은 세로 0.6~0.9 다. 크기는 파일 앞 32KB만 받아도 읽히므로
+세 번째 기준은 사진에서 읽힌 글자 수다. OCR 기록에 사진마다 글자 수가 남아 있고
+(images: [{url, chars}]), 22,865장의 분포가 「0자 36%」와 「60자 이상 61%」로 갈리며
+1~19자 구간이 0.1% 밖에 없다. 즉 사진이냐 글 박힌 이미지냐가 이 숫자로 거의 결정된다.
+20자를 문턱으로 쓴다 — 배너·안내물·사이즈표 그림이 다 여기 걸린다(사이즈표는 OCR
+재료로는 계속 쓰고 룩에서만 뺀다).
+
+네 번째 기준은 사진의 모양이다. 이어붙인 띠는 아주 길고(0.35 미만), 가로로 넓은 것은
+배너다(1.5+). 다만 세로 비율로 착용샷을 가릴 수는 없다 — 세로로 긴 팬츠 누끼도 0.6 이라
+kirsh 를 그 기준으로 골라 보니 다섯 장이 전부 누끼컷이었다. 착용샷 판별은 픽셀을
+봐야 하고(배경이 순백인가), 그건 이 스크립트가 하지 않는다. 크기는 파일 앞 32KB만 받아도 읽히므로
 (Range 요청) 사진을 다 내려받지 않는다. --measure 로 켠다.
 
 사용: py scripts/classify_photos.py [--shared-max 10] [--report]
@@ -38,6 +46,26 @@ BOILER = re.compile(
     r"(shipping|delivery|sms_btn|count_up|count_down|plus\.|minus\.|btn_|icon|logo"
     r"|banner|notice|guide|washing|caution|refund|exchange|newsize|size_?top"
     r"|kakaotalk|talk_photo|test\d|issue\.)", re.I)
+
+OCR_DIR = CRAWL / "ocr"
+TEXT_MAX = 20        # 이만큼 글자가 읽힌 사진은 사진이 아니라 글이다
+
+
+def ocr_chars() -> dict[str, int]:
+    """사진마다 OCR 로 읽힌 글자 수 — 있으면 배너·안내물을 이걸로 가장 정확히 가른다."""
+    out: dict[str, int] = {}
+    if not OCR_DIR.exists():
+        return out
+    for p in OCR_DIR.glob("*.jsonl"):
+        for l in p.read_text(encoding="utf-8").splitlines():
+            if not l.strip():
+                continue
+            d = json.loads(l)
+            for im in (d.get("images") or []):
+                u = im.get("url")
+                if u:
+                    out[u] = max(out.get(u, 0), im.get("chars") or 0)
+    return out
 
 
 def read_size(url: str, sess) -> tuple[int, int] | None:
@@ -65,7 +93,9 @@ def shape_of(w: int, h: int) -> str:
     if a < 0.35:
         return "이어붙인 띠"    # frizmworks 830x11620
     if 0.55 <= a <= 0.95:
-        return "착용샷 후보"
+        # 「착용샷」이라 부르면 안 된다 — 세로로 긴 팬츠 누끼도 0.6 이다. kirsh 를 이 기준으로
+        # 골라 봤더니 다섯 장이 전부 누끼컷이었다(2026-09-04). 착용샷 판별은 픽셀을 봐야 한다.
+        return "세로 사진"
     return "그 외"             # 정사각 누끼·디테일컷
 
 
@@ -118,6 +148,9 @@ def main():
 
     out: dict[str, dict] = {}
     rep = []
+    chars = ocr_chars()
+    if chars:
+        print(f"OCR 글자 수를 아는 사진 {len(chars):,}장")
     for p in sorted(CRAWL.glob("*.jsonl")):
         brand = p.stem
         recs = []
@@ -130,13 +163,13 @@ def main():
         for d in recs:
             for u in set((d.get("detail_images") or []) + (d.get("gallery") or [])):
                 use[u] += 1
-        kept = shared = boiler = 0
+        kept = shared = boiler = texty = 0
         withphoto = 0
         for d in recs:
             u0 = d.get("source_url")
             if not u0:
                 continue
-            photos, drop_s, drop_b = [], 0, 0
+            photos, drop_s, drop_b, drop_t = [], 0, 0, 0
             seen = set()
             for u in (d.get("gallery") or []) + (d.get("detail_images") or []):
                 if u in seen:
@@ -148,27 +181,33 @@ def main():
                 if BOILER.search(u.rsplit("/", 1)[-1]):
                     drop_b += 1
                     continue
+                if chars.get(u, 0) >= TEXT_MAX:
+                    drop_t += 1
+                    continue
                 photos.append(u)
             shared += drop_s
             boiler += drop_b
+            texty += drop_t
             kept += len(photos)
             if photos:
                 withphoto += 1
             out[u0] = {"brand_slug": brand, "photos": photos,
-                       "dropped_shared": drop_s, "dropped_boiler": drop_b}
-        rep.append((brand, len(recs), withphoto, kept, shared, boiler))
+                       "dropped_shared": drop_s, "dropped_boiler": drop_b,
+                       "dropped_texty": drop_t}
+        rep.append((brand, len(recs), withphoto, kept, shared, boiler, texty))
 
     (DATA / "look_photos.json").write_text(
         json.dumps(out, ensure_ascii=False), encoding="utf-8")
-    tk = sum(r[3] for r in rep); ts = sum(r[4] for r in rep); tb = sum(r[5] for r in rep)
-    print(f"상품 {len(out):,} · 룩 재료로 남긴 사진 {tk:,} · 공용으로 버림 {ts:,} · 안내물로 버림 {tb:,}"
+    tk = sum(r[3] for r in rep); ts = sum(r[4] for r in rep)
+    tb = sum(r[5] for r in rep); tt = sum(r[6] for r in rep)
+    print(f"상품 {len(out):,} · 룩 재료로 남긴 사진 {tk:,} · 버림 — 공용 {ts:,} · 안내물 {tb:,} · 글 박힌 것 {tt:,}"
           f" → {DATA / 'look_photos.json'}")
     if args.report:
-        print(f"\n{'브랜드':18s}{'상품':>6}{'사진있는상품':>12}{'남긴사진':>9}{'공용버림':>9}{'안내버림':>9}")
-        for brand, n, wp, k, s, b in sorted(rep, key=lambda r: -r[4]):
+        print(f"\n{'브랜드':18s}{'상품':>6}{'사진있는상품':>12}{'남긴사진':>9}{'공용':>7}{'안내물':>7}{'글':>7}")
+        for brand, n, wp, k, s, b, t in sorted(rep, key=lambda r: -(r[4] + r[6])):
             if n < 30:
                 continue
-            print(f"{brand:18s}{n:6d}{wp:12d}{k:9d}{s:9d}{b:9d}")
+            print(f"{brand:18s}{n:6d}{wp:12d}{k:9d}{s:7d}{b:7d}{t:7d}")
 
 
 if __name__ == "__main__":
