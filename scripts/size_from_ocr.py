@@ -44,7 +44,10 @@ for canon, als in LABELS.items():
     for a in [canon] + als:
         ALIAS[re.sub(r"\s+", "", a).lower()] = canon
 ALIAS_SORTED = sorted(ALIAS, key=len, reverse=True)
-LABEL_RX = re.compile("|".join(re.escape(a) for a in ALIAS_SORTED), re.I)
+# 라벨 사이에 낀 공백을 넘어가며 찾는다 — OCR 이 「총기장」을 「총 기장」으로, 「밑위」를
+# 「밑 위」로 띄어 쓴다. 별칭 키는 공백을 지운 꼴이라 원문과 안 맞았고, 그 한 칸 때문에
+# 머리줄이 라벨 둘을 못 채워 표가 통째로 버려졌다(frizmworks, 2026-09-05).
+LABEL_RX = re.compile("|".join(r"\s*".join(re.escape(c) for c in a) for a in ALIAS_SORTED), re.I)
 NUM = r"\d{1,3}(?:[.,]\d)?"
 # 행렬 표의 칸에는 다섯 자리까지 받는다 — OCR 이 「104.0cm」를 「10400」으로 흘려 쓴다(easy-no-easy).
 # 머리에 정식 라벨이 둘 이상 있고 칸 수가 정확히 맞을 때만 쓰이는 자리라, 값 대신 가격이 끼어들 여지가 없다.
