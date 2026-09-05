@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import csv
 import glob
 import json
 import os
@@ -114,6 +115,11 @@ def main() -> None:
 
     sizes = load("product_sizes.json")
     tags = load("product_tags_full.json")
+    # 분모는 앱이 실제로 보여 줄 목록(products_full.csv)과 같아야 한다. 크롤 원본을 세면
+    # 같은 옷의 다른 색처럼 대표컷이 겹쳐 빠진 304행이 분모에만 남아, 사이즈를 아무리
+    # 모아도 채울 수 없는 자리가 된다 — 퍼센트에 영원히 안 닫히는 구멍이 생긴다(2026-09-05).
+    catalog = {(r["brand_slug"], str(r["product_no"]))
+               for r in csv.DictReader(open(DATA / "products_full.csv", encoding="utf-8-sig"))}
 
     tot = live = app = 0
     have_sz = have_mat = 0
@@ -133,6 +139,8 @@ def main() -> None:
             live += 1
             if not is_apparel(r):
                 continue
+            if (slug, str(r["product_no"])) not in catalog:
+                continue      # products_full 이 대표컷 중복으로 뺀 행 — 앱에 없는 상품이다
             app += 1
             u = r.get("source_url")
             s = u in sizes
