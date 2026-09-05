@@ -130,10 +130,51 @@ def main() -> None:
             if set(st) & {"어깨", "가슴", "밑위", "허벅지"}:
                 fails["잡화에 옷 사이즈 표"].append((slug, f"{name} [{code}] {sorted(st)}", url))
 
+        # 9-1. 한 라벨 안에서 값이 배로 벌어진다 — 서로 다른 두 항목을 한 라벨로 읽은 것
+        for lab, vals in st.items():
+            pos = [v for v in vals if isinstance(v, (int, float)) and v > 0]
+            if len(pos) >= 2 and max(pos) / min(pos) > 1.6:
+                fails["한 라벨 안에서 값이 1.6배 넘게 벌어짐"].append(
+                    (slug, f"{name} {lab}={pos}", url))
+                break
+
         # 9. 이름은 잡화인데 옷으로 세고 있다(또는 그 반대)
         acc = match_acc(name)
         if acc and is_apparel(d):
             fails["잡화 이름인데 의류로 셈"].append((slug, f"{name} → {acc}", url))
+
+    # 9-2. 색만 다른 같은 옷인데 치수가 다르다 — 같은 옷이니 실측도 같아야 한다
+    import re as _re
+    _COL = _re.compile(r"[\s_\-\(\[/]*(black|white|ivory|beige|navy|blue|grey|gray|charcoal|khaki|"
+                       r"olive|brown|cream|pink|red|green|블랙|화이트|아이보리|베이지|네이비|블루|"
+                       r"그레이|차콜|카키|올리브|브라운|크림|핑크|레드|그린)[\s_\-\)\]/]*", _re.I)
+    fam = collections.defaultdict(list)
+    for slug, d in latest_rows():
+        if d.get("soldout"):
+            continue
+        u = d.get("source_url") or ""
+        st = (sizes.get(u) or {}).get("sizes") or {}
+        if not st:
+            continue
+        base = _COL.sub(" ", _re.sub(r"\[[^\]]*\]", "", d.get("name") or "")).strip().lower()
+        if base:
+            fam[(slug, base)].append((d.get("name"), u, st))
+    for (slug, base), sibs in fam.items():
+        if len(sibs) < 2:
+            continue
+        first = sibs[0][2]
+        for nm, u, st in sibs[1:]:
+            for lab in set(first) & set(st):
+                a = [x for x in first[lab] if isinstance(x, (int, float))]
+                b = [x for x in st[lab] if isinstance(x, (int, float))]
+                n = min(len(a), len(b))
+                if n and any(abs(x - y) > 3 for x, y in zip(a[:n], b[:n])):
+                    fails["색만 다른 같은 옷인데 치수가 다름"].append(
+                        (slug, f"{nm[:40]} {lab}: {a[:3]} vs {b[:3]}", u))
+                    break
+            else:
+                continue
+            break
 
     # 10. 매장 통째로 값이 이상하다 — 외화 매장(xlim/en.xlim.link)이 이 꼴이었다
     for slug, ps in per_brand_price.items():

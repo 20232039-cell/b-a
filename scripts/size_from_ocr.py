@@ -372,12 +372,66 @@ def bad_label(xs: list) -> bool:
     (22.75 가 쪼개짐). 표 전체가 아니라 그 라벨만 버린다 — 나머지 라벨은 멀쩡하다(2026-09-04).
     """
     nums = [x for x in xs if isinstance(x, (int, float))]
+    # 같은 옷의 사이즈끼리는 몇 cm 차이지 배로 벌어지지 않는다. 라벨 하나가 서로 다른
+    # 두 항목을 섞어 읽으면 그때만 크게 벌어진다 — 「총장 [108, 37]」(far-from-what),
+    # 「밑단 [10.5, 32]」(9999archive), 「총장 [40, 56, 95]」(dnsr).
+    # 실측 분포로 문턱을 정했다(2026-09-05, 라벨×상품 53,899개):
+    #   1.2배 이내 97.1% · 1.4배 이내 99.6% · 1.6배 이내 99.81%.
+    #   1.6배를 넘는 100개는 표본이 전부 깨진 값이었고, 1.4~1.6 구간은
+    #   「소매길이 [15,16,17,19,20,21,22]」(사이즈 일곱 벌짜리 반팔)처럼 멀쩡했다.
     if len(nums) < 4:
         return False
     return not (all(a <= b for a, b in zip(nums, nums[1:])) or all(a >= b for a, b in zip(nums, nums[1:])))
 
 
-def normalize_html(st: dict, brand: str = "", girth_keys: set | None = None) -> dict[str, list[float]]:
+def brand_label_median(crawl_dir) -> dict[tuple[str, str], float]:
+    """브랜드×라벨의 값 중앙값. 한 라벨 안에 엉뚱한 값이 섞였을 때 어느 쪽이 잡값인지 가른다.
+    「총장 [102, 28]」(tonywack)에서 102 가 그 브랜드의 바지 총장 무리에 속한다."""
+    import statistics
+    vals = defaultdict(list)
+    for p in sorted(crawl_dir.glob("*.jsonl")):
+        if p.name.startswith("_"):
+            continue
+        for l in p.read_text(encoding="utf-8").splitlines():
+            if not l.strip():
+                continue
+            d = json.loads(l)
+            st = d.get("size_table")
+            if not isinstance(st, dict):
+                continue
+            for k, vs in st.items():
+                c = canon_label(k)
+                if not c or not isinstance(vs, list):
+                    continue
+                for x in vs:
+                    try:
+                        f = float(str(x).replace(",", "."))
+                    except Exception:
+                        continue
+                    lo, hi = RANGES.get(c, (0, 999))
+                    if lo <= f <= hi:
+                        vals[(d["brand_slug"], c)].append(f)
+    return {k: statistics.median(v) for k, v in vals.items() if len(v) >= 12}
+
+
+def drop_strays(brand: str, c: str, vs: list[float], med: dict) -> list[float]:
+    """한 라벨 안에서 무리를 벗어난 값만 뺀다 — 라벨을 통째로 버리면 멀쩡한 값까지 잃는다.
+    같은 옷의 사이즈끼리는 몇 cm 차이지 배로 벌어지지 않는다(실측 2026-09-05: 라벨×상품
+    53,899개 중 1.2배 이내 97.1% · 1.6배 이내 99.81%). 1.6배를 넘게 벌어졌을 때만,
+    그 브랜드 그 라벨의 중앙값에 가까운 쪽을 남긴다."""
+    # OCR 표는 빈 칸을 None 으로 둔다 — 숫자만 놓고 본다
+    pos = [v for v in vs if isinstance(v, (int, float)) and v > 0]
+    if len(pos) < 2 or max(pos) / min(pos) <= 1.6:
+        return vs
+    m = med.get((brand, c))
+    if m is None:
+        return vs
+    keep = [v for v in vs if not isinstance(v, (int, float)) or m / 1.6 <= v <= m * 1.6]
+    return keep if any(isinstance(v, (int, float)) for v in keep) else vs
+
+
+def normalize_html(st: dict, brand: str = "", girth_keys: set | None = None,
+                   med: dict | None = None) -> dict[str, list[float]]:
     if sweep_all(st):
         return {}
     st = drop_inches(st)
@@ -390,6 +444,7 @@ def normalize_html(st: dict, brand: str = "", girth_keys: set | None = None) -> 
             continue
         girth = "둘레" in k or "circum" in k.lower() or (girth_keys is not None and (brand, c) in girth_keys)
         vs = [v for v in (fix_value(c, str(x), girth) for x in vals) if v is not None]
+        vs = drop_strays(brand, c, vs, med or {})
         if vs:
             out[c] = vs
     return out
@@ -491,6 +546,7 @@ def main():
     if brw:
         print(f"브라우저 기록 {len(brw)}건")
     girth_keys = brand_girth(CRAWL)
+    label_med = brand_label_median(CRAWL)
     shared = shop_wide_tables(CRAWL, rows)
     if girth_keys:
         print("둘레로 재는 브랜드×라벨:", sorted(f"{b}/{l}" for b, l in girth_keys))
@@ -514,7 +570,7 @@ def main():
             st = d.get("size_table")
             sizes, names, source = {}, None, None
             if isinstance(st, dict) and st and (k[0], json.dumps(st, sort_keys=True, ensure_ascii=False)) not in shared:
-                sizes = normalize_html(st, k[0], girth_keys)
+                sizes = normalize_html(st, k[0], girth_keys, label_med)
                 source = "html"
             # 크롤러의 SIZE_RX 가 「라벨 뒤 숫자 전부」로 잘못 자른 표는 설명글에서 다시 읽는다 —
             # kamien 은 표가 전부 설명글에 정방향으로 들어 있는데 59개가 그렇게 버려졌다(2026-09-04).
@@ -527,7 +583,7 @@ def main():
             if len(sizes) < 2 and b:
                 raw = b.get("size_table_raw") or {}
                 if raw:
-                    cand = normalize_html(raw, k[0], girth_keys)
+                    cand = normalize_html(raw, k[0], girth_keys, label_med)
                     if len(cand) > len(sizes):
                         sizes, names, source = cand, None, "browser"
                 if len(sizes) < 2:
@@ -542,6 +598,12 @@ def main():
                 names2, sizes2 = from_ocr(ocr[k])
                 if len(sizes2) > len(sizes):
                     sizes, names, source = sizes2, names2, "ocr"
+            if not sizes:
+                continue
+            # 어디서 왔든(HTML·브라우저·OCR) 무리를 벗어난 값은 여기서 한 번에 뺀다 —
+            # normalize_html 안에만 두었더니 OCR 로 읽은 「밑단 [10.5, 32]」가 그대로 남았다.
+            sizes = {c: v for c, v in ((c, drop_strays(k[0], c, v, label_med))
+                                       for c, v in sizes.items()) if v}
             if not sizes:
                 continue
             # 잡화에 옷 실측 표를 붙이지 않는다 — 매장 공용 안내표가 모자·양말·백팩에까지
