@@ -40,6 +40,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       brands: ${{ steps.s.outputs.brands }}
+      ocr_brands: ${{ steps.s.outputs.ocr_brands }}
       scope: ${{ steps.s.outputs.scope }}
     steps:
       - id: s
@@ -52,9 +53,14 @@ jobs:
           # 기존 브랜드 — 새로 들인 21곳(siyazu·noirer·mardi-mercredi …)을 뺀 나머지.
           # 목록은 size_gap_report.py 의 NEW 와 같은 뜻이다.
           EXISTING="9999archive afterpray amomento andersson-bell anotheryouth badblood beslow blayer blr coor depound diafvine divein dnsr dunst easy-no-easy etce fabrega frizmworks glowny haleine hatching-room helet insilence kamien kirsh learve lecyto lmood low-classic matin-kim mischief moif noice nothing-written numbering open-yy opus-0012 perenn pioneers pog-service recto rough-side rssc stu sunday-off-club the-coldest-moment the-museum-visitor thebarnnet tonywack wkndrs"
-          if [ "$SCOPE" = "all" ]; then B="all"; else B="$EXISTING"; fi
-          echo "scope=$SCOPE" >> "$GITHUB_OUTPUT"
-          echo "brands=$B"    >> "$GITHUB_OUTPUT"
+          # refetch 는 「all」이 전부를 뜻하고, ocr 은 「빈 값」이 전부를 뜻한다 — 둘을 따로 낸다.
+          # 예전에 「scope == 'all' 이면 빈 값, 아니면 brands」를 한 줄 식으로 쓰려다 알았다: GitHub 식에서
+          # 「조건 && '' || 값」은 빈 문자열이 거짓이라 늘 뒤엣값이 된다. 그러면 ocr 이
+          # brands=all 을 받아 data/crawl/all.jsonl 을 찾다가 한 벌도 안 읽는다.
+          if [ "$SCOPE" = "all" ]; then B="all"; O=""; else B="$EXISTING"; O="$EXISTING"; fi
+          echo "scope=$SCOPE"      >> "$GITHUB_OUTPUT"
+          echo "brands=$B"         >> "$GITHUB_OUTPUT"
+          echo "ocr_brands=$O"     >> "$GITHUB_OUTPUT"
           echo "### 채우기 — $SCOPE" >> "$GITHUB_STEP_SUMMARY"
 
   html:
@@ -73,7 +79,7 @@ jobs:
     if: always() && !cancelled()
     uses: ./.github/workflows/ocr.yml
     with:
-      brands: ${{ needs.pick.outputs.scope == 'all' && '' || needs.pick.outputs.brands }}
+      brands: ${{ needs.pick.outputs.ocr_brands }}
       select: gaps
       max_images: "8"
       redo: "true"
