@@ -330,7 +330,8 @@ ACC_TYPE_VOCAB = {
     "숄더백": ["숄더백", "shoulder bag", "숄더 백", "shoulder", "숄더", "사첼", "satchel", "새들", "saddle"],
     "토트백": ["토트백", "tote bag", "토트 백", "shopper", "쇼퍼"],
     "크로스백": ["크로스백", "cross bag", "crossbag", "crossbody", "크로스 백", "크로스", "sling bag", "슬링백"],
-    "백팩": ["백팩", "backpack", "knapsack", "냅색", "짐색", "gym sack"],
+    "백팩": ["백팩", "backpack", "knapsack", "냅색", "짐색", "gym sack",
+            "럭색", "럭샄", "rucksack", "ruck sack"],
     "미니백": ["미니백", "mini bag", "미니 백"],
     "호보백": ["호보백", "hobo bag", "호보 백", "호보", "hobo"],
     "보스턴백": ["보스턴", "boston", "더플", "duffle", "duffel", "weekender"],
@@ -343,7 +344,8 @@ ACC_TYPE_VOCAB = {
     "가방": ["가방", "bag", "백 "],
     # 모자
     "볼캡": ["볼캡", "ball cap", "baseball cap", "야구모자", "캠프캡", "camp cap", "5패널",
-            "five panel", "6패널", "snapback", "스냅백", "work cap", "워크캡", "cap", "캡"],
+            "five panel", "6패널", "snapback", "스냅백", "work cap", "워크캡", "뉴스보이", "newsboy", "헌팅캡", "hunting cap",
+            "cap", "캡"],
     "비니": ["비니", "beanie", "watch cap"],
     "버킷햇": ["버킷햇", "bucket hat", "버킷 햇", "boonie", "부니"],
     "베레": ["베레", "beret", "페도라", "fedora", "헌팅캡", "hunting cap", "베이커보이"],
@@ -543,6 +545,11 @@ KIDS_NAME = re.compile(r"^\s*[\[\(]?\s*(kids?|키즈|아동|주니어)\b|키즈|
 KIDS_FALSE = re.compile(r"kid[\s-]*mohair|키드[\s-]*모헤어|kid[\s-]*silk", re.I)
 
 
+# 이름 끝의 괄호 안이 색이나 소재면 그건 꾸밈말이다(「… CAP (DENIM)」).
+_TRAIL_PAREN = re.compile(
+    r"\s*[\(\[]\s*(?:[^\)\]]{0,24})\s*[\)\]]\s*$")
+
+
 def classify_category(name: str, category_names: list[str], description: str = "") -> str:
     if any(PET_CATEGORY.match(c or "") for c in category_names):
         return "pet"
@@ -551,6 +558,9 @@ def classify_category(name: str, category_names: list[str], description: str = "
         return "kids"
     if SHOE_FALSE.search(name):
         return "bottoms"
+    # 이름 맨 뒤 괄호는 색·소재를 적는 자리다 — 머리 낱말로 세면 안 된다.
+    # 「NEWSBOY CAP (DENIM)」이 데님이 뒤에 있다는 이유로 하의가 됐다(2026-09-05).
+    name = _TRAIL_PAREN.sub("", name)
     # 잡화 세분류가 먼저다 — 옷 어휘와 겹치는 낱말(니트 스카프·플리스 베레·데님 캡)이 있고,
     # 상품명은 「무엇인지」를 뒤에 적으므로 뒤에 걸린 쪽이 머리 낱말이다.
     acc = match_acc(name)
@@ -1534,6 +1544,27 @@ def registrable(host: str) -> str:
     return ".".join(p[-2:]) if len(p) >= 2 else host
 
 
+def load_dropped() -> set[tuple[str, str]]:
+    """목록에서 뺄 상품 — 열리지 않는 것과 사람이 빼라고 한 것.
+
+    dead_products.csv   probe_dead.py 가 실제로 페이지를 열어 보고 적는다(회원 전용·404).
+    excluded_products.csv  사람이 보고 판단한 것(매장 전용, 옷이 아닌 부자재).
+
+    브랜드 이름을 코드에 적지 않는다 — 매장은 바뀌고, 규칙을 박아 두면 썩는다.
+    """
+    out: set[tuple[str, str]] = set()
+    for name in ("dead_products.csv", "excluded_products.csv"):
+        p = DATA / name
+        if not p.exists():
+            continue
+        with p.open(encoding="utf-8-sig") as f:
+            for row in csv.DictReader(f):
+                b, no = (row.get("브랜드") or "").strip(), (row.get("상품번호") or "").strip()
+                if b and no:
+                    out.add((b, no))
+    return out
+
+
 def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
     rows = []
     per_brand: dict[str, int] = {}
@@ -1543,6 +1574,8 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
     dropped_junk = 0
     dropped_kidpet = 0
     dropped_demo = 0
+    dropped_gone = 0
+    gone = load_dropped()
     for path in sorted(CRAWL_DIR.glob("*.jsonl")):
         if path.name.startswith("_"):
             continue
@@ -1581,6 +1614,9 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
         for d in latest.values():
             # 상품이 아닌 행 — 룩북·캠페인 페이지가 가격 1원으로 /product/ 에 들어 있다
             # (dunst 「19 SPRING 'Here We Are'」 = 1원). build_products_seed.py 와 같은 문턱.
+            if (slug, str(d["product_no"])) in gone:
+                dropped_gone += 1     # 안 열리는 페이지·사람이 뺀 것
+                continue
             if host_of(d.get("source_url") or "") in stray:
                 dropped_demo += 1
                 continue
@@ -1665,7 +1701,7 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
         w = csv.DictWriter(f, fieldnames=CSV_FIELDS)
         w.writeheader()
         w.writerows(rows)
-    return len(rows), {"per_brand": per_brand, "dropped_dupe_image": dropped_dupe, "dropped_no_image": dropped_noimg, "dropped_junk_name": dropped_junk, "dropped_kids_pet": dropped_kidpet, "dropped_demo_shop": dropped_demo}
+    return len(rows), {"per_brand": per_brand, "dropped_dupe_image": dropped_dupe, "dropped_no_image": dropped_noimg, "dropped_junk_name": dropped_junk, "dropped_kids_pet": dropped_kidpet, "dropped_demo_shop": dropped_demo, "dropped_gone": dropped_gone}
 
 
 # ─── main ───
