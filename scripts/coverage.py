@@ -79,7 +79,7 @@ NON_APPAREL = re.compile(
 
 
 APPAREL_CODES = {"tops", "outer", "bottoms", "dress", "skirt", "suiting"}
-NON_APPAREL_CODES = {"shoes", "bags", "accessories", "headwear", "jewelry", "lifestyle"}
+NON_APPAREL_CODES = {"shoes", "bags", "accessories", "headwear", "jewelry", "lifestyle", "pet"}
 
 
 def _last(rx: re.Pattern, s: str) -> int | None:

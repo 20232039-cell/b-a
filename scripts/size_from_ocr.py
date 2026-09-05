@@ -31,7 +31,7 @@ OCR = CRAWL / "ocr"
 BROWSER = CRAWL / "browser"
 OUT = DATA / "product_sizes.json"
 
-NON_APPAREL_CODES = {"shoes", "bags", "accessories", "headwear", "jewelry", "lifestyle"}
+NON_APPAREL_CODES = {"shoes", "bags", "accessories", "headwear", "jewelry", "lifestyle", "pet"}
 # 옷에만 있는 실측 항목 — 잡화 행에 이게 있으면 표를 잘못 물어 온 것이다
 GARMENT_ONLY = {"어깨", "가슴", "밑위", "허벅지", "암홀", "화장", "소매길이"}
 GARMENT_LABELS = {"Tops", "Pants", "Outerwear", "Knitwear", "Shirts", "Denim", "Skirts", "Dresses"}
@@ -116,7 +116,9 @@ def parse_slots(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] | 
             toks.pop(0)
         if len(toks) < 3:
             continue
-        slots = [ALIAS.get(re.sub(r"\s+", "", t).lower()) for t in toks]
+        # 라벨 뒤에 붙은 기호를 떼고 본다 — 「총장(4) 어깨(8) 가슴(6)」처럼 그림의 번호를
+        # 달아 두는 표가 있다(mardi-mercredi 아동복). 별칭 표를 그대로 찾으면 다 놓친다.
+        slots = [canon_label(t) for t in toks]
         known = [c for c in slots if c]
         if len(known) < 2 or len(set(known)) != len(known):
             continue
@@ -125,18 +127,32 @@ def parse_slots(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] | 
             r = re.sub(r"[|ㅣ:;=_]", " ", row).strip()
             r = re.sub(r"(?<=\d)\s*(?:cm|cem|em|om|crn)\b", " ", r, flags=re.I)
             tok = re.sub(r"\s+", " ", r).split()
-            if len(tok) != len(slots) + 1:
+            # 머리줄 첫 칸이 사이즈 이름 칸의 제목일 때가 있다(「Unit(cm) 연령 신장 총장 …」)
+            # — 그때는 값 줄의 칸 수가 머리줄과 같다.
+            if len(tok) == len(slots) + 1:
+                nm, cells = tok[0], tok[1:]
+                cslots = slots
+            elif len(tok) == len(slots):
+                nm, cells = tok[0], tok[1:]
+                cslots = slots[1:]
+            else:
                 if names:
                     break
                 continue
-            nm, cells = tok[0], tok[1:]
-            if not re.fullmatch(SIZE_NAME, nm, re.I) or not all(
-                    re.fullmatch(rf"{NUM_CELL}|[-–—]", c) for c in cells):
+            # 숫자인지는 「아는 라벨」 자리만 본다 — 모르는 칸의 값은 어차피 버리는데
+            # 거기에 「5-6Y」·「100-110」(연령·신장)이 들어 있어 표 전체가 떨어졌다.
+            pairs = list(zip(cslots, cells))
+            named = [c for sl, c in pairs if sl]
+            # 사이즈 이름에 괄호가 붙는 표가 있다 — 「M(110)」·「J2(140)」(아동복 호칭)
+            nm_core = re.sub(r"\([^)]*\)$", "", nm) or nm
+            if not re.fullmatch(SIZE_NAME, nm_core, re.I) or not named or not all(
+                    re.fullmatch(rf"{NUM_CELL}|[-–—]", c) for c in named) or not any(
+                    re.fullmatch(NUM_CELL, c) for c in named):
                 if names:
                     break
                 continue
             names.append(nm.upper())
-            for c, raw in zip(slots, cells):
+            for c, raw in pairs:
                 if c:
                     cols[c].append(None if raw in ("-", "–", "—") else fix_value(c, raw))
         if names and (best is None or len(names) > len(best[0])):
@@ -322,7 +338,7 @@ def drop_inches(st: dict[str, list]) -> dict[str, list]:
 
     out = {}
     for k, v in st.items():
-        if not isinstance(v, list) or len(v) < 2:
+        if k == "_names" or not isinstance(v, list) or len(v) < 2:
             out[k] = v
             continue
         # 브라우저가 거둔 표는 값이 문자열이다(「61」) — 숫자로 못 읽는 칸은 그냥 남긴다
@@ -363,7 +379,10 @@ def clean_ocr(st: dict[str, list]) -> dict[str, list]:
 def sweep_all(st: dict) -> bool:
     """표 전체가 못 쓰는 경우 — 라벨이 한둘뿐인데 값이 일곱 개 넘게 붙어 있다(매장 공용 안내표거나
     한 라벨이 표를 통째로 쓸어담은 것). kamien 「총장 [41, 37.5, 31, 39, 51, 109]」이 그 예다."""
-    return len(st) <= 2 and any(isinstance(v, list) and len(v) > 6 for v in st.values())
+    # 「_names」는 라벨이 아니라 사이즈 이름 열이다 — 세면 안 된다(라벨 하나짜리 표가
+    # 「라벨 둘」로 보여 문턱을 빠져나가거나, 이름 여덟 개가 값으로 세어진다).
+    lab = {k: v for k, v in st.items() if k != "_names"}
+    return len(lab) <= 2 and any(isinstance(v, list) and len(v) > 6 for v in lab.values())
 
 
 def bad_label(xs: list) -> bool:
@@ -400,6 +419,8 @@ def brand_label_median(crawl_dir) -> dict[tuple[str, str], float]:
             if not isinstance(st, dict):
                 continue
             for k, vs in st.items():
+                if k == "_names":
+                    continue
                 c = canon_label(k)
                 if not c or not isinstance(vs, list):
                     continue
@@ -572,6 +593,10 @@ def main():
             if isinstance(st, dict) and st and (k[0], json.dumps(st, sort_keys=True, ensure_ascii=False)) not in shared:
                 sizes = normalize_html(st, k[0], girth_keys, label_med)
                 source = "html"
+                # 크롤러가 표의 사이즈 이름 열을 「_names」로 함께 넘긴다(2026-09-05).
+                hn = st.get("_names")
+                if isinstance(hn, list) and hn:
+                    names = [str(x) for x in hn]
             # 크롤러의 SIZE_RX 가 「라벨 뒤 숫자 전부」로 잘못 자른 표는 설명글에서 다시 읽는다 —
             # kamien 은 표가 전부 설명글에 정방향으로 들어 있는데 59개가 그렇게 버려졌다(2026-09-04).
             if len(sizes) < 2:
@@ -600,6 +625,19 @@ def main():
                     sizes, names, source = sizes2, names2, "ocr"
             if not sizes:
                 continue
+            # HTML 표에는 사이즈 이름 열이 없다(크롤러가 라벨 칸만 읽었다 — 2026-09-05 에
+            # 「_names」로 함께 넘기게 고쳤지만 이미 받아 둔 기록에는 없다). 같은 상품의 OCR
+            # 글에서 표를 다시 읽어 이름만 빌려 온다. 다른 표의 이름을 붙이면 안 되니,
+            # 사이즈 개수가 같고 겹치는 라벨의 값이 1cm 안에서 맞을 때만 쓴다.
+            if not names and source in ("html", "browser") and ocr.get(k):
+                n2, s2 = from_ocr(ocr[k])
+                want = max((len(v) for v in sizes.values() if isinstance(v, list)), default=0)
+                if n2 and len(n2) == want >= 2:
+                    same = [c for c in set(sizes) & set(s2)
+                            if all(abs(a - b) <= 1 for a, b in zip(sizes[c], s2[c])
+                                   if isinstance(a, (int, float)) and isinstance(b, (int, float)))]
+                    if same:
+                        names = n2
             # 어디서 왔든(HTML·브라우저·OCR) 무리를 벗어난 값은 여기서 한 번에 뺀다 —
             # normalize_html 안에만 두었더니 OCR 로 읽은 「밑단 [10.5, 32]」가 그대로 남았다.
             sizes = {c: v for c, v in ((c, drop_strays(k[0], c, v, label_med))

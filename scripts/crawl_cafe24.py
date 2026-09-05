@@ -427,7 +427,16 @@ def match_acc(name: str) -> str:
             return ""       # 옷 낱말이 더 뒤 = 그게 머리 낱말이다
     return acc
 
+# 반려동물 옷 — 사람 옷이 아니다. 이름만으로는 못 가른다: 「SHAGGY DOG SWEATER」(dunst)·
+# 「CAT RINGER T-SHIRT」(wkndrs)·「PUPPY T-SHIRT」는 동물 그림이 그려진 사람 옷이고,
+# mardi-mercredi 의 「PET TSHIRT」만 진짜 개 옷이다(권장 몸무게 ~3kg, 견갑골에서 꼬리까지).
+# 매장이 스스로 PET 칸에 넣어 둔 것만 뺀다 — 넓게 걸면 사람 옷 59벌이 잘린다(2026-09-05).
+PET_CATEGORY = re.compile(r"^\s*(pet|펫|반려|강아지|고양이|dog|cat)\s*$", re.I)
+
+
 def classify_category(name: str, category_names: list[str], description: str = "") -> str:
+    if any(PET_CATEGORY.match(c or "") for c in category_names):
+        return "pet"
     if SHOE_FALSE.search(name):
         return "bottoms"
     # 잡화 세분류가 먼저다 — 옷 어휘와 겹치는 낱말(니트 스카프·플리스 베레·데님 캡)이 있고,
@@ -823,9 +832,17 @@ def extract_size_from_tables(soup) -> dict[str, list[float]]:
             if len(known) < 2:
                 continue
             cols: dict[str, list[float]] = {}
+            names: list[str] = []
+            # 라벨이 아닌 칸 가운데 첫 칸이 사이즈 이름이다(「S」·「1 size 95」·「M(110)」).
+            # 여태 버리고 있어서, 값이 여러 벌인 상품 9,419건이 「어느 게 M 인지」를 몰랐다.
+            # 비교 기능은 사이즈별 실측을 나란히 놓아야 해서 이 이름이 꼭 필요하다(2026-09-05).
+            name_col = next((i for i in range(len(head)) if i not in known), None)
             for r in rows[hi + 1:hi + 10]:
                 if len(r) != len(head):
                     continue
+                if name_col is not None:
+                    nm = re.sub(r"\s+", " ", (r[name_col] or "").strip())[:20]
+                    names.append(nm)
                 for i in known:
                     m = re.fullmatch(r"\s*(\d{1,3}(?:\.\d{1,2})?)\s*(?:cm)?\s*", r[i] or "")
                     if not m:
@@ -835,6 +852,11 @@ def extract_size_from_tables(soup) -> dict[str, list[float]]:
                         cols.setdefault(labels[i], []).append(v)
             if len(cols) > len(best):
                 best = cols
+                # 값을 실제로 읽은 줄만큼만 이름을 남긴다
+                n = max((len(v) for v in cols.values()), default=0)
+                nm = [x for x in names if x][:n]
+                if len(nm) == n and n >= 2:
+                    best["_names"] = nm
             break
         else:
             # 전치 표 — 라벨이 첫 「열」에 있고 사이즈가 첫 행에 있다(diafvine, 2026-09-04 사람 지적):
@@ -859,6 +881,12 @@ def extract_size_from_tables(soup) -> dict[str, list[float]]:
                     cols[lab] = vals[:8]
             if len(cols) >= 2 and len(cols) > len(best):
                 best = cols
+                n = max((len(v) for v in cols.values()), default=0)
+                # 첫 행(라벨 칸을 뺀 나머지)이 사이즈 이름이다 — 「M(38) L(40) XL(42)」
+                head0 = [re.sub(r"\s+", " ", (c or "").strip())[:20] for c in rows[0][1:]] if rows else []
+                head0 = [x for x in head0 if x]
+                if len(head0) == n and n >= 2:
+                    best["_names"] = head0
     return best
 
 
@@ -908,6 +936,7 @@ def extract_size_matrix(t: str) -> dict[str, list[float]]:
             cols: dict[str, list[float]] = {l: [] for l in labels}
             pos = h.end() + m.end()
             got = 0
+            names: list[str] = []
             while got < 8:
                 r = row_rx.match(t, pos)
                 if not r:
@@ -917,11 +946,17 @@ def extract_size_matrix(t: str) -> dict[str, list[float]]:
                     break
                 for l, x in zip(labels, nums):
                     cols[l].append(x)
+                # 줄 머리의 사이즈 이름(S·M·1 size·FREE) — 이미 읽고 있으면서 버리고 있었다.
+                # 값이 여러 벌인 상품 1만 건이 「어느 게 M 인지」를 몰랐고, 비교 기능은
+                # 사이즈별 실측을 나란히 놓아야 해서 이 이름이 꼭 필요하다(2026-09-05).
+                names.append(re.sub(r"\s+", " ", r.group(1).strip())[:20])
                 got += 1
                 pos = r.end()
             keep = {l: v for l, v in cols.items() if v and _KNOWN.match(l)}
             if got and (got, len(keep)) >= best_score:
                 best, best_score = keep, (got, len(keep))
+                if len(names) == got >= 2 and len(set(names)) == got:
+                    best["_names"] = names
     return best
 
 
@@ -1324,7 +1359,7 @@ CSV_FIELDS = [
 ]
 CATEGORY_LABEL = {"tops": "Tops", "outer": "Outerwear", "bottoms": "Pants", "dress": "Dresses", "skirt": "Skirts",
                   "shoes": "Shoes", "bags": "Bags", "accessories": "Accessories", "suiting": "Suiting",
-                  "headwear": "Headwear", "jewelry": "Jewelry", "lifestyle": "Lifestyle", "other": ""}
+                  "headwear": "Headwear", "jewelry": "Jewelry", "lifestyle": "Lifestyle", "pet": "Pet", "other": ""}
 
 
 def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
