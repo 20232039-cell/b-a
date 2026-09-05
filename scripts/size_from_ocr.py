@@ -244,6 +244,10 @@ def parse_named_pairs(lines: list[str]) -> tuple[list[str], dict[str, list[float
 
 def _row_cells(row: str) -> list[str]:
     """값 줄을 칸으로 나눈다(맨 앞 사이즈 이름은 뺀다)."""
+    # 숫자 사이에 낀 콜론은 소수점이다 — siyazu 「One 58 64.5 72:3 25:5」의 72:3 은 72.3 이지
+    # 두 칸이 아니다. 칸 구분으로 보면 네 칸짜리 표가 여섯 칸이 되어 통째로 버려지고,
+    # 「36:5」는 36 으로 읽혀 값이 조용히 틀어졌다(2026-09-05). 뒤에 빈칸이 오면 구분이다.
+    row = re.sub(r"(?<=\d):(?=\d)", ".", row)
     r = re.sub(r"[|ㅣ:;=_]", " ", row).strip()
     r = re.sub(r"(?<=\d)\s*(?:cm|cem|c[^\w\s]m|em|om|¢m|crn)\b", " ", r, flags=re.I)
     # 한 칸에 두 수를 붙여 적는 표 — dnsr 의 레이어드 소매는 「35/19」(겉/안)다. 앞엣것이 값이다.
@@ -305,6 +309,10 @@ def parse_slots(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] | 
             continue
         names, cols = [], {c: [] for c in known}
         for row in lines[i + 1:i + 12]:
+            # 숫자 사이에 낀 콜론은 소수점이다 — siyazu 「One 58 64.5 72:3 25:5」의 72:3 은 72.3 이지
+            # 두 칸이 아니다. 칸 구분으로 보면 네 칸짜리 표가 여섯 칸이 되어 통째로 버려지고,
+            # 「36:5」는 36 으로 읽혀 값이 조용히 틀어졌다(2026-09-05). 뒤에 빈칸이 오면 구분이다.
+            row = re.sub(r"(?<=\d):(?=\d)", ".", row)
             r = re.sub(r"[|ㅣ:;=_]", " ", row).strip()
             r = re.sub(r"(?<=\d)\s*(?:cm|cem|em|om|crn)\b", " ", r, flags=re.I)
             tok = re.sub(r"\s+", " ", r).split()
@@ -386,6 +394,10 @@ def parse_matrix(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] |
         for row in lines[i + 1:i + 12]:
             # 세로선(|)은 칸 구분(frizmworks). 콜론·세미콜론은 OCR 이 세로선이나 점을 잘못 읽은 것이다
             # — 「M 49 55 58: 60」(dnsr, 2026-09-04) 처럼 한 글자 때문에 표 한 장을 통째로 버리고 있었다.
+            # 숫자 사이에 낀 콜론은 소수점이다 — siyazu 「One 58 64.5 72:3 25:5」의 72:3 은 72.3 이지
+            # 두 칸이 아니다. 칸 구분으로 보면 네 칸짜리 표가 여섯 칸이 되어 통째로 버려지고,
+            # 「36:5」는 36 으로 읽혀 값이 조용히 틀어졌다(2026-09-05). 뒤에 빈칸이 오면 구분이다.
+            row = re.sub(r"(?<=\d):(?=\d)", ".", row)
             r = re.sub(r"[|ㅣ:;=_]", " ", row).strip()
             # OCR 이 cm 을 em·cem·c¢m·om 으로 흘려 쓴다(easy-no-easy) — 숫자 뒤에 붙은 것만 지운다
             r = re.sub(r"(?<=\d)\s*(?:cm|cem|c[^\w\s]m|em|om|¢m|crn)\b", " ", r, flags=re.I)
@@ -454,15 +466,45 @@ def parse_matrix(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] |
                 nm, cells = (tok[0], tok[1:]) if tok else ("", [])
                 # 「S(1)」「M(2)」처럼 호수를 괄호로 덧붙인 이름(siyazu). 괄호를 떼고 본다.
                 nm = re.sub(r"[\[(]\w{1,4}[\])]$", "", nm) or nm
-                ok = [bool(re.fullmatch(NUM_CELL, c) or RANGE_RX.match(c)) for c in cells]
-                blank = [bool(re.fullmatch(r"[-–—]", c)) for c in cells]
-                junk = sum(1 for g, b in zip(ok, blank) if not g and not b)
-                if len(cells) != len(labels) or not _row_name_ok(nm) or not any(ok) \
-                        or junk > max(1, len(cells) // 4):
+                # 칸이 라벨보다 하나 많아도 받는다 — 머리줄의 라벨 하나가 OCR 로 깨지면
+                # (siyazu 「소매기장 소매통 ors」의 ors 는 암홀이다) 라벨만 하나 모자란다.
+                # 어느 쪽이 남는 칸인지는 위 갈래와 같은 잣대(윗줄과 닮은 쪽)로 고른다.
+                def _try(cs):
+                    if len(cs) != len(labels):
+                        return None
+                    ok = [bool(re.fullmatch(NUM_CELL, c) or RANGE_RX.match(c)) for c in cs]
+                    blank = [bool(re.fullmatch(r"[-–—]", c)) for c in cs]
+                    junk = sum(1 for g, b in zip(ok, blank) if not g and not b)
+                    if not any(ok) or junk > max(1, len(cs) // 4):
+                        return None
+                    return [c if g or b else "-" for c, g, b in zip(cs, ok, blank)]
+
+                def _dev(pc):
+                    tot = k = 0.0
+                    for c, v in zip(labels, pc):
+                        fv = fix_value(c, v)
+                        pv = cols[c][-1] if cols[c] else None
+                        if fv is None or pv in (None, 0):
+                            continue
+                        tot += abs(fv - pv) / abs(pv); k += 1
+                    return tot / k if k else 9e9
+
+                # +1 칸은 **이미 한 줄을 읽은 뒤에만** 받는다. 첫 줄부터 허용했더니 진짜 표
+                # 앞에 붙은 쓰레기 줄이 행으로 통과해 noirer 46벌에 가짜 행이 생겼다
+                # (2026-09-05: 「51.3 · null · null · 48.9 …」가 108.0 짜리 표 앞에 붙었다).
+                # 윗줄이 있으면 닮은 쪽을 고를 수 있으니 안전하다.
+                if len(cells) == len(labels):
+                    cand = [_try(cells)]
+                elif names:
+                    cand = [_try(cells[:len(labels)]), _try(cells[1:])]
+                else:
+                    cand = []
+                picks = [x for x in cand if x]
+                if not picks or not _row_name_ok(nm):
                     if names:      # 표가 끝났다
                         break
                     continue
-                nums = [c if g or b else "-" for c, g, b in zip(cells, ok, blank)]
+                nums = picks[0] if len(picks) == 1 else min(picks, key=_dev)
             if len(nums) < len(labels):
                 continue
             # 줄 머리가 치수 이름이면 이건 「눕힌 표」의 줄이다 — 사이즈 이름이 아니다.
