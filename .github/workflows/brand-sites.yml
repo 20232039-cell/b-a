@@ -1,0 +1,140 @@
+# 국내 브랜드의 공식몰·이메일·인스타를 찾는다.
+# data/musinsa_kept_domestic.csv 에 국내 브랜드 608곳이 있는데 공식몰 링크가 하나도 없다.
+# 링크가 없으면 크롤러가 손을 못 댄다 — 「발견」은 끝나 있고 남은 일은 「연결」이다.
+# 검색 엔진은 봇을 막으니 도메인을 짐작해 두드리고, 브랜드 이름 + 국내 쇼핑몰 흔적이
+# 둘 다 있을 때만 받아들인다(scripts/find_brand_sites.py 주석 참고).
+
+name: find-brand-sites
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: "브랜드 목록 CSV (data/ 기준)"
+        required: false
+        default: "data/musinsa_kept_domestic.csv"
+      shards:
+        description: "동시에 돌릴 조각 수"
+        required: false
+        default: "6"
+      limit:
+        description: "조각당 최대 브랜드 수 (0 이면 전부)"
+        required: false
+        default: "0"
+      redo:
+        description: "true 면 이미 못 찾은 것도 다시 시도"
+        required: false
+        default: "false"
+
+env:
+  DATA_BRANCH: crawl/cafe24-full-catalog
+
+permissions:
+  contents: read
+
+concurrency:
+  group: brand-sites-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - id: plan
+        shell: bash
+        run: |
+          n="${{ inputs.shards }}"; n="${n:-6}"
+          matrix=$(python3 -c "import json,sys; n=int('$n'); print(json.dumps({'include':[{'shard':k,'shards':n} for k in range(1,n+1)]}))")
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "조각 $n"
+
+  find:
+    needs: plan
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: work
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 데이터 저장소(비공개) 받기
+        uses: ./.github/actions/data-repo
+        with:
+          token: ${{ secrets.DATA_TOKEN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: 조각 ${{ matrix.shard }}/${{ matrix.shards }}
+        run: |
+          REDO=""; [ "${{ inputs.redo }}" = "true" ] && REDO="--redo"
+          LIM=""; [ "${{ inputs.limit }}" != "0" ] && LIM="--limit ${{ inputs.limit }}"
+          python scripts/find_brand_sites.py \
+            --source "${{ inputs.source }}" \
+            --shard "${{ matrix.shard }}/${{ matrix.shards }}" \
+            --delay 0.5 $REDO $LIM
+          mv data/brand_contacts.csv "brand_contacts.${{ matrix.shard }}.csv"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sites-${{ matrix.shard }}
+          path: work/brand_contacts.*.csv
+          if-no-files-found: ignore
+          retention-days: 7
+
+  collect:
+    needs: find
+    if: always()
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: work
+    steps:
+      - uses: actions/checkout@v4
+      - name: 데이터 저장소(비공개) 받기
+        uses: ./.github/actions/data-repo
+        with:
+          token: ${{ secrets.DATA_TOKEN }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: sites-*
+          path: work/_parts
+          merge-multiple: true
+      - name: 조각 합치기
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import csv, glob, os
+          FIELDS = ["name","name_en","slug","official_url","email","instagram",
+                    "biz_no","ceo","shop_platform","status","checked_at"]
+          have = {}
+          dst = "data/brand_contacts.csv"
+          if os.path.exists(dst):
+              for r in csv.DictReader(open(dst, encoding="utf-8")):
+                  have[r["slug"]] = r
+          added = 0
+          for p in sorted(glob.glob("_parts/*.csv")):
+              for r in csv.DictReader(open(p, encoding="utf-8")):
+                  old = have.get(r["slug"])
+                  # 찾은 쪽이 이긴다 — 조각을 다시 돌려도 이미 찾은 링크를 지우지 않는다.
+                  if old is None or (not old.get("official_url") and r.get("official_url")):
+                      have[r["slug"]] = r
+                      added += 1
+          with open(dst, "w", encoding="utf-8", newline="") as f:
+              w = csv.DictWriter(f, fieldnames=FIELDS); w.writeheader()
+              for s in sorted(have):
+                  w.writerow({k: have[s].get(k, "") for k in FIELDS})
+          found = sum(1 for v in have.values() if v.get("official_url"))
+          print(f"브랜드 {len(have)} · 공식몰 {found} · 이번에 채운 것 {added}")
+          PY
+      - name: 데이터 저장소에 커밋
+        shell: bash
+        run: |
+          git add data/brand_contacts.csv
+          git diff --cached --quiet && { echo "변화 없음"; exit 0; }
+          git commit -m "국내 브랜드 공식몰·연락처 (Actions)"
+          git push origin HEAD:${{ env.DATA_BRANCH }}
