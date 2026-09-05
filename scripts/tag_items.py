@@ -127,8 +127,10 @@ class Tagger:
             hits["silhouette"].add("루즈핏")
             if category in BOTTOMS:
                 hits["silhouette"].add("와이드")
-        if len(hits.get("material", ())) == 1 and re.search(r"혼방|blend", body, re.I):
-            hits["material"].add("폴리에스터")
+        # 「혼방」이라는 낱말만 보고 폴리에스터를 넣던 규칙을 뺀다(2026-09-05).
+        # 「부드러운 리오셀 혼방 소재」(badblood)에 폴리에스터가 붙었다 — 무엇과 섞였는지
+        # 페이지는 말하지 않는데 특정 섬유를 단정한 것이다. 324벌이 그 꼴이었다.
+        # 소재는 사람이 옷을 고르는 근거라, 빠진 것보다 틀린 것이 나쁘다.
 
         # color — 본문이 아니라 이름·대표색·스펙 색상에서만
         ct = color_text.lower()
