@@ -32,6 +32,10 @@ def wants(d: dict, select: str, cat: str) -> bool:
         return cat in GARMENT_CATS          # 옷 전부(액세서리·가방·신발 제외) — 파서를 고친 뒤 한 번 다시 받을 때
     if select == "no-size":
         return not d.get("size_table")
+    if select == "no-detail-images":
+        # 상세 그림을 한 장도 못 건진 상품 — 수집기가 그림을 버렸던 자리다
+        # (2026-09-05: 이름에 「logo」가 든 옷 611벌이 그랬다)
+        return not d.get("detail_images")
     # short-desc-or-no-size: JSON-LD 요약(≤300자)만 있거나, 옷인데 사이즈 표가 없는 것
     short = d.get("description_source") == "json-ld" and len(d.get("description") or "") <= 300
     nosize = not d.get("size_table") and cat in GARMENT_CATS
@@ -108,7 +112,7 @@ def main():
     ap.add_argument("--only-missing", action="store_true")
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--fields", default="size", help="size 또는 size,text")
-    ap.add_argument("--select", default="no-size", choices=["no-size", "short-desc-or-no-size", "garments", "all"])
+    ap.add_argument("--select", default="no-size", choices=["no-size", "short-desc-or-no-size", "no-detail-images", "garments", "all"])
     ap.add_argument("--shard", default="1/1", help="k/n (Actions 샤딩)")
     ap.add_argument("--out-dir", help="갱신 행만 조각 파일로 (collect 가 합침)")
     ap.add_argument("--max-minutes", type=float, default=0, help="브랜드 하나에 쓸 시간 상한(분) — 넘으면 그 브랜드만 접는다")

@@ -20,7 +20,7 @@ on:
         required: false
         default: "size,text"
       select:
-        description: "no-size | short-desc-or-no-size | garments | all"
+        description: "no-size | short-desc-or-no-size | no-detail-images | garments | all"
         required: false
         default: "no-size"
       per_shard:

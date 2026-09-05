@@ -1127,6 +1127,23 @@ def extract_size_matrix(t: str) -> dict[str, list[float]]:
     return best
 
 
+# 스킨 자산(로고·아이콘·버튼)은 파일 이름이 짧고 낱말 하나로 끝난다. 낱말만 보고 버리면
+# 상품 이름에 그 낱말이 든 옷의 상세 그림이 통째로 날아간다 — the-coldest-moment
+# 「mini logo pocket work jacket」이 그랬다(2026-09-05: 611벌, 그 중 사이즈 빈 옷 105벌).
+# 사람이 붙인 상세 그림 이름은 길다. 짧은 이름에서 구분자에 붙은 낱말만 자산으로 본다.
+_SIZE_WORD = re.compile(r"size|chart|guide|measure|사이즈|실측|치수", re.I)
+_ASSET_WORD = re.compile(r"(?:^|[/_.\-])(?:ico|icon|btn|logo|blank|spacer|badge|arrow)s?"
+                         r"(?:[0-9]|[/_.\-]|$)", re.I)
+
+
+def is_skin_asset(url: str, max_stem: int = 24) -> bool:
+    stem = re.sub(r"\?.*$", "", url).rsplit("/", 1)[-1]
+    stem = re.sub(r"\.[a-z0-9]{2,4}$", "", stem, flags=re.I)
+    if _SIZE_WORD.search(stem):
+        return False          # frizmworks 「fws_logo_hoody_size.jpg」 — 이름이 짧아도 사이즈표다
+    return len(stem) <= max_stem and bool(_ASSET_WORD.search(stem))
+
+
 def _strip_tags(s: str) -> str:
     return re.sub(r"\s+", " ", htmlmod.unescape(re.sub(r"<[^>]+>", " ", s or ""))).strip()
 
@@ -1334,14 +1351,15 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
 
     # 상세 이미지 — 이미지로만 설명하는 매장(matin-kim 1,170건 글 0자)의 설명은 여기 들어 있다.
     # OCR(scripts/ocr_detail_images.py)의 입력. 대표컷·갤러리·아이콘·스킨 자산은 뺀다.
-    SKIP_IMG = re.compile(r"\.(gif|svg)(\?|$)|/ico_|icon|btn_|logo|blank|spacer|txt_naver|sizeguide|img\.echosting\.cafe24\.com|/skin/|badge|arrow|\.png\?v=", re.I)
+    SKIP_IMG = re.compile(r"\.(gif|svg)(\?|$)|txt_naver|sizeguide|"
+                          r"img\.echosting\.cafe24\.com|/skin/|\.png\?v=", re.I)
     detail_images: list[str] = []
     for el in soup.select("#prdDetail, #details, .xans-product-detaildesign, .xans-product-additional, .product-detail-block, .xans-product-detail, "
                           ".more-info-content, .accordion-cont, .accordion-desc, .prd-detail-desc-list, .detailArea"):
         for img in el.select("img"):
             src = img.get("ec-data-src") or img.get("data-src") or img.get("data-original") or img.get("src") or ""
             src = _fix_url(src.strip(), shop.base)
-            if not src or SKIP_IMG.search(src):
+            if not src or SKIP_IMG.search(src) or is_skin_asset(src):
                 continue
             if "/web/product/" in src and re.search(r"/(medium|small|tiny)/", src):
                 continue  # 갤러리 축소본
