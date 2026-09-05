@@ -87,6 +87,14 @@ COLOR_VOCAB = {
 }
 
 ITEM_TYPE_VOCAB = {
+    # 신발 — 이름 우선순위를 타야 한다. 카테고리 폴백에만 두면 「UNISEX MATTIO ZIP-UP
+    # TRAINER」가 「zip-up」(집업)으로 잡혀 상의가 된다. match_vocab 은 가장 긴 낱말이
+    # 이기므로 trainer(7)가 zip up(6)을 누른다(2026-09-05).
+    "스니커즈": ["sneaker", "스니커", "trainer", "트레이너", "runner", "러너", "clog", "클로그"],
+    "부츠": ["boots", "boot", "부츠", "chelsea boot", "첼시부츠", "워커"],
+    "샌들": ["sandal", "샌들", "slipper", "슬리퍼", "mule", "뮬 "],
+    "구두": ["loafer", "로퍼", "derby", "더비", "maryjane", "mary jane", "메리제인",
+            "pumps", "펌프스", "ballet flat", "발레플랫", "moccasin", "모카신"],
     "후드": ["hoodie", "hoody", "후드", "후디", "sweat hoody", "sweat hoodie", "스웻 후드", "스웻후드"],
     "집업": ["zip-up", "zipup", "zip up", "집업", "half zip", "하프집업", "full zip", "풀집업", "quarter zip", "쿼터 집", "쿼터집"],
     # 스웻은 별도 품목이 아니다(사람 결정 2026-09-02): 스웻셔츠=맨투맨, 스웻팬츠=스웨트팬츠. 품목 단어 없는 「스웻」은 build_csv 가 상의일 때만 맨투맨
@@ -140,6 +148,7 @@ ITEM_TO_CATEGORY = {
     "저지": "tops", "반팔": "tops", "피케": "tops", "후드집업": "tops",
     "버뮤다": "bottoms", "레깅스": "bottoms", "조거팬츠": "bottoms",
     "파카": "outer", "MA-1/봄버": "outer", "플리스": "outer",
+    "스니커즈": "shoes", "부츠": "shoes", "샌들": "shoes", "구두": "shoes",
 }
 
 # 상품명·카테고리로도 못 정할 때 — 상세 설명의 치수 항목이 옷 종류를 말한다.
@@ -156,7 +165,13 @@ CATEGORY_NAME_RULES = [
     ("skirt", ["skirt", "스커트"]),
     ("bottoms", ["bottom", "하의", "pants", "팬츠", "denim", "데님", "jeans", "shorts", "쇼츠", "반바지", "trouser", "slacks", "슬랙스"]),
     ("tops", ["top", "상의", "tee", "t-shirt", "shirt", "셔츠", "knit", "니트", "sweat", "hood", "후드", "맨투맨", "blouse", "블라우스", "cardigan", "가디건", "vest", "베스트"]),
-    ("shoes", ["shoes", "신발", "sneaker", "boots", "부츠", "sandal", "샌들", "slipper", "슬리퍼", "footwear"]),
+    # 신발 어휘가 좁아서 실제보다 적게 잡혔다(2026-09-05: 태깅 340 vs 이름으로 센 것 ~500).
+    # 트레이너·메리제인·펌프스·더비·첼시·뮬·발레·클로그가 통째로 빠져 있었다.
+    ("shoes", ["shoes", "신발", "sneaker", "스니커", "boots", "부츠", "sandal", "샌들",
+               "slipper", "슬리퍼", "footwear", "trainer", "트레이너", "maryjane", "mary jane",
+               "메리제인", "pumps", "펌프스", "derby", "더비", "chelsea", "첼시", "loafer",
+               "로퍼", "mule", "뮬", "ballet", "발레", "clog", "클로그", "flat", "플랫",
+               "moccasin", "모카신", "runner", "러너"]),
     ("bags", ["bag", "가방", "tote", "backpack", "wallet", "지갑", "pouch", "파우치"]),
     ("accessories", ["acc", "액세서리", "악세사리", "cap", "hat", "모자", "belt", "벨트", "socks", "양말", "jewelry", "jewellery", "ring", "necklace", "scarf", "머플러", "muffler", "underwear", "언더웨어", "eyewear", "sunglass", "keyring", "glove", "장갑", "beanie", "비니", "bag charm", "charm", "키링", "wallet", "지갑"]),
     ("suiting", ["suit", "수트", "정장", "setup", "셋업"]),
@@ -190,7 +205,14 @@ def match_vocab(text: str, vocab: dict) -> str:
     return best
 
 
+# 신발 낱말이지만 옷인 것 — 부츠컷은 바지, 카고부츠는 없다. match_vocab 은 부분 일치라
+# 어휘로는 못 막고 여기서 먼저 걸러야 한다(2026-09-05: 「레이스업 부츠컷 데님」이 신발이 됐다).
+SHOE_FALSE = re.compile(r"부츠\s*컷|boot\s*cut|bootcut", re.I)
+
+
 def classify_category(name: str, category_names: list[str], description: str = "") -> str:
+    if SHOE_FALSE.search(name):
+        return "bottoms"
     item = match_vocab(name, ITEM_TYPE_VOCAB)
     if item in ITEM_TO_CATEGORY:
         return ITEM_TO_CATEGORY[item]
