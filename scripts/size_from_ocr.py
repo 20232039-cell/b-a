@@ -30,6 +30,7 @@ CRAWL = DATA / "crawl"
 OCR = CRAWL / "ocr"
 BROWSER = CRAWL / "browser"
 OUT = DATA / "product_sizes.json"
+MANUAL = DATA / "manual_sizes.csv"   # 사람이 그림을 보고 옮겨 적은 값 — 무엇보다 앞선다
 
 NON_APPAREL_CODES = {"shoes", "bags", "accessories", "headwear", "jewelry", "lifestyle", "pet"}
 # 옷에만 있는 실측 항목 — 잡화 행에 이게 있으면 표를 잘못 물어 온 것이다
@@ -501,11 +502,21 @@ def parse_rows(text: str) -> dict[str, list[float]]:
     """A형 — 라벨 뒤에 숫자 묶음. crawl SIZE_RX 와 같은 발상."""
     out: dict[str, list[float]] = {}
     t = re.sub(r"[ \t]+", " ", text)
-    for m in re.finditer(rf"({LABEL_RX.pattern})\s*(?:\([^)]{{0,24}}\))?\s*[:：]?\s*((?:{NUM}\s*(?:cm)?\s*[/,|]?\s*){{1,8}})", t, re.I):
+    # 라벨이 괄호 안에 든 표가 있다 — the-coldest-moment 는 「Thigh(허벅지)」로 적는데
+    # OCR 이 영문을 뭉개면 「111017(허벅지) 33.5cm …」가 되어 라벨 뒤에 닫는 괄호가 남는다.
+    # 그 한 글자 때문에 밑위·허벅지·밑단 세 줄을 통째로 놓쳤다(2026-09-05).
+    # 단위도 넓힌다 — 매장 오타·OCR 로 「105m」처럼 c 가 빠지면 그 뒤 값이 다 끊겼다.
+    for m in re.finditer(rf"({LABEL_RX.pattern})\s*(?:\([^)]{{0,24}}\))?\s*[)\]}}】』]?\s*[:：]?\s*"
+                         rf"((?:{NUM}\s*(?:c?m|em|om)?\s*[/,|]?\s*){{1,8}})", t, re.I):
         c = canon_label(m.group(1))
         if not c or c in out:
             continue
-        vals = [fix_value(c, x) for x in re.findall(NUM, m.group(2))]
+        raw = re.findall(NUM, m.group(2))
+        # 「Chest] 047+2s0}」 — 뒤에 붙은 깨진 라벨을 값으로 집어 47cm 를 지어냈다(mardi 4벌,
+        # 2026-09-05). 실측에 0 으로 시작하는 수는 없다. 이 갈래는 가장 느슨한 마지막 수단이라
+        # 의심스러운 것은 받지 않는 편이 낫다 — 없는 치수보다 틀린 치수가 나쁘다.
+        raw = [x for x in raw if not re.match(r"0\d", x)]
+        vals = [fix_value(c, x) for x in raw]
         vals = [v for v in vals if v is not None]
         if vals:
             out[c] = vals[:8]
@@ -716,11 +727,22 @@ def brand_label_median(crawl_dir) -> dict[tuple[str, str], float]:
     return {k: statistics.median(v) for k, v in vals.items() if len(v) >= 12}
 
 
+FLOOR_10 = {"총장", "가슴", "어깨", "허리", "허벅지", "밑위", "엉덩이", "암홀", "화장"}
+
+
 def drop_strays(brand: str, c: str, vs: list[float], med: dict) -> list[float]:
     """한 라벨 안에서 무리를 벗어난 값만 뺀다 — 라벨을 통째로 버리면 멀쩡한 값까지 잃는다.
     같은 옷의 사이즈끼리는 몇 cm 차이지 배로 벌어지지 않는다(실측 2026-09-05: 라벨×상품
     53,899개 중 1.2배 이내 97.1% · 1.6배 이내 99.81%). 1.6배를 넘게 벌어졌을 때만,
     그 브랜드 그 라벨의 중앙값에 가까운 쪽을 남긴다."""
+    # 옷에서 10cm 안 되는 총장·가슴·어깨는 없다. 실측으로 확인했다(2026-09-05, 값 186,138개
+    # 중 이 라벨들에서 10 미만은 0개). 그림 옆 번호를 값으로 집는 사고를 여기서 막는다 —
+    # andersson-bell 사이즈가이드의 「SLEEVE (OUTER) 8」이 소매길이 8cm 가 됐다.
+    # 소매길이·밑단·소매단은 뺀다 — 민소매 진동이나 소매부리는 실제로 작다.
+    if c in FLOOR_10:
+        vs = [v for v in vs if not isinstance(v, (int, float)) or v >= 10]
+        if not vs:
+            return []
     # OCR 표는 빈 칸을 None 으로 둔다 — 숫자만 놓고 본다
     pos = [v for v in vs if isinstance(v, (int, float)) and v > 0]
     if len(pos) < 2 or max(pos) / min(pos) <= 1.6:
@@ -842,6 +864,45 @@ def color_base(name: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^0-9A-Za-z가-힣]+", " ", n)).strip().lower()
 
 
+def load_manual() -> dict[str, dict]:
+    """data/manual_sizes.csv — 사람이 매장 그림을 보고 옮겨 적은 실측.
+
+    왜 필요한가: 매장이 사이즈표를 자바스크립트 탭 안 그림으로만 두면(etce 「SIZE GUIDE」)
+    서버 HTML 에도 상세 그림 목록에도 없다. 브라우저를 붙일 값어치가 없는 몇 벌은 사람이
+    보고 적는 편이 빠르다(2026-09-05 사람이 etce 두 벌을 그렇게 넘겨 줬다).
+
+    한 줄이 한 라벨이다:  링크, 사이즈이름, 항목, 값, 왜
+      https://etce.kr/...963/, S·M·L, 총장, 102·104·106, 사이즈가이드 그림
+    """
+    if not MANUAL.exists():
+        return {}
+    acc: dict[str, dict] = {}
+    for r in csv.DictReader(MANUAL.open(encoding="utf-8-sig")):
+        url = (r.get("링크") or "").strip()
+        lab = canon_label((r.get("항목") or "").strip()) or (r.get("항목") or "").strip()
+        vals = [v.strip() for v in re.split(r"[·|]", r.get("값") or "") if v.strip()]
+        names = [v.strip() for v in re.split(r"[·|]", r.get("사이즈이름") or "") if v.strip()]
+        if not url or not lab or not vals:
+            continue
+        try:
+            nums = [float(v) for v in vals]
+        except ValueError:
+            print(f"   manual_sizes.csv — 숫자가 아닌 값 {vals} ({url})")
+            continue
+        e = acc.setdefault(url, {"brand_slug": (r.get("브랜드") or "").strip(),
+                                 "source": "manual", "size_names": names or None, "sizes": {}})
+        e["sizes"][lab] = nums
+        if names and not e["size_names"]:
+            e["size_names"] = names
+    # 라벨마다 값 개수가 다르면 짧은 쪽에 맞춘다 — 사람도 오타를 낸다
+    for u, e in acc.items():
+        n = min(len(v) for v in e["sizes"].values())
+        e["sizes"] = {c: v[:n] for c, v in e["sizes"].items()}
+        if e["size_names"]:
+            e["size_names"] = e["size_names"][:n]
+    return acc
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--report", action="store_true")
@@ -961,6 +1022,14 @@ def main():
             out[r["source_url"]] = {"brand_slug": k[0], "source": source, "size_names": names, "sizes": sizes}
             src[source] += 1
             (per_brand_html if source in ("html", "browser") else per_brand_ocr)[k[0]] += 1
+    # 사람이 직접 옮겨 적은 값. 기계가 못 읽는 자리(사이즈가이드 탭 그림 등)를 사람이 메운
+    # 것이라 무엇보다 앞선다. 형제 물려주기보다 먼저 넣어야 같은 옷의 다른 색도 함께 산다.
+    for u, ent in load_manual().items():
+        if u in out and out[u].get("source") != "manual":
+            print(f"   손으로 적은 값이 {out[u]['source']} 값을 덮는다 — {u}")
+        out[u] = ent
+        src["manual"] += 1
+
     # 색만 다른 형제에게서 사이즈를 물려받는다 — 같은 옷이라 실측이 같다. 어디서 왔는지 남긴다.
     by_base = defaultdict(list)
     for k, r in rows.items():

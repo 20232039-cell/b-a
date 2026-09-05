@@ -99,7 +99,8 @@ COLOR_VOCAB = {
     "오트밀": ["oatmeal", "오트밀"], "잉크": ["ink blue", "잉크"],
     # 매장이 이름 뒤에 적어 두는데 어휘에 없어서 못 읽던 색(2026-09-05 실측)
     "인디고": ["indigo", "인디고"], "오렌지": ["orange", "오렌지"],
-    "토프": ["taupe", "토프"], "탠": ["coyote tan", "탠"],
+    "토프": ["taupe", "토프"], "탠": ["coyote tan", "탠", "tan"],
+    "머드": ["mud", "머드", "muddy"],
     "살몬": ["salmon", "살몬"], "라임": ["lime", "라임"], "멀티": ["멀티"],
     "모카": ["mocha", "모카"], "텐저린": ["tangerine", "텐저린"], "그레이프": ["그레이프"],
     "마젠타": ["magenta", "마젠타"], "로즈": ["rose", "로즈"],
@@ -349,8 +350,11 @@ ACC_TYPE_VOCAB = {
     "비니": ["비니", "beanie", "watch cap"],
     "버킷햇": ["버킷햇", "bucket hat", "버킷 햇", "boonie", "부니"],
     "베레": ["베레", "beret", "페도라", "fedora", "헌팅캡", "hunting cap", "베이커보이"],
+    # 「hood gear」는 옷이 아니라 머리에 쓰는 두건이다 — the-museum-visitor
+    # 「ART WORK PRINTED HOOD GEAR」가 후드티로 잡혀 사이즈를 찾고 있었다(2026-09-05 사람 확인).
     "트루퍼햇": ["트루퍼", "trooper", "ear flap", "이어플랩", "우샨카", "ushanka",
-                "발라클라바", "balaclava", "baraclava", "귀마개", "ear muff", "earmuff", "이어머프"],
+                "발라클라바", "balaclava", "baraclava", "귀마개", "ear muff", "earmuff", "이어머프",
+                "hood gear", "후드 기어", "후드기어", "hoodgear"],
     "선바이저": ["선바이저", "sun visor", "바이저"],
     # 주얼리
     "목걸이": ["목걸이", "necklace", "네클레이스", "네크리스", "넥클리스", "네클레스",
@@ -362,8 +366,11 @@ ACC_TYPE_VOCAB = {
     # 액세서리
     "벨트": ["벨트", "belt"],
     "양말": ["양말", "socks", "삭스", "sock"],
-    "스카프": ["스카프", "scarf", "머플러", "muffler", "넥워머", "neck warmer", "shawl"],
-    "장갑": ["장갑", "glove", "글러브", "gloves", "미튼", "mitten", "암워머", "arm warmer"],
+    "스카프": ["스카프", "scarf", "머플러", "muffler", "shawl", "숄"],
+    # 넥워머는 스카프가 아니라 목도리다(사람 지시 2026-09-05). 띄어 쓴 「넥 워머」도 받는다 —
+    # rough-side 「23FW 패커블 다운 넥 워머」가 「다운」 때문에 패딩으로 잡혀 있었다.
+    "목도리": ["넥워머", "넥 워머", "neck warmer", "넥게이터", "neck gaiter", "목도리"],
+    "장갑": ["장갑", "glove", "글로브", "글러브", "gloves", "미튼", "mitten", "암워머", "arm warmer"],
     "헤어": ["헤어밴드", "hair band", "headband", "head band", "hairband", "헤어 밴드",
             "헤어핀", "hairpin", "바레트", "barrette", "스크런치",
             "커치프", "kerchief", "헤드랩", "headwrap", "두건", "반다나", "bandana",
@@ -396,7 +403,8 @@ ACC_TO_CATEGORY = {
     "볼캡": "headwear", "비니": "headwear", "버킷햇": "headwear", "베레": "headwear",
     "트루퍼햇": "headwear", "선바이저": "headwear",
     "목걸이": "jewelry", "팔찌": "jewelry", "반지": "jewelry", "귀걸이": "jewelry", "브로치": "jewelry",
-    "벨트": "accessories", "양말": "accessories", "스카프": "accessories", "장갑": "accessories",
+    "벨트": "accessories", "양말": "accessories", "스카프": "accessories", "목도리": "accessories",
+    "장갑": "accessories",
     "헤어": "accessories", "아이웨어": "accessories", "넥타이": "accessories", "키링": "accessories",
     "폰액세서리": "accessories", "레그웨어": "accessories", "가방끈": "accessories", "우산": "accessories",
     "러그": "lifestyle", "테이블웨어": "lifestyle", "캔들": "lifestyle", "문구": "lifestyle",
@@ -412,7 +420,8 @@ ACC_SUB_CODE = {
     "볼캡": "ball-cap", "비니": "beanie", "버킷햇": "bucket-hat", "베레": "beret",
     "트루퍼햇": "trooper-hat", "선바이저": "sun-visor",
     "목걸이": "necklace", "팔찌": "bracelet", "반지": "ring", "귀걸이": "earring", "브로치": "brooch",
-    "벨트": "belt", "양말": "socks", "스카프": "scarf-muffler", "장갑": "gloves", "헤어": "hair-acc",
+    "벨트": "belt", "양말": "socks", "스카프": "scarf-muffler", "목도리": "scarf-muffler",
+    "장갑": "gloves", "헤어": "hair-acc",
     "아이웨어": "eyewear", "넥타이": "tie", "키링": "keyring-charm", "폰액세서리": "phone-acc",
     "레그웨어": "legwear",
     "러그": "rug-mat", "테이블웨어": "tableware", "캔들": "candle-incense", "문구": "stationery",
@@ -601,7 +610,8 @@ _NOT_COLOR = re.compile(r"cotton|polyester|nylon|wool|linen|모달|면\s*\d|혼�
 
 
 # 색이 아닌데 색 낱말을 품은 말. 「블루종」은 겉옷 이름이지 파랑이 아니다.
-_KO_TRAP = re.compile(r"블루종|블라우종")
+# 색 낱말을 품었지만 색이 아닌 말. 「스탠다드」가 탠으로 잡혔다(2026-09-05).
+_KO_TRAP = re.compile(r"블루종|블라우종|스탠다드|스탠딩|머드가드")
 _COLOR_RX: list = []
 
 
@@ -1355,7 +1365,11 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
                           r"img\.echosting\.cafe24\.com|/skin/|\.png\?v=", re.I)
     detail_images: list[str] = []
     for el in soup.select("#prdDetail, #details, .xans-product-detaildesign, .xans-product-additional, .product-detail-block, .xans-product-detail, "
-                          ".more-info-content, .accordion-cont, .accordion-desc, .prd-detail-desc-list, .detailArea"):
+                          ".more-info-content, .accordion-cont, .accordion-desc, .prd-detail-desc-list, .detailArea, "
+                          # 사이즈가이드를 접이식 칸에 그림으로 넣는 매장 — andersson-bell 은
+                          # 「SIZE INFO」 안의 .a_size_guide-contents 에 표 그림을 둔다. 위 선택자
+                          # 어디에도 안 걸려 상세 그림 목록에서 통째로 빠졌다(2026-09-05 사람 확인).
+                          '[class*="size_guide"], [class*="sizeguide"], [class*="size-guide"]'):
         for img in el.select("img"):
             src = img.get("ec-data-src") or img.get("data-src") or img.get("data-original") or img.get("src") or ""
             src = _fix_url(src.strip(), shop.base)
@@ -1562,6 +1576,25 @@ def registrable(host: str) -> str:
     return ".".join(p[-2:]) if len(p) >= 2 else host
 
 
+def load_manual_items() -> dict[tuple[str, str], dict]:
+    """data/manual_items.csv — 사람이 열어 보고 고친 분류.
+
+    이름만으로는 못 가리는 것이 있다. diafvine 「D-113 "F.S.H"」는 모자인데 이름 어디에도
+    모자라는 말이 없다(2026-09-05 사람 확인). 어휘에 브랜드별 암호를 넣는 대신 여기 적는다.
+
+      브랜드, 상품번호, 분류, 품목, 왜
+    """
+    p = DATA / "manual_items.csv"
+    if not p.exists():
+        return {}
+    out = {}
+    for r in csv.DictReader(p.open(encoding="utf-8-sig")):
+        b, no = (r.get("브랜드") or "").strip(), (r.get("상품번호") or "").strip()
+        if b and no:
+            out[(b, no)] = {"분류": (r.get("분류") or "").strip(), "품목": (r.get("품목") or "").strip()}
+    return out
+
+
 def load_dropped() -> set[tuple[str, str]]:
     """목록에서 뺄 상품 — 열리지 않는 것과 사람이 빼라고 한 것.
 
@@ -1594,6 +1627,7 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
     dropped_demo = 0
     dropped_gone = 0
     gone = load_dropped()
+    manual_items = load_manual_items()
     for path in sorted(CRAWL_DIR.glob("*.jsonl")):
         if path.name.startswith("_"):
             continue
@@ -1665,9 +1699,14 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
             else:
                 seen_images.add(img)
             code = classify_category(d["name"], d.get("category_names", []), d.get("description", ""))
+            fix = manual_items.get((slug, str(d["product_no"])))
+            if fix and fix.get("분류"):
+                code = fix["분류"]      # 사람이 열어 보고 고친 분류가 이긴다
             # 잡화는 잡화 어휘로 품목을 매긴다 — 옷 어휘를 태우면 「니트 스카프」가 니트가 된다
             acc = match_acc(d["name"]) if code in ACC_TO_CATEGORY.values() else ""
             item = acc or match_head(d["name"], ITEM_TYPE_VOCAB)
+            if fix and fix.get("품목"):
+                item, acc = fix["품목"], fix["품목"]
             if not item and code == "tops" and re.search(r"스웻|스웨트|sweat", d["name"], re.I):
                 item = "맨투맨"   # 「Toy Sweat」처럼 품목 단어 없이 스웻만 적은 상의 — 비니·백팩은 code 가 다르니 안 걸린다
             if int(d.get("price") or 0) >= PLACEHOLDER_PRICE:

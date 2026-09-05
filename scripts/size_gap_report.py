@@ -83,7 +83,22 @@ def draw_runs(text: str) -> int:
     return runs + (1 if cur >= 2 else 0)
 
 
+def load_confirmed_none() -> set:
+    """data/no_size_confirmed.csv — 사람이 상품을 열어 보고 「매장이 정말 안 적었다」고 확인한 것.
+
+    기계는 그림이 있으면 「아직 모름」으로 미룬다. 사람이 이미 보고 온 것을 계속 재판독
+    대상으로 세면 목표가 흐려진다(2026-09-05 lmood 두 벌).
+    """
+    p = DATA / "no_size_confirmed.csv"
+    if not p.exists():
+        return set()
+    return {((r.get("브랜드") or "").strip(), (r.get("상품번호") or "").strip())
+            for r in csv.DictReader(p.open(encoding="utf-8-sig"))
+            if (r.get("브랜드") or "").strip()}
+
+
 def main() -> None:
+    confirmed_none = load_confirmed_none()
     sizes = json.loads((DATA / "product_sizes.json").read_text(encoding="utf-8"))
     rows = list(csv.DictReader((DATA / "products_full.csv").open(encoding="utf-8-sig")))
     by_key = {(r["brand_slug"], r["product_no"]): r for r in rows}
@@ -124,6 +139,10 @@ def main() -> None:
                              " ".join(f"{k} {v}" for k, v in (d.get("spec") or {}).items())])
             row = {"브랜드": slug, "상품번호": no, "상품명": (d.get("name") or "")[:70],
                    "분류": r["category_code"], "링크": r["source_url"]}
+            if (slug, str(no)) in confirmed_none:
+                row["왜"] = "매장이 실측을 안 적음(사람이 열어 보고 확인)"
+                gone.append(row)
+                continue
             if HINT.search(body) or d.get("size_table"):
                 row["왜"] = "원문에 치수가 있는데 표로 못 만듦"
                 look.append(row)
