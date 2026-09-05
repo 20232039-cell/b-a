@@ -101,8 +101,24 @@ COLOR_VOCAB = {
     "인디고": ["indigo", "인디고"], "오렌지": ["orange", "오렌지"],
     "토프": ["taupe", "토프"], "탠": ["coyote tan", "탠"],
     "살몬": ["salmon", "살몬"], "라임": ["lime", "라임"], "멀티": ["멀티"],
+    "모카": ["mocha", "모카"], "텐저린": ["tangerine", "텐저린"], "그레이프": ["그레이프"],
     "마젠타": ["magenta", "마젠타"], "로즈": ["rose", "로즈"],
 }
+
+# 매장은 색을 붙여 쓰기도 한다 — MELANGEGRAY·DARKBROWN·OFFWHITE·JETBLACK. 낱말 경계를
+# 넣은 뒤로는 이런 것이 통째로 빠져서, 꾸밈말+색을 붙인 꼴을 어휘에 만들어 넣는다.
+# 「Laye(red)」·「(butter)fly」는 여전히 안 걸린다 — laye·fly 는 꾸밈말이 아니다.
+_C_MOD = ("light", "dark", "deep", "pale", "off", "jet", "dust", "soft", "medium", "melange")
+for _lab, _keys in list(COLOR_VOCAB.items()):
+    _base = [k for k in _keys if re.fullmatch(r"[a-z]+", k)]
+    COLOR_VOCAB[_lab] = _keys + [m + b for b in _base for m in _C_MOD]
+
+# 색 두 개를 붙여 적은 이름 — 앞의 색이 대표다(2026-09-05 실측으로 뽑은 것만).
+for _lab, _extra in (("카키", ["khakibeige"]), ("카멜", ["camelbeige"]),
+                     ("아이보리", ["ivoryblack"]), ("버건디", ["burgundygray", "burgundygrey"]),
+                     ("레드", ["redbrick"]), ("그레이", ["hotdrygrey", "hotdrygray"])):
+    COLOR_VOCAB[_lab] = COLOR_VOCAB[_lab] + _extra
+
 
 ITEM_TYPE_VOCAB = {
     # 신발 — 이름 우선순위를 타야 한다. 카테고리 폴백에만 두면 「UNISEX MATTIO ZIP-UP
@@ -230,6 +246,16 @@ JUNK_NAME = re.compile(r"^@|^[¥*\s]+$|실장님|이사님|원장님|디자이�
 # 에 올려 둔다(amomento 34 · rough-side 25 · haleine 11). JUNK_NAME 과 달리 이름만으로는
 # 못 가른다. 「EXHIBITION GRAPHIC T-SHIRT」는 전시가 아니라 티셔츠라서, 품목이 옷·잡화로
 # 잡히면 상품으로 둔다. 그래서 판정은 build_csv 에서 카테고리를 정한 뒤에 한다(2026-09-05).
+# 룩북·이벤트 페이지는 값을 매길 수 없어 매장이 자리표시 값을 넣는다 — glowny 9,999,999원
+# 41건(팝업·화보), low-classic 10,000,000원 15건(전부 [journal]). xlim 의 560만원 시어링
+# 재킷은 진짜 상품이라 문턱을 그 위에 둔다(2026-09-05 사람 지적으로 찾았다).
+PLACEHOLDER_PRICE = 9_999_999
+
+# 매장이 룩북을 넣어 두는 칸. 「STORE」·「COLLECTION」은 진짜 상품 칸이라 넣지 않는다
+# (perenn 의 ONLINE STORE 138벌, anotheryouth 의 COLLECTION 373벌이 전부 상품이다).
+EDITORIAL_CAT = re.compile(r"^(?:projects?|journal|campaign|lookbook|look ?book|editorial|"
+                           r"magazine|press|moments|룩북|화보|캠페인|매거진)$", re.I)
+
 LOOKBOOK_NAME = re.compile(
     r"\beditorial\b|\bshowcase\b|\bpop-?up\b|\bpresentation\b|\bexhibition\b|\blookbook\b|룩북|"
     r"\bcuration\s*(?:project|book)\b|\binterview\b|\bcampaign\b|캠페인|화보|전시|"
@@ -564,14 +590,53 @@ _NOT_COLOR = re.compile(r"cotton|polyester|nylon|wool|linen|모달|면\s*\d|혼�
                         r"배송|교환|반품|주문|제작|made in", re.I)
 
 
-def pick_color(name: str, description: str, spec: dict | None = None) -> str:
-    c = match_vocab(name, COLOR_VOCAB)
+# 색이 아닌데 색 낱말을 품은 말. 「블루종」은 겉옷 이름이지 파랑이 아니다.
+_KO_TRAP = re.compile(r"블루종|블라우종")
+_COLOR_RX: list = []
+
+
+def _color_patterns() -> list:
+    if not _COLOR_RX:
+        for label, keys in COLOR_VOCAB.items():
+            for k in keys:
+                if re.fullmatch(r"[a-z0-9 '\-]+", k):
+                    rx = re.compile(rf"(?<![a-z]){re.escape(k)}(?![a-z])")
+                else:
+                    rx = re.compile(re.escape(k))
+                _COLOR_RX.append((label, len(k), rx))
+    return _COLOR_RX
+
+
+def match_color(text: str) -> str:
+    """가장 긴 이름이 이긴다. 색이 아닌데 색 낱말을 품은 말은 먼저 가린다.
+
+    한글에 뒤 경계를 뒀더니 「블랙폴아웃」·「베이지우드」·「더스티그린카모」처럼 매장이
+    붙여 쓴 진짜 색 117벌이 빠졌다(2026-09-05). 경계 대신 함정 낱말만 가린다 —
+    실제로 걸린 것은 「블루종」(겉옷)뿐이고, 「그레이프」는 어휘에 넣어 길이로 이긴다.
+
+    「먼저 나온 색이 옷 색」으로 바꿔 봤다가 되돌렸다(2026-09-05). 한글 이름은 색을
+    뒤에 붙이는데(「내추럴 러브 심볼 티셔츠 네이비」) 앞의 제품 라인 이름이 색으로
+    잡혀 1,464벌이 틀어졌다. 영문 「_WHITE PALEPINK」 15벌을 얻자고 치를 값이 아니다.
+
+    뒤 경계는 남긴다 — 없으면 「블루종」이 블루, 「그레이프」가 그레이가 된다.
+    """
+    low = _KO_TRAP.sub(" ", (text or "").lower())
+    best, best_len = "", 0
+    for label, n, rx in _color_patterns():
+        if n > best_len and rx.search(low):
+            best, best_len = label, n
+    return best
+
+
+def pick_color(name: str, description: str, spec: dict | None = None,
+               options: list | None = None) -> str:
+    c = match_color(name)
     if c:
         return c
     # 이름에 색을 안 적는 매장(9999archive: 203 중 202)이 설명에 「Color: Washed Black」으로 적는다.
     m = re.search(r"(?:colou?r|색상|컬러)\s*[:：]\s*([^▪•|/\n]{1,40})", description or "", re.I)
     if m:
-        c = match_vocab(m.group(1), COLOR_VOCAB)
+        c = match_color(m.group(1))
         if c:
             return c
     # cafe24 「상품 요약정보」 칸 — xlim 은 이름이 「EP.6 01 SCARF」뿐이고 색을 여기에만 적는다.
@@ -582,9 +647,15 @@ def pick_color(name: str, description: str, spec: dict | None = None) -> str:
     for k in keys + ["상품요약정보", "상품 요약정보", "간략설명", "요약정보", "summary"]:
         v = str((spec or {}).get(k) or "").strip()
         if v and len(v) <= 40 and not _NOT_COLOR.search(v):
-            c = match_vocab(v, COLOR_VOCAB)
+            c = match_color(v)
             if c:
                 return c
+    # 옵션이 한 가지 색만 말할 때 — fabrega 「실버-FREE」, divein 「1 (95~100)-MELANGE GRAY」.
+    # 여러 색이면 아무거나 고를 수 없으니 비워 둔다. 없는 색보다 틀린 색이 나쁘다.
+    seen = {match_color(o) for o in (options or []) if "선택" not in str(o)}
+    seen.discard("")
+    if len(seen) == 1:
+        return seen.pop()
     return ""
 
 
@@ -1545,6 +1616,13 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
             item = acc or match_head(d["name"], ITEM_TYPE_VOCAB)
             if not item and code == "tops" and re.search(r"스웻|스웨트|sweat", d["name"], re.I):
                 item = "맨투맨"   # 「Toy Sweat」처럼 품목 단어 없이 스웻만 적은 상의 — 비니·백팩은 code 가 다르니 안 걸린다
+            if int(d.get("price") or 0) >= PLACEHOLDER_PRICE:
+                dropped_junk += 1     # 자리표시 값 — 룩북·이벤트 페이지다
+                continue
+            cats = [c.strip() for c in (d.get("category_names") or []) if c.strip()]
+            if cats and all(EDITORIAL_CAT.match(c) for c in cats):
+                dropped_junk += 1     # 칸이 통째로 룩북 칸이다(amomento 「Projects」)
+                continue
             if LOOKBOOK_NAME.search(d["name"]) and code == "other" and not acc:
                 dropped_junk += 1     # 룩북·에디토리얼·시즌 캠페인 — 상품이 아니다
                 continue
@@ -1562,7 +1640,8 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
                 "name": d["name"],
                 "gender_target": classify_gender(d.get("category_names", []), brand_gender.get(slug, "UNISEX")),
                 "price": d["price"],
-                "representative_color": pick_color(d["name"], d.get("description", ""), d.get("spec")),
+                "representative_color": pick_color(d["name"], d.get("description", ""), d.get("spec"),
+                                                   d.get("options")),
                 "season": "",
                 "status": "SOLD_OUT" if (d.get("soldout") or d.get("delisted")) else "ON_SALE",
                 "image_url": d["image_url"],

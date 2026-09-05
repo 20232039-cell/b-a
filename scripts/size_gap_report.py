@@ -34,9 +34,14 @@ NEW = {"siyazu", "noirer", "mardi-mercredi", "margesherwood", "nick-nicole", "si
        "vunque", "loeuvre", "xlim", "stand-oil", "osoi", "koominseong", "nonnod", "miseki-seoul",
        "far-from-what", "aoiro", "junne", "haiq", "espionage", "roaringrad"}
 
-HINT = re.compile(r"총장|총 ?기장|어깨|가슴|밑단|허리|밑위|암홀|허벅지|엉덩이|화장|"
-                  r"shoulder|chest|sleeve|waist|thigh|\bhem\b|\brise\b|\bbust\b", re.I)
+# 낱말만 보면 안 된다 — 「어깨의 절개 라인」·「여유 있는 밑위」처럼 설명 문장에도 나온다.
+# 옆에 숫자가 붙어야 실측이다(2026-09-05: 그 탓에 22벌을 「읽어야 함」으로 잘못 세었다).
+_LAB = (r"총장|총 ?기장|어깨|가슴|밑단|허리|밑위|암홀|허벅지|엉덩이|화장|소매|"
+        r"shoulder|chest|sleeve|waist|thigh|hem|rise|bust|length")
+HINT = re.compile(rf"(?:{_LAB})[^0-9가-힣A-Za-z]{{0,12}}\d{{1,3}}(?:[.,]\d)?"
+                  rf"|\d{{1,3}}(?:[.,]\d)?\s*(?:cm|CM)?[^0-9가-힣A-Za-z]{{0,4}}(?:{_LAB})", re.I)
 # 「S 36.5」처럼 사이즈 이름과 숫자만 있는 줄 — 도식 위에 찍힌 치수
+SKIP_IMG = re.compile(r"shipping|delivery|notice|issue|banner|event|coupon|logo|icon|배송|공지", re.I)
 DRAW = re.compile(r"^\s*(XS|S|M|L|XL|XXL|2XL|3XL|F|FREE|OS|\d{2,3})\s*(\d{1,3}(?:\.\d)?)\s*(?:cm)?\s*$", re.I)
 
 
@@ -113,9 +118,14 @@ def main() -> None:
             elif draw_runs(t) >= 2:
                 row["왜"] = "도식형 — 그림 위 숫자만 있고 라벨이 화살표뿐"
                 gone.append(row)
+            elif [u for u in (d.get("detail_images") or []) if not SKIP_IMG.search(u)]:
+                # 그림은 있는데 읽은 글에 치수가 없다 — 매장이 안 적었는지, 우리가 못 읽었는지
+                # 아직 모른다. 새 판독기로 다시 읽어 봐야 갈린다(2026-09-05).
+                row["왜"] = "그림은 있는데 아직 못 읽음 — 재판독 대상"
+                look.append(row)
             else:
                 row["왜"] = ("매장이 실측을 안 적음(설명글에 없음)" if reads_html
-                             else "매장이 실측을 안 적음(글·그림 어디에도 없음)")
+                             else "매장이 실측을 안 적음(그림도 글도 없음)")
                 gone.append(row)
 
     for name, data, keys in (("size_unavailable.csv", gone, ["왜", "브랜드", "상품명", "분류", "링크", "상품번호"]),

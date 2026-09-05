@@ -71,12 +71,30 @@ SIZE_NAME = r"(?:xxs|xs|s|m|l|xl|xxl|2xl|3xl|free|f|one\s*size|os|[A-Za-z0-9]{1,
 SET_NAME = r"(?:[A-Za-z가-힣][A-Za-z가-힣.\-]{0,11}(?:\s+[A-Za-z가-힣][A-Za-z가-힣.\-]{0,11})?)"
 
 
+# 앞에 붙으면 「다른 옷의 치수」라는 뜻인 말. 「나시총장」은 한 상품에 든 나시의 총장이라
+# 겉옷의 총장이 아니다 — 그냥 총장으로 받으면 같은 이름이 두 번 나와 표가 밀린다
+# (2026-09-05 kirsh 「총장 어째 가슴 화장 나시총장 나시어깨 나시가슴」).
+OTHER_GARMENT = re.compile(r"(?:나시|이너|아우터|inner|outer|반팔|긴팔|상의|하의)\s*$", re.I)
+
+
 def canon_label(s: str) -> str | None:
     key = re.sub(r"[\s()（）:：]", "", s).lower()
     if key in ALIAS:
         return ALIAS[key]
     m = LABEL_RX.search(s)
-    return ALIAS.get(re.sub(r"\s+", "", m.group(0)).lower()) if m else None
+    if not m:
+        return None
+    if OTHER_GARMENT.search(s[:m.start()]):
+        return None
+    g = re.sub(r"\s+", "", m.group(0))
+    # 한 글자 별칭(「품」=가슴, 「힙」=엉덩이)은 홀로 설 때만 받는다 — 그냥 두면
+    # 「제품색상은」·「상품」·「품목」이 전부 가슴이 된다(2026-09-05: 그 탓에 diafvine
+    # 두 벌이 안내 문장을 값 줄로 오해해 표를 통째로 잃었다).
+    if len(g) <= 1:
+        near = (s[max(0, m.start() - 1):m.start()] + s[m.end():m.end() + 1])
+        if re.search(r"[가-힣A-Za-z]", near):
+            return None
+    return ALIAS.get(g.lower())
 
 
 RANGE_RX = re.compile(r"^\s*(\d+(?:[.,]\d+)?)\s*[~\-–—]\s*(\d+(?:[.,]\d+)?)\s*$")
@@ -342,6 +360,14 @@ def parse_matrix(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] |
                 labels.append(c)
         if len(labels) < 2:
             continue
+        # 값 줄이 라벨로 시작하면 이 표는 「눕힌 표」다 — 머리줄로 잡으면 안 된다.
+        # 도식의 화살표 라벨(「ARMHOLE CHEST」)을 머리줄로 삼고 진짜 값 줄
+        # (「SHOULDER 53 56」)을 사이즈 이름으로 읽어 암홀 하나만 남았다
+        # (2026-09-05 andersson-bell). 그런 표는 parse_rows 가 바로 읽는다.
+        nxt = [x for x in lines[i + 1:i + 6] if x.strip()]
+        lab_first = sum(1 for x in nxt if canon_label(x.split()[0]) if x.split())
+        if lab_first >= 2:
+            continue
         labels = pick_labels(ln, labels, lines[i + 1:i + 6])
         names, cols = [], {c: [] for c in labels}
         for row in lines[i + 1:i + 12]:
@@ -399,6 +425,76 @@ def parse_matrix(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] |
     names, cols = best
     sizes = {c: v for c, v in cols.items() if any(x is not None for x in v)}
     return names, sizes
+
+
+def parse_label_run(text: str) -> tuple[list[str], dict[str, list[float]]] | None:
+    """줄 단위로 먼저 보고, 한 줄에 다 뭉친 글은 통째로 본다.
+
+    통째로만 보면 도식 위 화살표 라벨(「SHOULDER … ARMHOLE CHEST LENGTH SLEEVE」)이
+    줄을 건너뛰어 머리줄이 되고, 그 아래 「SHOULDER 53 56」이 값 줄로 읽힌다
+    (2026-09-05 andersson-bell: 암홀 하나만 남고 나머지가 None 이 됐다).
+    """
+    for cand in ([ln for ln in (text or "").splitlines() if ln.strip()], [text or ""]):
+        for one in cand:
+            got = _label_run_one(one)
+            if got:
+                return got
+    return None
+
+
+def _label_run_one(text: str) -> tuple[list[str], dict[str, list[float]]] | None:
+    """라벨이 줄줄이 붙어 있으면 그 자리를 기준으로 삼는다 — 「SIZE」라는 낱말이 없어도.
+
+    parse_flat 은 「SIZE」 뒤부터 읽는데, 그 낱말과 표 사이에 안내 문장이 끼면 못 읽는다
+    (2026-09-05 kirsh: 「SIZE 실측 사이즈는 … (cm) 총장 어째 가슴 화장 나시총장 …
+    005 48 37 …」). 라벨이 잇달아 나오는 자리가 곧 머리줄이다.
+    """
+    tok = re.sub(r"[|ㅣ:;=]", " ", text or "").split()
+    NUMISH = rf"{NUM_CELL}(?:cm)?|{NUM_CELL}-{NUM_CELL}"
+    best = None
+    i = 0
+    while i < len(tok):
+        if re.fullmatch(NUMISH, tok[i], re.I) or not canon_label(tok[i]):
+            i += 1
+            continue
+        # 머리줄 — 숫자가 나올 때까지 낱말을 모은다
+        cols: list[str | None] = []
+        j = i
+        while j < len(tok) and not re.fullmatch(NUMISH, tok[j], re.I) and len(cols) <= 12:
+            cols.append(canon_label(tok[j]))
+            j += 1
+        # 끝의 모르는 칸을 잘라내면 안 된다 — 「나시총장 나시어깨 나시가슴」도 자리는 차지한다.
+        # 잘랐더니 사이즈 이름 자리가 밀려 총장 값이 어깨로 들어갔다(2026-09-05 kirsh).
+        seen: set[str] = set()
+        for x, c in enumerate(cols):
+            if c and c in seen:
+                cols[x] = None
+            elif c:
+                seen.add(c)
+        k = len(cols)
+        if len(seen) < 3 or k < 3:
+            i += 1
+            continue
+        # 값 줄 — 사이즈 이름 하나 + 값 k 개씩 끊는다
+        names, out = [], {c: [] for c in cols if c}
+        pos = i + k                            # 사이즈 이름 자리(머리줄 바로 뒤)
+        while pos + k < len(tok) + 1 and len(names) < 8:
+            nm = tok[pos]
+            cells = tok[pos + 1:pos + 1 + k]
+            if len(cells) < k or not all(re.fullmatch(NUMISH, c, re.I) for c in cells):
+                break
+            if re.fullmatch(NUMISH, nm, re.I) and not _row_name_ok(nm):
+                break
+            names.append(nm.upper())
+            for c, raw in zip(cols, cells):
+                if c:
+                    out[c].append(fix_value(c, re.sub(r"(?i)cm$", "", raw)))
+            pos += k + 1
+        out = {c: v for c, v in out.items() if any(x is not None for x in v)}
+        if names and len(out) >= 2 and (best is None or len(out) > len(best[1])):
+            best = (names, out)
+        i = j
+    return best
 
 
 def parse_rows(text: str) -> dict[str, list[float]]:
@@ -543,6 +639,13 @@ def from_ocr(text: str) -> tuple[list[str] | None, dict[str, list[float]]]:
         slot = parse_slots(cand)
         if slot and len(slot[1]) >= 2:
             return slot[0], clean_ocr({k: list(vs) for k, vs in slot[1].items()})
+    # 가장 느슨한 읽기 — 앞의 것이 다 실패했을 때만. 검사를 통과한 뒤에도 라벨이
+    # 둘은 남아야 받는다(한 줄만 살아남는 것은 대개 잘못 읽은 것이다).
+    run = parse_label_run(text)
+    if run:
+        clean = clean_ocr(run[1])
+        if len(clean) >= 2:
+            return run[0], clean
     return None, clean_ocr(parse_rows(text))
 
 
