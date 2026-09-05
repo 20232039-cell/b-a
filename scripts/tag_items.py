@@ -47,6 +47,7 @@ GARMENT_AXES = {"neckline", "sleeve_length", "silhouette", "length", "pants_type
 NON_GARMENT = {"Accessories", "Bags", "Shoes"}
 PANTS = {"Pants", "Denim", ""}
 BOTTOMS = {"Pants", "Denim", "Skirts"}
+SLEEVED = {"Tops", "Shirts", "Knitwear", "Outerwear", "Dresses"}
 SHORT_TEXT = 80
 # spec 표에서 태깅에 쓸 만한 키만 — 사이즈 실측(chest/hem)·배송 표(ems/ups)는 뺀다
 SPEC_KEY = re.compile(r"소재|material|fabric|composition|혼용|원단|색상|color|colour|세탁|care|간략설명|디테일|detail|핏|fit|상품명|설명", re.I)
@@ -165,7 +166,8 @@ class Tagger:
                     cur = "".join(masked)
         return hits
 
-    def tag(self, category: str, name: str, body: str, color_text: str, quality: str) -> dict[str, list]:
+    def tag(self, category: str, name: str, body: str, color_text: str, quality: str,
+            sleeve_cm: float | None = None) -> dict[str, list]:
         text = f"{name}\n{strip_other_products(body)}".lower()
         for b in self.text_blocklist:  # '시어링'→시어, '레이어드 스타일링'→레이어드 같은 오탐을 먼저 지운다
             text = text.replace(b, " " * len(b))
@@ -211,7 +213,39 @@ class Tagger:
                 hits.get(ax, set()).discard(val)
         if quality == "ok" and not hits.get("pattern"):
             hits["pattern"].add("단색")
+        # 소매 길이는 매장이 글로 안 적는다 — 소매가 빈 상의 12,248벌 중 12,170벌(99.4%)이
+        # 원문 어디에도 없다(2026-09-05). 대신 우리에겐 실측 소매길이가 있다.
+        # 롱슬리브 중앙 61cm · 반팔 중앙 21.6cm 로 뚜렷이 갈린다. 가운데(27~54cm)는 비워 두고
+        # 양 끝만 쓴다 — 글에 아무 말도 없을 때만. 글로 아는 2,709벌에 대 보니 반팔↔롱슬리브
+        # 혼동은 46건(98.1%)이고, 나머지 틀림은 슬리브리스·퍼프소매인데 그것들은 글에 적혀 있어
+        # 애초에 여기까지 오지 않는다.
+        if sleeve_cm is not None and not hits.get("sleeve_length") and category in SLEEVED:
+            if sleeve_cm <= 26:
+                hits["sleeve_length"].add("반팔")
+            elif sleeve_cm >= 55:
+                hits["sleeve_length"].add("롱슬리브")
         return {ax: sorted(hits[ax]) for ax in AXES if hits.get(ax)}
+
+
+_SLEEVE: dict[str, float] | None = None
+
+
+def sleeve_of(url: str) -> float | None:
+    """실측 소매길이(가장 작은 사이즈 것). data/product_sizes.json 에서 읽는다 —
+    워크플로에서 size_from_ocr 이 tag_items 보다 먼저 돌아 늘 최신이다."""
+    global _SLEEVE
+    if _SLEEVE is None:
+        _SLEEVE = {}
+        p = DATA / "product_sizes.json"
+        if p.exists():
+            try:
+                for u, e in json.loads(p.read_text(encoding="utf-8")).items():
+                    v = [x for x in ((e or {}).get("sizes") or {}).get("소매길이", []) if x is not None]
+                    if v:
+                        _SLEEVE[u] = min(v)
+            except json.JSONDecodeError:
+                pass
+    return _SLEEVE.get(url)
 
 
 def load_latest(path: Path) -> dict[str, dict]:
@@ -309,7 +343,8 @@ def main():
             # 갈아탄 뒤 kirsh 「CHERRY」 상품이 전부 레드가 되어 75 → 602 로 뛰었다
             # (체리는 이 브랜드의 마스코트지 옷 색이 아니다, 2026-09-05).
             color_text = " ".join(t for t in (r.get("representative_color", ""), scolor) if t)
-            tags = tagger.tag(r["category"], r["name"], body, color_text, quality)
+            tags = tagger.tag(r["category"], r["name"], body, color_text, quality,
+                              sleeve_cm=sleeve_of(r["source_url"]))
             out[r["source_url"]] = {
                 "brand_slug": slug, "category": r["category"], "source_quality": quality,
                 "text_sources": sources, "tags": tags,
@@ -324,6 +359,7 @@ def main():
     # --brands 로 몇 곳만 돌렸으면 나머지 브랜드의 태그를 지우면 안 된다. 예전엔 통째로
     # 덮어써서 「--brands kirsh」 한 번에 파일이 38,341벌 → 1,796벌이 됐다. 그 순간에
     # Actions 가 커밋했으면 36,545벌의 태그가 사라졌을 것이다(2026-09-05에 실제로 밟았다).
+    n_run = len(out)
     if args.brands:
         keep = set(args.brands)
         prev = {}
@@ -337,8 +373,8 @@ def main():
         print(f"  --brands 로 {len(keep)}곳만 돌렸다 — 나머지 {len(merged) - len(out)}벌은 그대로 둔다")
         out = merged
     Path(args.out).write_text(json.dumps(out, ensure_ascii=False, indent=0), encoding="utf-8")
-    n = len(out)
-    print(f"상품 {n} → {args.out}")
+    n = n_run             # 축 커버리지는 이번에 돌린 만큼으로 잰다(--brands 일 때 헷갈리지 않게)
+    print(f"상품 {len(out)} (이번에 돌린 것 {n}) → {args.out}")
     print("품질:", dict(q_count))
     print("본문 출처:", dict(src_count))
     print("축 커버리지:")
