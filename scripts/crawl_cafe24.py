@@ -722,6 +722,27 @@ def match_color(text: str) -> str:
     return ""
 
 
+# 색 칸·옵션에만 쓰는 줄임말. 상품 이름에는 절대 대지 않는다 — 「DENIM PANTS」가 색이 되고
+# 「NV」가 낱말 속에 걸린다. 매장이 「색상: DENIM」이라고 적어 둔 자리에서만 쓴다(2026-09-05:
+# 색이 빈 1,367벌을 열어 보니 denim 48 · noir 35 · iv 33 · nv 30 · l.denim 21 · lbl 13 이었다).
+_FIELD_COLOR = {
+    "denim": "인디고", "l.denim": "블루", "lt.denim": "블루", "light denim": "블루",
+    "노아르": "블랙", "noir": "블랙", "blanc": "화이트", "블랑": "화이트",
+    "iv": "아이보리", "nv": "네이비", "bk": "블랙", "wh": "화이트", "gy": "그레이",
+    "bl": "블루", "lbl": "스카이블루", "bg": "베이지", "kh": "카키", "brn": "브라운",
+}
+
+
+def field_color(text: str) -> str:
+    """색을 적어 둔 칸(spec 의 색상·옵션)에서만 쓰는 읽기. 먼저 정식 어휘로 보고,
+    안 걸리면 줄임말 표를 본다."""
+    c = match_color(text)
+    if c:
+        return c
+    key = re.sub(r"\s+", " ", (text or "").strip().lower()).strip(" .-_")
+    return _FIELD_COLOR.get(key, "")
+
+
 def pick_color(name: str, description: str, spec: dict | None = None,
                options: list | None = None) -> str:
     # 이름 끝 괄호에 색을 적어 두면 그게 매장이 말하는 그 옷 색이다 — 앞은 제품 라인 이름이다.
@@ -748,7 +769,7 @@ def pick_color(name: str, description: str, spec: dict | None = None,
     for k in keys + ["상품요약정보", "상품 요약정보", "간략설명", "요약정보", "summary"]:
         v = str((spec or {}).get(k) or "").strip()
         if v and len(v) <= 40 and not _NOT_COLOR.search(v):
-            c = match_color(v)
+            c = field_color(v) if k in keys else match_color(v)
             if c:
                 return c
     # 옵션에 적힌 색 — fabrega 「실버-FREE」, divein 「1 (95~100)-MELANGE GRAY」.
@@ -759,7 +780,7 @@ def pick_color(name: str, description: str, spec: dict | None = None,
     for o in (options or []):
         if "선택" in str(o):
             continue
-        c = match_color(o)
+        c = field_color(o)
         if c and c not in seen:
             seen.append(c)
     if seen:

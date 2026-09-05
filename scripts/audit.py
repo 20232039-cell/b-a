@@ -99,9 +99,13 @@ def main() -> int:
     n = Counter()
     rows: list[dict] = []
 
+    # 표본은 항목마다 따로 담는다. 예전엔 전체 4,000행에서 잘라, 앞의 큰 항목이 자리를 다
+    # 먹고 뒤의 항목(색이 비었다 1,367 등)은 링크가 한 줄도 안 남았다(2026-09-05).
+    PER_KIND = 300
+
     def flag(kind: str, url: str, detail: str) -> None:
         n[kind] += 1
-        if len(rows) < 4000:
+        if n[kind] <= PER_KIND:
             rows.append({"무엇": kind, "링크": url, "자세히": detail})
 
     # ── 사이즈
