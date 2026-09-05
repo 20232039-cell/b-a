@@ -248,6 +248,15 @@ jobs:
           python scripts/tag_items.py | head -16
           python scripts/size_gap_report.py || true
           python scripts/missing_report.py || true
+      - name: 데이터 감사 — 지난 판과 견준다
+        shell: bash
+        run: |
+          {
+            echo "## 데이터 감사"
+            echo '```'
+            python scripts/audit.py || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: 수집률 한 줄 (job summary)
         shell: bash
         run: |
@@ -284,7 +293,8 @@ jobs:
           git config user.email "ocr@layer.invalid"
           git add data/crawl/ocr/ data/product_sizes.json data/product_tags_full.json \
                   data/_issues_existing_brands.csv data/size_unavailable.csv \
-                  data/_missing.csv data/_missing_existing.csv 2>/dev/null || true
+                  data/_missing.csv data/_missing_existing.csv \
+                  data/_audit.json data/_audit.csv 2>/dev/null || true
           git add -A data/crawl/ocr/ data/product_sizes.json data/product_tags_full.json
           git diff --cached --quiet && { echo "변화 없음"; exit 0; }
           git commit -m "OCR 결과 — $(ls data/crawl/ocr/*.jsonl | wc -l)개 브랜드 (Actions)"

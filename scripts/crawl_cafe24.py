@@ -150,9 +150,13 @@ COLOR_VOCAB["블루"] += ["mid denim", "light denim"]
 # 넣은 뒤로는 이런 것이 통째로 빠져서, 꾸밈말+색을 붙인 꼴을 어휘에 만들어 넣는다.
 # 「Laye(red)」·「(butter)fly」는 여전히 안 걸린다 — laye·fly 는 꾸밈말이 아니다.
 _C_MOD = ("light", "dark", "deep", "pale", "off", "jet", "dust", "soft", "medium", "melange")
+# 띄어 쓴 꼴도 함께 만든다. 붙여 쓴 꼴만 있어서 「Cloud Boucle Sweater Soft Pink」가
+# soft pink(9) 대신 pink(4)로만 걸렸고, 제품 라인 이름인 cloud(5)가 이겨 화이트가 됐다
+# (dunst, 2026-09-05). 매장은 두 꼴을 섞어 쓴다.
 for _lab, _keys in list(COLOR_VOCAB.items()):
     _base = [k for k in _keys if re.fullmatch(r"[a-z]+", k)]
-    COLOR_VOCAB[_lab] = _keys + [m + b for b in _base for m in _C_MOD]
+    COLOR_VOCAB[_lab] = _keys + [m + b for b in _base for m in _C_MOD] \
+                              + [f"{m} {b}" for b in _base for m in _C_MOD]
 
 # 색 두 개를 붙여 적은 이름 — 앞의 색이 대표다(2026-09-05 실측으로 뽑은 것만).
 for _lab, _extra in (("카키", ["khakibeige"]), ("카멜", ["camelbeige"]),
@@ -689,16 +693,28 @@ def match_color(text: str) -> str:
     뒤 경계는 남긴다 — 없으면 「블루종」이 블루, 「그레이프」가 그레이가 된다.
     """
     low = _KO_TRAP.sub(" ", (text or "").lower())
-    best, best_len = "", 0
+    best, best_len, best_at = "", 0, -1
+    hits = []
     for label, n, rx in _color_patterns():
         # 「멀티」는 여러 색이라는 말이지 색 이름이 아니다. 매장이 딴 색을 함께 적었으면
         # 그게 그 옷 색이다 — 「Multi Zip Hoodie Blue」는 파랑, 「MULTI WAY TOP IN NAVY」는
         # 남색이다(2026-09-05: 이 규칙이 없으면 139벌 중 서른 남짓이 멀티로 덮였다).
         if label == "멀티":
             continue
-        if n > best_len and rx.search(low):
-            best, best_len = label, n
+        m = rx.search(low)
+        if not m:
+            continue
+        hits.append((label, n, m.start(), m.end()))
+        if n > best_len:
+            best, best_len, best_at = label, n, m.start()
     if best:
+        # 「WHITE SOFT BLUE」·「GREY SOFT BLUE」처럼 두 색을 나란히 적은 이름에서는 앞의 색이
+        # 주색이다. 띄어 쓴 꾸밈말 꼴(soft blue = 9)을 어휘에 넣자 그것이 앞의 white(5)를
+        # 눌러 30벌 남짓이 뒤집혔다(dunst, 2026-09-05). 바로 앞에 다른 색이 붙어 있으면 그쪽을 쓴다.
+        if " " in low[best_at:best_at + best_len]:
+            prev = [h for h in hits if h[0] != best and 0 <= best_at - h[3] <= 2]
+            if prev:
+                return max(prev, key=lambda h: h[1])[0]
         return best
     for label, n, rx in _color_patterns():
         if label == "멀티" and rx.search(low):

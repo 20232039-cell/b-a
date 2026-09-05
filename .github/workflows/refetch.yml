@@ -189,12 +189,19 @@ jobs:
           python scripts/crawl_cafe24.py --build-csv | head -1
           python scripts/size_from_ocr.py | head -2
           python scripts/tag_items.py | head -16
+          {
+            echo "## 데이터 감사"
+            echo '```'
+            python scripts/audit.py || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: commit & push (rebase 후, 3회 재시도)
         shell: bash
         run: |
           git config user.name "layer-refetch-bot"
           git config user.email "refetch@layer.invalid"
-          git add data/crawl/ data/products_full.csv data/product_sizes.json data/product_tags_full.json
+          git add data/crawl/ data/products_full.csv data/product_sizes.json data/product_tags_full.json \
+                  data/_audit.json data/_audit.csv
           git diff --cached --quiet && { echo "변화 없음"; exit 0; }
           git commit -m "상세 보정 $(date -u +%Y-%m-%d) — ${{ inputs.select }} · ${{ inputs.fields }} (Actions)"
           for i in 1 2 3; do

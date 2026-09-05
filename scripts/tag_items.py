@@ -42,7 +42,7 @@ VOCAB = DATA / "vocab_aliases.json"
 OUT = DATA / "product_tags_full.json"
 
 AXES = ["neckline", "sleeve_length", "silhouette", "length", "pants_type", "material",
-        "finish_wash", "design_element", "construction", "pattern", "hardware", "color"]
+        "finish_wash", "design_element", "construction", "pattern", "hardware", "function", "color"]
 GARMENT_AXES = {"neckline", "sleeve_length", "silhouette", "length", "pants_type"}
 NON_GARMENT = {"Accessories", "Bags", "Shoes"}
 PANTS = {"Pants", "Denim", ""}
@@ -83,6 +83,16 @@ class Tagger:
         self.bottoms_only = [tuple(x.split(".", 1)) for x in vocab.get("_bottoms_only", [])]
         # 축 전체를 한 목록으로 — 길이 내림차순으로 매칭하고 매칭 구간을 마스킹한다
         text_rules, color_rules = [], []
+        # 색은 수집기 어휘 하나만 쓴다. 예전에는 여기 25색을 따로 적어 두었는데, 그것은
+        # 사실 「거친 이름」이라 차콜 2,037벌이 그레이로, 크림 753벌이 아이보리로 뭉개졌다
+        # (색상 칸이 찬 36,964벌 중 6,101벌, 2026-09-05). 이제 값은 수집기의 63색을 쓰고,
+        # 예전 25색은 _color_rollup(세밀→거친)으로 남겨 앱이 두 층을 다 쓸 수 있게 한다.
+        vocab = dict(vocab)
+        try:
+            import crawl_cafe24 as _cc
+            vocab["color"] = {k: list(vs) for k, vs in _cc.COLOR_VOCAB.items()}
+        except Exception:
+            pass
         for ax in AXES:
             for value, aliases in vocab[ax].items():
                 names = list(aliases) if value in self.mine_only else [value] + list(aliases)
@@ -258,7 +268,12 @@ def main():
             body = "\n".join(t for t in (desc, sbody, otext, btext) if t)
             sources = [s for s, t in (("json-ld" if d.get("description_source") == "json-ld" else "html", desc), ("spec", sbody), ("ocr", otext), ("browser", btext)) if t]
             quality = quality_of(body)
-            color_text = " ".join(t for t in (r["name"], r.get("representative_color", ""), scolor) if t)
+            # 상품 이름은 색을 고르는 데 쓰지 않는다. 수집기의 pick_color 가 이미 이름을
+            # 읽되 「끝 괄호 → 이름 → 설명 → 스펙」 순서를 지켜 representative_color 를
+            # 정해 두었다. 이름을 다시 통째로 훑으면 그 순서가 무너진다 — 수집기 어휘로
+            # 갈아탄 뒤 kirsh 「CHERRY」 상품이 전부 레드가 되어 75 → 602 로 뛰었다
+            # (체리는 이 브랜드의 마스코트지 옷 색이 아니다, 2026-09-05).
+            color_text = " ".join(t for t in (r.get("representative_color", ""), scolor) if t)
             tags = tagger.tag(r["category"], r["name"], body, color_text, quality)
             out[r["source_url"]] = {
                 "brand_slug": slug, "category": r["category"], "source_quality": quality,
