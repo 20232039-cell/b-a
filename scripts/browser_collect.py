@@ -90,13 +90,19 @@ def open_details(page) -> None:
     diafvine 은 사이즈표가 DETAILS 탭 안에 있어, 페이지만 열고 기다리면 #prdDetail 이
     공백 문자 8~10자뿐이다(2026-09-04 사람이 화면으로 확인). 탭을 누르고 끝까지 내려
     게으른 이미지·표까지 그려지게 한다."""
-    for label in ("DETAILS", "상세정보", "상세보기", "DETAIL", "SIZE", "사이즈"):
+    # 하나 누르고 그만두면 안 된다 — badblood 는 안내 「문단」에 「DETAILS/SIZING 버튼을
+    # 클릭하시면」이라고 적어 두어서, 그 문단이 버튼보다 먼저 잡히고 거기서 끝났다.
+    # 문단을 눌러 봐야 아무 일도 없으니 라벨을 끝까지 다 눌러 본다(2026-09-05).
+    # 누를 것은 버튼·링크·탭으로 한정한다 — 본문 글을 누르면 표가 안 열린다.
+    for label in ("SIZING", "DETAILS", "DETAIL", "상세정보", "상세보기", "SIZE GUIDE",
+                  "사이즈 가이드", "사이즈", "SIZE"):
         try:
-            el = page.get_by_text(label, exact=False).first
-            if el and el.is_visible(timeout=800):
-                el.click(timeout=1500)
-                page.wait_for_timeout(700)
-                break
+            for role in ("button", "link", "tab"):
+                el = page.get_by_role(role, name=label, exact=False).first
+                if el.count() and el.is_visible(timeout=500):
+                    el.click(timeout=1500)
+                    page.wait_for_timeout(700)
+                    break
         except Exception:
             continue
     try:
