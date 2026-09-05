@@ -74,6 +74,41 @@ def compile_alias(alias: str) -> re.Pattern:
     return re.compile(a)
 
 
+
+
+# 상세 설명 뒤(또는 사이)에 매장이 「함께 보는 상품」을 이름+가격으로 붙인다. 그 이름이
+# 이 옷의 태그가 됐다 — badblood MA-1 자켓이 옆의 「솔리드 복서 - 블랙/스트라이프」 때문에
+# 단색이면서 스트라이프가 되고, dunst 블레이저가 옆의 「H-LINE MAXI SKIRT」 때문에 맥시가
+# 됐다. 상품 12,493벌(33%)이 이런 글을 달고 있다(2026-09-05).
+#
+# 「가격이 처음 나오는 데서 자른다」는 못 쓴다 — 자기 가격 블록이 글 한가운데(중앙값 39%
+# 지점)에 있어 진짜 설명 25,740건이 함께 잘린다. 그래서 자르지 않고 **가격과 그 앞의
+# 이름만 도려낸다**. 앞으로 예순 자까지 되짚되 문장 경계(마침표·「다 」·「요 」·줄바꿈·
+# 가운뎃점)에서 멈추므로 진짜 문장은 남는다(네 매장 표본에서 한 글자도 안 잘렸다).
+_PRICE_RUN = re.compile(
+    r"(?:(?:krw|won)\s*\d{1,3},\d{3}|\d{1,3},\d{3}\s*(?:krw|won|원))"
+    r"(?:\s*(?:\(\s*\d+%\s*\))?\s*(?:krw|won)?\s*\d{1,3},\d{3}\s*(?:krw|won|원)?)*", re.I)
+_SENT_END = re.compile(r"[.。!?\n|·•▪]|다\s|요\s")
+
+
+def strip_other_products(text: str, back: int = 60) -> str:
+    if not text or not _PRICE_RUN.search(text):
+        return text
+    out, last = [], 0
+    for m in _PRICE_RUN.finditer(text):
+        win_from = max(last, m.start() - back)
+        win = text[win_from:m.start()]
+        k = 0
+        for mm in _SENT_END.finditer(win):
+            k = mm.end()
+        cut = win_from + k
+        if cut >= last:
+            out.append(text[last:cut])
+        last = m.end()
+    out.append(text[last:])
+    return "".join(out)
+
+
 class Tagger:
     def __init__(self, vocab: dict):
         self.vocab = vocab
@@ -131,7 +166,7 @@ class Tagger:
         return hits
 
     def tag(self, category: str, name: str, body: str, color_text: str, quality: str) -> dict[str, list]:
-        text = f"{name}\n{body}".lower()
+        text = f"{name}\n{strip_other_products(body)}".lower()
         for b in self.text_blocklist:  # '시어링'→시어, '레이어드 스타일링'→레이어드 같은 오탐을 먼저 지운다
             text = text.replace(b, " " * len(b))
         hits = self._scan(self.text_rules, text)
@@ -286,6 +321,21 @@ def main():
             for ax in tags:
                 ax_count[ax] += 1
 
+    # --brands 로 몇 곳만 돌렸으면 나머지 브랜드의 태그를 지우면 안 된다. 예전엔 통째로
+    # 덮어써서 「--brands kirsh」 한 번에 파일이 38,341벌 → 1,796벌이 됐다. 그 순간에
+    # Actions 가 커밋했으면 36,545벌의 태그가 사라졌을 것이다(2026-09-05에 실제로 밟았다).
+    if args.brands:
+        keep = set(args.brands)
+        prev = {}
+        if Path(args.out).exists():
+            try:
+                prev = json.loads(Path(args.out).read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                prev = {}
+        merged = {u: e for u, e in prev.items() if (e or {}).get("brand_slug") not in keep}
+        merged.update(out)
+        print(f"  --brands 로 {len(keep)}곳만 돌렸다 — 나머지 {len(merged) - len(out)}벌은 그대로 둔다")
+        out = merged
     Path(args.out).write_text(json.dumps(out, ensure_ascii=False, indent=0), encoding="utf-8")
     n = len(out)
     print(f"상품 {n} → {args.out}")
