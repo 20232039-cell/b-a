@@ -1,21 +1,28 @@
-# 채우기 한 바퀴 — 소재·디테일·색·사이즈가 빈 옷을 「HTML 먼저, 그러고도 없으면 그림」 순서로 채운다.
+# 채우기 한 바퀴 — 소재·디테일·색·사이즈·기능이 빈 옷을 「HTML 먼저, 그러고도 없으면 그림」 순서로 채운다.
 # 사람 지시(2026-09-05): 「html에 소재 디테일 있으면 그걸로 끝. 만약 없으면 이미지 받아서 찾고
-# 이런방식으로 계속 돌리면 될거같은데. 아 사이즈도 계속수집해야되고」
+# 이런방식으로 계속 돌리면 될거같은데. 아 사이즈도 계속수집해야되고」 · 「촘촘하게 걸고」 ·
+# 「기존상품위주로 돌리고(47개) 남으면 68개브랜드까지 확장해서」
 #
-# 한 바퀴 = ① 상세 다시 열기(refetch, select=gaps) → ② 그림 읽기(ocr, select=gaps) → 각 판이
-# 끝나며 사이즈·태그를 다시 뽑고 커밋한다. ②는 ①이 끝난 뒤에 도므로, HTML 로 채워진 상품은
-# 그림 대상에서 저절로 빠진다(gaps 는 매번 그때의 결과 파일을 보고 다시 센다).
+# 한 바퀴 = ① 상세 다시 열기(refetch, select=gaps) → ② 그림 읽기(ocr, select=gaps).
+# ②는 ①이 끝난 뒤 도므로, HTML 로 채워진 상품은 그림 대상에서 저절로 빠진다 —
+# gaps 는 매번 그때의 결과 파일을 다시 보고 대상을 센다.
 #
-# 4시간마다. 대상이 없으면 plan 이 빈 행렬을 내고 잡이 0개로 끝나므로 헛돌지 않는다.
-# 러너 시간: 공개 저장소라 무료.
+# 두 시간마다 기존 51곳(=처음 들인 브랜드), 하루 두 번 72곳 전부.
+# 촘촘해도 헛돌지 않는다: 한 번 열어 보고 못 채운 상품은 사흘 지나야 다시 본다(gaps_seen_at).
+# 대상이 없으면 plan 이 빈 행렬을 내어 잡 0개로 끝난다.
 
 name: fill-gaps
 
 on:
   schedule:
-    - cron: "20 */4 * * *"
+    - cron: "10 */2 * * *"     # 두 시간마다 — 기존 브랜드
+    - cron: "40 3,15 * * *"    # 하루 두 번 — 전부
   workflow_dispatch:
     inputs:
+      scope:
+        description: "existing(기존 51곳) | all(72곳 전부)"
+        required: false
+        default: "existing"
       skip_html:
         description: "true 면 상세 다시 열기를 건너뛰고 그림만 읽는다"
         required: false
@@ -29,21 +36,44 @@ permissions:
   contents: read
 
 jobs:
+  pick:
+    runs-on: ubuntu-latest
+    outputs:
+      brands: ${{ steps.s.outputs.brands }}
+      scope: ${{ steps.s.outputs.scope }}
+    steps:
+      - id: s
+        shell: bash
+        run: |
+          SCOPE="${{ inputs.scope }}"
+          if [ -z "$SCOPE" ]; then
+            if [ "${{ github.event.schedule }}" = "40 3,15 * * *" ]; then SCOPE=all; else SCOPE=existing; fi
+          fi
+          # 기존 브랜드 — 새로 들인 21곳(siyazu·noirer·mardi-mercredi …)을 뺀 나머지.
+          # 목록은 size_gap_report.py 의 NEW 와 같은 뜻이다.
+          EXISTING="9999archive afterpray amomento andersson-bell anotheryouth badblood beslow blayer blr coor depound diafvine divein dnsr dunst easy-no-easy etce fabrega frizmworks glowny haleine hatching-room helet insilence kamien kirsh learve lecyto lmood low-classic matin-kim mischief moif noice nothing-written numbering open-yy opus-0012 perenn pioneers pog-service recto rough-side rssc stu sunday-off-club the-coldest-moment the-museum-visitor thebarnnet tonywack wkndrs"
+          if [ "$SCOPE" = "all" ]; then B="all"; else B="$EXISTING"; fi
+          echo "scope=$SCOPE" >> "$GITHUB_OUTPUT"
+          echo "brands=$B"    >> "$GITHUB_OUTPUT"
+          echo "### 채우기 — $SCOPE" >> "$GITHUB_STEP_SUMMARY"
+
   html:
+    needs: [pick]
     if: inputs.skip_html != 'true'
     uses: ./.github/workflows/refetch.yml
     with:
-      brands: all
+      brands: ${{ needs.pick.outputs.brands }}
       fields: "size,text"
       select: gaps
       max_minutes: "40"
     secrets: inherit
 
   images:
-    needs: [html]
+    needs: [pick, html]
     if: always() && !cancelled()
     uses: ./.github/workflows/ocr.yml
     with:
+      brands: ${{ needs.pick.outputs.scope == 'all' && '' || needs.pick.outputs.brands }}
       select: gaps
       max_images: "8"
       redo: "true"
