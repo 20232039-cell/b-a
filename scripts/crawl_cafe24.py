@@ -109,7 +109,7 @@ ITEM_TYPE_VOCAB = {
     "데님": ["jeans", "denim", "데님", "청바지"],
     "팬츠": ["pants", "trousers", "팬츠", "슬랙스", "slacks", "트라우저", "치노", "chino"],
     "스커트": ["skirt", "스커트"],
-    "원피스": ["dress", "원피스", "드레스"],
+    "원피스": ["dress", "원피스", "드레스", "one-piece", "onepiece", "one piece"],
     "베스트": ["vest", "베스트"],
     "바람막이": ["windbreak", "windbreaker", "바람막이", "아노락", "anorak"],
     "숏팬츠": ["shorts", "숏팬츠", "반바지"],
@@ -180,7 +180,9 @@ CATEGORY_NAME_RULES = [
                "로퍼", "mule", "뮬", "ballet", "발레", "clog", "클로그", "flat", "플랫",
                "moccasin", "모카신", "runner", "러너"]),
     ("bags", ["bag", "가방", "tote", "backpack", "wallet", "지갑", "pouch", "파우치"]),
-    ("accessories", ["acc", "액세서리", "악세사리", "cap", "hat", "모자", "belt", "벨트", "socks", "양말", "jewelry", "jewellery", "ring", "necklace", "scarf", "머플러", "muffler", "underwear", "언더웨어", "eyewear", "sunglass", "keyring", "glove", "장갑", "beanie", "비니", "bag charm", "charm", "키링", "wallet", "지갑"]),
+    ("headwear", ["cap", "ballcap", "ball cap", "hat", "모자", "beanie", "비니", "버킷햇", "bucket hat", "베레", "beret"]),
+    ("jewelry", ["jewelry", "jewellery", "주얼리", "necklace", "목걸이", "bracelet", "팔찌", "earring", "귀걸이"]),
+    ("accessories", ["acc", "액세서리", "악세사리", "belt", "벨트", "socks", "양말", "ring", "scarf", "머플러", "muffler", "underwear", "언더웨어", "eyewear", "sunglass", "sunglasses", "keyring", "glove", "장갑", "bag charm", "charm", "키링"]),
     ("suiting", ["suit", "수트", "정장", "setup", "셋업"]),
 ]
 
@@ -196,9 +198,25 @@ BRAND_GENDER = {"Womenswear": "WOMENSWEAR", "Menswear": "MENSWEAR", "Unisex": "U
 # ^@ — glowny 가 고객 착용샷을 「@인스타아이디」 상품(2,500,000원)으로 830건 올려 둠. ^[¥*]+ — insilence 비공개 자리표시자 159건 (사람 결정 2026-09-02)
 JUNK_NAME = re.compile(r"^@|^[¥*\s]+$|실장님|이사님|원장님|디자이너\s*님|\s님\s*$|개인\s*결제|테스트|샘플|배송비|추가\s*금|lookbook|룩북|campaign|캠페인|\d{4}\s*(spring|summer|fall|autumn|winter)", re.I)
 
+# 상품이 아니라 룩북·에디토리얼·팝업·시즌 캠페인 페이지 — cafe24 매장이 이런 것도 /product/
+# 에 올려 둔다(amomento 34 · rough-side 25 · haleine 11). JUNK_NAME 과 달리 이름만으로는
+# 못 가른다. 「EXHIBITION GRAPHIC T-SHIRT」는 전시가 아니라 티셔츠라서, 품목이 옷·잡화로
+# 잡히면 상품으로 둔다. 그래서 판정은 build_csv 에서 카테고리를 정한 뒤에 한다(2026-09-05).
+LOOKBOOK_NAME = re.compile(
+    r"\beditorial\b|\bshowcase\b|\bpop-?up\b|\bpresentation\b|\bexhibition\b|\blookbook\b|룩북|"
+    r"\bcuration\s*(?:project|book)\b|\binterview\b|\bcampaign\b|캠페인|화보|전시|"
+    r"^\s*(?:winter|summer|spring|autumn|fall|ss|fw|s/s|f/w)\s*'?\d{2}\s*$|"
+    r"^\s*\d{2}\s*(?:ss|fw|s/s|f/w|spring|summer|autumn|winter|fall)\b.*\b(?:collection|editorial)\b",
+    re.I)
+
+
 # 판매·기획 카테고리 — 대분류 판정에서 뺀다(「SALE」이 tops 로 읽히면 안 된다). 소속은 기록한다.
 NOISE_CATEGORY = ["sale", "세일", "new", "신상", "best", "베스트", "all", "전체", "view", "collection", "컬렉션",
                   "project", "week", "event", "이벤트", "off", "drop", "season", "must", "pick", "clearance", "time", "outlet"]
+
+
+# 이름 폴백용 어휘 — match_head 의 캐시는 dict 의 id 로 잡으므로 미리 한 번만 만들어 둔다
+CATEGORY_NAME_VOCAB = {code: keys for code, keys in CATEGORY_NAME_RULES}
 
 
 def match_vocab(text: str, vocab: dict) -> str:
@@ -221,7 +239,7 @@ ACC_TYPE_VOCAB = {
     # 신발
     "스니커즈": ["sneaker", "스니커", "trainer", "트레이너", "runner", "러너", "clog", "클로그"],
     "부츠": ["boots", "boot", "부츠", "워커", "첼시"],
-    "더비": ["derby", "더비", "oxford", "옥스포드", "monk", "몽크", "brogue", "브로그"],
+    "더비": ["derby", "더비", "oxford", "옥스포드", "monk", "monkstrap", "몽크", "몽크스트랩", "brogue", "브로그"],
     "로퍼": ["loafer", "로퍼"],
     "메리제인": ["maryjane", "mary jane", "메리제인"],
     "플랫": ["ballet flat", "발레플랫", "발레 플랫", "flats", "플랫슈즈", "펌프스", "pumps"],
@@ -230,10 +248,10 @@ ACC_TYPE_VOCAB = {
     # 가방
     "숄더백": ["숄더백", "shoulder bag", "숄더 백", "shoulder", "숄더"],
     "토트백": ["토트백", "tote bag", "토트 백", "shopper", "쇼퍼"],
-    "크로스백": ["크로스백", "cross bag", "crossbody", "크로스 백", "크로스", "sling bag", "슬링백"],
+    "크로스백": ["크로스백", "cross bag", "crossbag", "crossbody", "크로스 백", "크로스", "sling bag", "슬링백"],
     "백팩": ["백팩", "backpack", "knapsack", "냅색", "짐색", "gym sack"],
     "미니백": ["미니백", "mini bag", "미니 백"],
-    "호보백": ["호보백", "hobo bag", "호보 백", "호보"],
+    "호보백": ["호보백", "hobo bag", "호보 백", "호보", "hobo"],
     "보스턴백": ["보스턴", "boston", "더플", "duffle", "duffel", "weekender"],
     "클러치": ["클러치", "clutch"],
     "파우치": ["파우치", "pouch", "필통"],
@@ -331,7 +349,7 @@ def _head_patterns(vocab: dict) -> dict[str, list]:
                 if re.fullmatch(r"[a-z0-9 /\-]+", k, re.I):
                     # 복수형은 같은 낱말이다 — 「HALF SHIRTS」·「T-Shirts」·「LOAFERS」가
                     # 뒤에 s 가 붙었다는 이유로 통째로 빠졌다(2026-09-05).
-                    body = r"(?<![a-z])" + body + (r"(?![a-z])" if k.endswith("s") else r"s?(?![a-z])")
+                    body = r"(?<![a-z])" + body + (r"(?:es)?(?![a-z])" if k.endswith("s") else r"(?:es|s)?(?![a-z])")
                 pats.append(re.compile(body, re.I))
             out[label] = pats
         _HEAD_RX[key] = out
@@ -430,9 +448,11 @@ def classify_category(name: str, category_names: list[str], description: str = "
         for code, keys in CATEGORY_NAME_RULES:
             if any(k in low for k in keys):
                 return code
-    # 카테고리로도 못 정하면 상품명에서 한 번 더(신발·가방·액세서리 낱말)
+    # 카테고리로도 못 정하면 상품명에서 한 번 더(신발·가방·액세서리 낱말).
+    # 낱말 경계를 지켜야 한다 — 그냥 부분 일치로 재던 시절 RACCOON 이 acc 로, BAGGY 가 bag 으로,
+    # spring 이 ring 으로, capsule 이 cap 으로 잡혀 옷이 잡화가 됐다(2026-09-05 표본 검사).
     for code, keys in CATEGORY_NAME_RULES:
-        if code in ("shoes", "bags", "accessories") and any(k in name.lower() for k in keys):
+        if code in ("shoes", "bags", "accessories", "headwear", "jewelry") and match_head(name, CATEGORY_NAME_VOCAB) == code:
             return code
     # 마지막으로 설명문의 치수 항목. 하의 낱말을 먼저 본다 — 상의에도 「총장」은 있지만
     # 하의에 「chest」는 없다.
@@ -1353,6 +1373,9 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
             item = acc or match_head(d["name"], ITEM_TYPE_VOCAB)
             if not item and code == "tops" and re.search(r"스웻|스웨트|sweat", d["name"], re.I):
                 item = "맨투맨"   # 「Toy Sweat」처럼 품목 단어 없이 스웻만 적은 상의 — 비니·백팩은 code 가 다르니 안 걸린다
+            if LOOKBOOK_NAME.search(d["name"]) and code == "other" and not acc:
+                dropped_junk += 1     # 룩북·에디토리얼·시즌 캠페인 — 상품이 아니다
+                continue
             # 데님은 category 라벨을 따로 둔다(기존 데이터 관례: category=Denim)
             label = "Denim" if item == "데님" else ("Knitwear" if item in ("니트", "가디건") else ("Shirts" if item == "셔츠" else CATEGORY_LABEL.get(code, "")))
             # categories_seed.csv 의 depth-2 코드 — 앱이 「가방 > 숄더백」으로 훑을 자리다
