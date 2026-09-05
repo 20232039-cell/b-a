@@ -27,12 +27,16 @@ CRAWL = DATA / "crawl"
 
 # 옷이 아니라 실측 표가 없는 게 정상인 것들. 이름·카테고리 어디에 있어도 잡는다.
 NON_APPAREL = re.compile(
-    r"cap|hat\b|beanie|bag|tote|pouch|wallet|belt|glove|ring\b|necklace|bracelet|earring"
-    r"|key\s*ring|keyring|sock|scarf|muffler|shoe|sneaker|slipper|sandal|deck|board"
-    r"|towel|blanket|case\b|sticker|patch|charm|hairband|tie\b"
-    r"|모자|볼캡|비니|가방|백팩|토트|파우치|지갑|벨트|장갑|반지|목걸|팔찌|귀걸"
-    r"|키링|양말|스카프|머플러|신발|슬리퍼|샌들|데크|보드|타월|담요|케이스|스티커"
-    r"|패치|참|헤어밴드|넥타이",
+    # 영문
+    r"cap\b|hat\b|beanie|bag\b|backpack|tote|pouch|wallet|belt\b|glove|ring\b|necklace"
+    r"|bracelet|earring|key\s*ring|keyring|sock|scarf|muffler|shoe|sneaker|slipper|sandal"
+    r"|boot\b|boots\b|loafer|mule\b|deck\b|board\b|towel|blanket|case\b|sticker|patch"
+    r"|charm|hairband|scrunchie|tie\b|eyewear|sunglass|umbrella|keychain|lanyard|strap\b"
+    # 한글
+    r"|모자|볼캡|비니|버킷햇|가방|백팩|숄더백|크로스백|토트백|미니백|에코백|클러치|파우치"
+    r"|지갑|월렛|카드케이스|벨트|장갑|반지|목걸|팔찌|귀걸|키링|키홀더|양말|삭스|스카프"
+    r"|머플러|신발|스니커|슬리퍼|샌들|부츠|로퍼|데크|보드|타월|담요|케이스|스티커|패치"
+    r"|헤어밴드|스크런치|넥타이|선글라스|안경|우산|파우치|참\b",
     re.I,
 )
 
