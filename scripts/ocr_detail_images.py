@@ -530,7 +530,17 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
     done: set[int] = set()
     if main.exists():
         done = {json.loads(l)["product_no"] for l in main.read_text(encoding="utf-8").splitlines() if l.strip()}
-    cats = load_categories() if select == "no-size" else {}
+    cats = load_categories() if select in ("no-size", "ocr") else {}
+    # select=ocr: 사이즈를 「그림에서」 읽어 둔 옷을 다시 읽는다. 머리줄을 낱말 단위로
+    # 읽게 바꾼 뒤 kirsh 10440 은 라벨이 한 칸씩 밀려 있던 것이 바로잡혔다(밑위 49cm·
+    # 허벅지 25.5cm → 밑위 25.5·허벅지 33.8, 2026-09-05). 빠진 것뿐 아니라 틀린 것도 있다.
+    ocr_sized: set[str] = set()
+    if select == "ocr":
+        sp2 = CRAWL_DIR.parent / "product_sizes.json"
+        if sp2.exists():
+            for u, e in json.loads(sp2.read_text(encoding="utf-8")).items():
+                if str((e or {}).get("source", "")).startswith("ocr"):
+                    ocr_sized.add(u)
     # --redo: 예전에 「앞 3~5장만」 읽고 끝난 상품은 done 에 들어 있어 12장짜리 재시도에서 아예 빠진다.
     # 사이즈가 아직 없고 읽은 그림이 읽을 수 있는 그림보다 적으면 done 에서 빼 다시 읽는다
     # (2026-09-04: 사이즈 없는 옷 875벌 중 617벌이 이 경우였다 — far-from-what 은 11장 중 2장만 읽었다).
@@ -546,11 +556,15 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
                     o = json.loads(l)
                     read_n[o["product_no"]] = len(o.get("images") or [])
         for no, d in latest.items():
-            if no not in done or d.get("source_url") in sized_urls:
+            if no not in done:
+                continue
+            if select != "ocr" and d.get("source_url") in sized_urls:
+                continue
+            if select == "ocr" and d.get("source_url") not in ocr_sized:
                 continue
             # 사이즈 없는 옷만 고르는 판(no-size)에서는 장 수를 따지지 않는다 — 읽는 방법이
             # 바뀌면(2026-09-05 머리줄 낱말 단위 판독) 같은 그림에서 새 글이 나온다.
-            if select == "no-size":
+            if select in ("no-size", "ocr"):
                 done.discard(no)
                 continue
             avail = len([u for u in (d.get("detail_images") or []) if not SKIP_NAME.search(u.rsplit("/", 1)[-1])])
@@ -565,11 +579,14 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
             # 사이즈 표 없는 옷만 — 설명 길이와 무관. 사이즈 수집률을 올리는 2차 OCR(사람 결정 2026-09-03)
             if d.get("size_table") or cats.get((slug, int(no)), "") not in GARMENTS:
                 continue
+        elif select == "ocr":
+            if d.get("source_url") not in ocr_sized or cats.get((slug, int(no)), "") not in GARMENTS:
+                continue
         elif only_short and len(d.get("description", "")) >= SHORT_TEXT:
             continue
         todo.append(d)
     todo = todo[k::n]
-    want_size = select == "no-size"
+    want_size = select in ("no-size", "ocr")
     log(f"[{slug}] OCR 대상 {len(todo)} (이미 {len(done)}, 조각 {k + 1}/{n})")
     n_img = n_txt = 0
     counters = {"img": 0, "txt": 0, "done": 0, "early": 0}
@@ -630,7 +647,7 @@ def main():
     ap.add_argument("--cdn-delay", type=float, default=0.25, help="공용 이미지 CDN(cafe24img) 에만 쓰는 대기")
     ap.add_argument("--shard", default="1/1", help="k/n — 대상을 n등분해 k번째(1부터)만 (Actions 샤딩)")
     ap.add_argument("--out-dir", help="조각 파일을 쓸 폴더 (crawl/ocr/<slug>.jsonl 대신 <slug>.<k>.jsonl)")
-    ap.add_argument("--select", default="short", choices=["short", "all", "no-size"], help="short=설명 짧은 것(기본) · all=전부 · no-size=사이즈 표 없는 옷")
+    ap.add_argument("--select", default="short", choices=["short", "all", "no-size", "ocr"], help="short=설명 짧은 것(기본) · all=전부 · no-size=사이즈 표 없는 옷 · ocr=사이즈를 그림에서 읽은 옷 다시")
     args = ap.parse_args()
     OCR_DIR.mkdir(parents=True, exist_ok=True)
     k, n = (int(x) for x in args.shard.split("/"))

@@ -24,7 +24,7 @@ on:
         required: false
         default: ""
       select:
-        description: "short(설명 짧은 것) | no-size(사이즈 표 없는 옷) | all"
+        description: "short(설명 짧은 것) | no-size(사이즈 표 없는 옷) | ocr(그림에서 읽은 옷 다시) | all"
         required: false
         default: "short"
       redo:
@@ -72,7 +72,9 @@ jobs:
           maxi = int(os.environ.get("MAXI") or 5)
           sel = os.environ.get("SEL") or "short"
           slugs = os.environ["LIST"].split() or [os.path.basename(p)[:-6] for p in glob.glob("data/crawl/*.jsonl")]
-          PER = 700          # 잡 하나가 맡을 그림 수 목표
+          # 잡 하나가 맡을 그림 수 목표. 머리줄을 낱말 단위로 다시 읽는 판은 장당 1.5초가
+          # 5초로 늘어서(2026-09-05), 표를 노리는 판(no-size·ocr)은 조각을 잘게 낸다.
+          PER = 250 if sel in ("no-size", "ocr") else 700
           inc = []
           for b in slugs:
               path = f"data/crawl/{b}.jsonl"
