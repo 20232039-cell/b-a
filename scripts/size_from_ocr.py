@@ -351,11 +351,24 @@ def parse_slots(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] | 
     names, cols = best
     # OCR 이 같은 줄을 두 번 읽으면 「FREE FREE」·「ONE ONE」이 된다(235벌, 2026-09-05).
     # 이름과 값이 통째로 같은 줄만 접는다 — 값이 다르면 접지 않는다(그건 다른 문제다).
-    seen, keep = set(), []
+    # 이름이 같고 값이 어긋나지 않는 줄은 하나로 합친다. 한쪽이 칸 하나를 놓쳤을 뿐이라
+    # 통째로 같지 않아 예전엔 못 접었다 — 「XS XS S M」의 허벅지가 [27, null, 28, 29] 였다
+    # (2026-09-05). 값이 정말 다르면 접지 않는다. 그건 다른 문제라 감사기가 잡는다.
+    def _val(i):
+        return [v[i] if i < len(v) else None for v in cols.values()]
+
+    keep: list[int] = []
     for i, nm in enumerate(names):
-        sig = (nm, tuple(v[i] if i < len(v) else None for v in cols.values()))
-        if sig not in seen:
-            seen.add(sig)
+        for j in keep:
+            if names[j] != nm:
+                continue
+            a, b = _val(j), _val(i)
+            if all(x is None or y is None or x == y for x, y in zip(a, b)):
+                for k, v in enumerate(cols.values()):
+                    if j < len(v) and i < len(v) and v[j] is None:
+                        v[j] = v[i]
+                break
+        else:
             keep.append(i)
     if len(keep) < len(names):
         names = [names[i] for i in keep]
@@ -557,11 +570,24 @@ def parse_matrix(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] |
     names, cols = best
     # OCR 이 같은 줄을 두 번 읽으면 「FREE FREE」·「ONE ONE」이 된다(235벌, 2026-09-05).
     # 이름과 값이 통째로 같은 줄만 접는다 — 값이 다르면 접지 않는다(그건 다른 문제다).
-    seen, keep = set(), []
+    # 이름이 같고 값이 어긋나지 않는 줄은 하나로 합친다. 한쪽이 칸 하나를 놓쳤을 뿐이라
+    # 통째로 같지 않아 예전엔 못 접었다 — 「XS XS S M」의 허벅지가 [27, null, 28, 29] 였다
+    # (2026-09-05). 값이 정말 다르면 접지 않는다. 그건 다른 문제라 감사기가 잡는다.
+    def _val(i):
+        return [v[i] if i < len(v) else None for v in cols.values()]
+
+    keep: list[int] = []
     for i, nm in enumerate(names):
-        sig = (nm, tuple(v[i] if i < len(v) else None for v in cols.values()))
-        if sig not in seen:
-            seen.add(sig)
+        for j in keep:
+            if names[j] != nm:
+                continue
+            a, b = _val(j), _val(i)
+            if all(x is None or y is None or x == y for x, y in zip(a, b)):
+                for k, v in enumerate(cols.values()):
+                    if j < len(v) and i < len(v) and v[j] is None:
+                        v[j] = v[i]
+                break
+        else:
             keep.append(i)
     if len(keep) < len(names):
         names = [names[i] for i in keep]
