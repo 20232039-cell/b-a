@@ -42,12 +42,12 @@ GARMENT = re.compile(
 # 잡화의 「머리 낱말」 — 이름 어디에 있든 그 물건의 정체다. 옷 낱말이 섞여 있어도
 # (「TIE-DYED VEST BACKPACK」·「shoulder bag _ sashiko denim」) 잡화로 본다.
 ACC_HEAD = re.compile(
-    r"(백팩|숄더백|크로스백|토트백|미니백|에코백|클러치|파우치|지갑|월렛|카드케이스"
+    r"(\bbag\b|가방|백팩|숄더백|크로스백|토트백|미니백|에코백|클러치|파우치|지갑|월렛|카드케이스"
     r"|볼캡|비니|버킷햇|모자|목걸이|팔찌|귀걸이|키링|키홀더|스카프|머플러|양말|삭스"
     r"|신발|스니커즈|슬리퍼|샌들|로퍼|스크런치|헤어밴드|선글라스|안경|우산|벨트"
     r"|backpack|handbag|tote\s*bag|shoulder\s*bag|cross\s*bag|mini\s*bag|clutch|pouch"
     r"|wallet|beanie|bucket\s*hat|ball\s*cap|necklace|bracelet|earring|keyring|scarf"
-    r"|muffler|socks?|sneakers?|slippers?|sandals?|loafer|scrunchie|sunglass|umbrella|\\bbelt\\b)",
+    r"|muffler|socks?|sneakers?|slippers?|sandals?|loafer|scrunchie|sunglass|umbrella|\bbelt\b)",
     re.I,
 )
 
@@ -72,7 +72,9 @@ def is_apparel(row: dict) -> bool:
     카테고리를 같이 넣고 넓은 그물로 거르던 시절, 「Museum Shirt」가 매장의 SHOES
     카테고리에 얹혀 있다는 이유로 잡화가 됐다. 그래서 판단은 이름으로 한다.
     """
-    name = row.get("name") or ""
+    # 밑줄·마침표는 공백으로 바꾼다. 정규식에서 _ 는 단어 문자라 「Drawstring Bag_Blue」의
+    # \bbag\b 가 안 맞았고, 그 가방이 옷으로 세어졌다(2026-09-05).
+    name = re.sub(r"[_./|]+", " ", row.get("name") or "")
     if ACC_HEAD.search(name):          # 이름에 「백팩·숄더백」이 있으면 가방이다
         return False
     if GARMENT.search(name):           # 옷 낱말이 있으면 옷이다
