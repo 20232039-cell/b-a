@@ -24,7 +24,7 @@ on:
         required: false
         default: ""
       select:
-        description: "short(설명 짧은 것) | no-size(사이즈 표 없는 옷) | ocr(그림에서 읽은 옷 다시) | all"
+        description: "short(설명 짧은 것) | no-size(사이즈 표 없는 옷) | gaps(사이즈·소재·색·디테일 중 하나라도 빈 옷) | ocr(그림에서 읽은 옷 다시) | all"
         required: false
         default: "short"
       redo:
@@ -68,13 +68,34 @@ jobs:
           # 프리즘웍스 한 잡이 2,200장을 혼자 들고 전체 시간을 정했다(2026-09-04).
           matrix=$(MAXI="${{ inputs.max_images }}" SEL="${{ inputs.select || 'short' }}" LIST="$list" python3 - <<'PY'
           import json, os, re, glob, math
-          SKIP = re.compile(r"shipping|delivery|notice|issue|exchange|refund|return|banner|event|coupon|logo|icon|배송|공지|교환|반품", re.I)
+          # 판독기와 같은 잣대 — 상품 이름에 든 logo·icon 때문에 상세 그림을 통째로 세지 않던 함정
+          SKIP_NAME = re.compile(r"shipping|delivery|notice|exchange|refund|return|banner|event|coupon|배송|공지|교환|반품", re.I)
+          SIZE_WORD = re.compile(r"size|chart|guide|measure|사이즈|실측|치수", re.I)
+          ASSET_WORD = re.compile(r"(?:^|[/_.\-])(?:ico|icon|btn|logo|blank|spacer|badge|arrow)s?(?:[0-9]|[/_.\-]|$)", re.I)
+          def SKIPPED(name):
+              if SKIP_NAME.search(name):
+                  return True
+              stem = re.sub(r"\.[a-z0-9]{2,4}$", "", name, flags=re.I)
+              if SIZE_WORD.search(stem):
+                  return False
+              return len(stem) <= 24 and bool(ASSET_WORD.search(stem))
           maxi = int(os.environ.get("MAXI") or 5)
           sel = os.environ.get("SEL") or "short"
           slugs = os.environ["LIST"].split() or [os.path.basename(p)[:-6] for p in glob.glob("data/crawl/*.jsonl")]
           # 잡 하나가 맡을 그림 수 목표. 머리줄을 낱말 단위로 다시 읽는 판은 장당 1.5초가
           # 5초로 늘어서(2026-09-05), 표를 노리는 판(no-size·ocr)은 조각을 잘게 낸다.
-          PER = 250 if sel in ("no-size", "ocr") else 700
+          PER = 250 if sel in ("no-size", "ocr", "gaps") else 700
+          gap = set()
+          if sel == "gaps":
+              have = set(json.load(open("data/product_sizes.json", encoding="utf-8"))) \
+                     if os.path.exists("data/product_sizes.json") else set()
+              tg = json.load(open("data/product_tags_full.json", encoding="utf-8")) \
+                   if os.path.exists("data/product_tags_full.json") else {}
+              for u, pr in tg.items():
+                  t = (pr or {}).get("tags") or {}
+                  if (u not in have or not t.get("material") or not t.get("color")
+                          or not (t.get("design_element") or t.get("construction") or t.get("hardware"))):
+                      gap.add(u)
           inc = []
           for b in slugs:
               path = f"data/crawl/{b}.jsonl"
@@ -90,7 +111,9 @@ jobs:
                       continue
                   if sel == "no-size" and d.get("size_table"):
                       continue
-                  cand = [u for u in d["detail_images"] if not SKIP.search(u.rsplit("/", 1)[-1])]
+                  if sel == "gaps" and d.get("source_url") not in gap:
+                      continue
+                  cand = [u for u in d["detail_images"] if not SKIPPED(u.split("?")[0].rsplit("/", 1)[-1])]
                   imgs += min(maxi, len(cand))
               if not imgs:
                   continue
