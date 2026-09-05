@@ -18,7 +18,8 @@ layer-web scripts/build-discover-products.mjs 가 읽는 product_tags_seed.json 
   · 혼방: 소재가 하나만 잡혔는데 '혼방'이 있으면 폴리에스터를 더한다.
   · 단색: 매칭 아닌 추론 — source_quality ok 이고 pattern 이 비면 단색.
   · _bottoms_only(세미와이드·로우라이즈·하이웨이스트)는 하의·미분류에만.
-  · Skirts 는 length 축 없음. pants_type 은 Pants·Denim(·미분류)만. 가방·신발·액세서리는 옷 축(넥라인·소매·핏·기장) 없음.
+  · Skirts 의 기장은 미니·미디·맥시·롱기장만(크롭·쇼츠·버뮤다는 상의·바지의 말이다).
+    pants_type 은 Pants·Denim(·미분류)만. 가방·신발·액세서리는 옷 축(넥라인·소매·핏·기장) 없음.
 
 사용:
     py scripts/tag_items.py                 # 전부
@@ -48,6 +49,8 @@ NON_GARMENT = {"Accessories", "Bags", "Shoes"}
 PANTS = {"Pants", "Denim", ""}
 BOTTOMS = {"Pants", "Denim", "Skirts"}
 SLEEVED = {"Tops", "Shirts", "Knitwear", "Outerwear", "Dresses"}
+# 치마에 쓸 수 있는 기장 값. 크롭·세미크롭·쇼츠·버뮤다·카프리는 상의·바지의 말이다.
+SKIRT_LENGTH = {"미니", "미디", "맥시", "롱기장"}
 SHORT_TEXT = 80
 # spec 표에서 태깅에 쓸 만한 키만 — 사이즈 실측(chest/hem)·배송 표(ems/ups)는 뺀다
 SPEC_KEY = re.compile(r"소재|material|fabric|composition|혼용|원단|색상|color|colour|세탁|care|간략설명|디테일|detail|핏|fit|상품명|설명", re.I)
@@ -201,8 +204,13 @@ class Tagger:
             hits[ax] |= vals
 
         # 축 게이트
+        # 치마도 기장을 가진다 — 오히려 가장 중요한 속성이다. 예전엔 축을 통째로 버려서
+        # 「string maxi skirt」·「WOOL MIDI PLEATED SKIRT」·「페이크 스웨이드 미니 스커트」가
+        # 기장 없이 남았다(1,056벌, 2026-09-05). 상의·바지 쪽 값만 걸러 낸다.
         if category == "Skirts":
-            hits.pop("length", None)
+            hits["length"] = {v for v in hits.get("length", set()) if v in SKIRT_LENGTH}
+            if not hits["length"]:
+                hits.pop("length", None)
         if category not in PANTS:
             hits.pop("pants_type", None)
         if category in NON_GARMENT:
