@@ -463,13 +463,34 @@ def classify_category(name: str, category_names: list[str], description: str = "
     return "other"
 
 
-def pick_color(name: str, description: str) -> str:
+# 요약정보 칸에 색이 아니라 소재·안내를 적는 매장도 있다 — 그때 색을 뽑으면 엉뚱한 값이 된다
+# (noirer 「[FABRIC] BODY - COTTON 67%…」에서 블랙이 나왔다). 짧고 소재 낱말이 없을 때만 믿는다.
+_NOT_COLOR = re.compile(r"cotton|polyester|nylon|wool|linen|모달|면\s*\d|혼용|fabric|소재|\d\s*%|"
+                        r"배송|교환|반품|주문|제작|made in", re.I)
+
+
+def pick_color(name: str, description: str, spec: dict | None = None) -> str:
     c = match_vocab(name, COLOR_VOCAB)
     if c:
         return c
     # 이름에 색을 안 적는 매장(9999archive: 203 중 202)이 설명에 「Color: Washed Black」으로 적는다.
     m = re.search(r"(?:colou?r|색상|컬러)\s*[:：]\s*([^▪•|/\n]{1,40})", description or "", re.I)
-    return match_vocab(m.group(1), COLOR_VOCAB) if m else ""
+    if m:
+        c = match_vocab(m.group(1), COLOR_VOCAB)
+        if c:
+            return c
+    # cafe24 「상품 요약정보」 칸 — xlim 은 이름이 「EP.6 01 SCARF」뿐이고 색을 여기에만 적는다.
+    # 그 탓에 같은 이름·같은 값 다섯 벌이 앱에서 구별이 안 됐다(897벌, 2026-09-05).
+    # 색을 따로 적어 두는 칸이 먼저다(wkndrs 는 spec["color"]="IVORY"), 그다음이 요약정보.
+    keys = [k for k in (spec or {}) if str(k).strip().lower() in
+            ("color", "colour", "색상", "컬러", "color name")]
+    for k in keys + ["상품요약정보", "상품 요약정보", "간략설명", "요약정보", "summary"]:
+        v = str((spec or {}).get(k) or "").strip()
+        if v and len(v) <= 40 and not _NOT_COLOR.search(v):
+            c = match_vocab(v, COLOR_VOCAB)
+            if c:
+                return c
+    return ""
 
 
 def classify_gender(category_names: list[str], brand_default: str) -> str:
@@ -1387,7 +1408,7 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
                 "name": d["name"],
                 "gender_target": classify_gender(d.get("category_names", []), brand_gender.get(slug, "UNISEX")),
                 "price": d["price"],
-                "representative_color": pick_color(d["name"], d.get("description", "")),
+                "representative_color": pick_color(d["name"], d.get("description", ""), d.get("spec")),
                 "season": "",
                 "status": "SOLD_OUT" if (d.get("soldout") or d.get("delisted")) else "ON_SALE",
                 "image_url": d["image_url"],
