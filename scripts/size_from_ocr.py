@@ -708,11 +708,24 @@ def shop_wide_tables(crawl_dir, rows: dict) -> set[tuple[str, str]]:
 
 
 # 색만 다른 같은 옷 — 소재·사이즈·디테일이 같다(사람 확인 2026-09-04). 한쪽에만 표가 있으면 물려준다.
+# 색 이름은 「꾸밈말 + 색」으로 온다 — 라이트 블루·빈티지 블루·워시드 인디고. 꾸밈말은
+# 뒤에 색이 따라올 때만 걷어낸다(「빈티지 데님」의 빈티지는 색이 아니라 스타일이다).
+# 영문은 낱말 경계를 지킨다 — 경계가 없으면 「Laye(red)」의 red 까지 지운다.
+_MOD_KO = r"(?:라이트|다크|딥|페일|빈티지|워시드|멜란지|파스텔|소프트|미디엄)\s*"
+_MOD_EN = r"(?:light|dark|deep|pale|vintage|washed|melange|pastel|soft|medium)\s*"
+_COLOR_KO = ("블랙|화이트|아이보리|베이지|네이비|블루|그레이|차콜|챠콜|카키|올리브|브라운|크림|핑크|레드|"
+             "그린|멜란지|샌드|모카|카멜|버건디|퍼플|와인|인디고|토프|스카이|오렌지|옐로우|실버|골드|"
+             "민트|라벤더|살몬|라임|마젠타|로즈|토바코|초콜릿|초콜렛|마론|오닉스|에크루|세이지|"
+             "피치|버터|오트밀|머스타드|코발트|터콰이즈|라떼|초코|탠")
+_COLOR_EN = ("black|white|ivory|beige|navy|blue|grey|gray|charcoal|khaki|olive|brown|cream|pink|red|"
+             "green|melange|sand|stone|mocha|camel|burgundy|purple|yellow|orange|silver|gold|wine|"
+             "indigo|taupe|ecru|sage|salmon|lime|magenta|rose|onyx|tobacco|chocolate|mint|lavender|"
+             "peach|butter|oatmeal|mustard|cobalt|turquoise|latte|apricot|graphite|violet|maroon")
+# 낱말 경계는 꾸밈말 「앞」에 둔다 — 뒤에 두면 「LIGHTPINK」의 pink 가 t 뒤라서 막힌다.
 _COLOR = re.compile(
-    r"[\s_\-\(\[/]*(black|white|ivory|beige|navy|blue|grey|gray|charcoal|khaki|olive|brown|cream|pink|red|"
-    r"green|melange|sand|stone|mocha|camel|burgundy|purple|yellow|orange|silver|gold|light|dark|deep|washed|"
-    r"블랙|화이트|아이보리|베이지|네이비|블루|그레이|차콜|카키|올리브|브라운|크림|핑크|레드|그린|멜란지|샌드|모카|카멜|버건디|퍼플)"
-    r"[\s_\-\)\]/]*", re.I)
+    rf"[\s_\-\(\[/]*(?:(?:{_MOD_KO})?(?:{_COLOR_KO})"
+    rf"|(?<![a-z])(?:{_MOD_EN})?(?:{_COLOR_EN})(?![a-z]))[\s_\-\)\]/]*",
+    re.I)
 
 
 def color_base(name: str) -> str:

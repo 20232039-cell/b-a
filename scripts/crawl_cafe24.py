@@ -69,21 +69,39 @@ KST = timezone(timedelta(hours=9))
 
 # ─── 어휘 — build_products_seed.py 와 같은 표. 새 값을 임의로 만들지 않는다(CLAUDE.md §3). ───
 
+# 합성 색이름(lightpink·seagreen·peppermint)은 낱말 경계를 두면 따로 적어야 걸린다 —
+# match_vocab 이 「앞뒤가 글자면 안 걸림」으로 바뀐 뒤 그 값들이 빠졌다(2026-09-05).
 COLOR_VOCAB = {
-    "블랙": ["black", "블랙"], "차콜": ["charcoal", "차콜"], "화이트": ["off white", "white", "화이트"],
-    "아이보리": ["ivory", "아이보리"], "크림": ["cream", "크림"],
+    "블랙": ["black", "블랙", "onyx", "오닉스"],
+    "차콜": ["charcoal", "차콜", "챠콜", "graphite", "그라파이트"],
+    "화이트": ["off white", "white", "화이트"],
+    "아이보리": ["ivory", "아이보리", "ecru", "에크루"],
+    "크림": ["cream", "크림", "creambeige", "cream beige", "creamflower"],
     "그레이": ["melange grey", "grey", "gray", "그레이", "멜란지"], "네이비": ["navy", "네이비"],
-    "블루": ["light blue", "blue", "블루"], "민트": ["mint", "민트"], "그린": ["green", "그린"],
+    "블루": ["light blue", "lightblue", "blue", "블루"],
+    "민트": ["mint", "민트", "peppermint"],
+    "그린": ["green", "그린", "seagreen", "sea green", "greentea", "green tea",
+            "pistachio", "피스타치오", "sage", "세이지"],
     "올리브": ["olive", "올리브"], "베이지": ["beige", "베이지"], "샌드": ["sand", "샌드"],
-    "카키": ["khaki", "카키"], "카멜": ["camel", "카멜"], "브라운": ["brown", "브라운"],
-    "초코": ["choco", "초코"], "옐로우": ["yellow", "옐로우", "lemon"], "핑크": ["pink", "핑크"],
-    "레드": ["red", "레드"], "버건디": ["burgundy", "버건디", "와인"], "퍼플": ["purple", "퍼플"],
-    "라벤더": ["lavender", "라벤더"], "라떼": ["latte", "라떼"], "피치": ["peach", "피치"],
+    "카키": ["khaki", "카키"], "카멜": ["camel", "카멜"],
+    "브라운": ["brown", "브라운", "tobacco", "토바코", "chocolate", "초콜릿", "초콜렛",
+             "coyote", "코요테", "marron", "maroon", "마론"],
+    "초코": ["choco", "초코"], "옐로우": ["yellow", "옐로우", "lemon", "레몬"],
+    "핑크": ["pink", "핑크", "lightpink", "light pink", "hotpink", "hot pink",
+            "indipink", "babypink", "baby pink"],
+    "레드": ["red", "레드"], "버건디": ["burgundy", "버건디", "와인", "wine"],
+    "퍼플": ["purple", "퍼플", "violet", "바이올렛"],
+    "라벤더": ["lavender", "라벤더"], "라떼": ["latte", "라떼"], "피치": ["peach", "피치", "apricot", "애프리콧"],
     "버터": ["butter", "버터"], "내추럴": ["natural", "내추럴"],
-    "차콜그레이": ["charcoal grey", "charcoal gray"], "스카이블루": ["sky blue", "스카이블루"],
-    "실버": ["silver", "실버"], "골드": ["gold", "골드"], "코발트": ["cobalt", "코발트"],
+    "차콜그레이": ["charcoal grey", "charcoal gray"], "스카이블루": ["sky blue", "skyblue", "스카이블루", "스카이"],
+    "실버": ["silver", "sliver", "실버"], "골드": ["gold", "골드", "golden"], "코발트": ["cobalt", "코발트"],
     "머스타드": ["mustard", "머스타드"], "터콰이즈": ["turquoise", "터콰이즈"],
     "오트밀": ["oatmeal", "오트밀"], "잉크": ["ink blue", "잉크"],
+    # 매장이 이름 뒤에 적어 두는데 어휘에 없어서 못 읽던 색(2026-09-05 실측)
+    "인디고": ["indigo", "인디고"], "오렌지": ["orange", "오렌지"],
+    "토프": ["taupe", "토프"], "탠": ["coyote tan", "탠"],
+    "살몬": ["salmon", "살몬"], "라임": ["lime", "라임"], "멀티": ["멀티"],
+    "마젠타": ["magenta", "마젠타"], "로즈": ["rose", "로즈"],
 }
 
 ITEM_TYPE_VOCAB = {
@@ -106,16 +124,20 @@ ITEM_TYPE_VOCAB = {
             "turtle neck", "turtleneck", "터틀넥", "mock neck", "모크넥", "하이넥", "high neck"],
     "재킷": ["jacket", "자켓", "재킷", "blouson", "블루종", "jk", "트러커", "trucker"],
     "코트": ["coat", "코트", "raincoat", "레인코트", "robe", "로브"],
-    "패딩": ["padding", "puffer", "패딩", "다운", "duck down", "덕다운", "구스다운", "goose down"],
-    "데님": ["jeans", "denim", "데님", "청바지", "jean", "진스", "쟌", "데님팬츠"],
-    "팬츠": ["pants", "trousers", "팬츠", "슬랙스", "slacks", "트라우저", "치노", "chino"],
+    "패딩": ["padding", "puffer", "푸퍼", "패딩", "다운", "duck down", "덕다운",
+            "구스다운", "goose down"],
+    # 「진」은 홀로 두면 「진주」에 걸린다 — 앞뒤가 빈칸일 때만.
+    "데님": ["jeans", "denim", "데님", "청바지", "jean", "진스", "쟌", "데님팬츠",
+            "셀비지", "selvedge", " 진 "],
+    "팬츠": ["pants", "trousers", "trouser", "팬츠", "슬랙스", "slacks", "트라우저",
+            "치노", "chino", "판타롱", "pantalon"],
     "스커트": ["skirt", "스커트"],
     "원피스": ["dress", "원피스", "드레스", "one-piece", "onepiece", "one piece"],
     "파자마": ["파자마", "pajama", "pyjama", "잠옷", "홈웨어", "라운지웨어", "loungewear"],
     "베스트": ["vest", "베스트"],
     "바람막이": ["windbreak", "windbreaker", "바람막이", "윈드브레이커", "윈드스토퍼", "windstopper",
               "wind stopper", "윈드 스토퍼", "아노락", "anorak"],
-    "숏팬츠": ["shorts", "숏팬츠", "반바지"],
+    "숏팬츠": ["shorts", "숏팬츠", "반바지", "숏츠", "쇼츠"],
     "점프수트": ["jumpsuit", "점프수트", "overall", "오버올"],
     "가디건": ["가디건", "shrug", "슈러그", "볼레로", "bolero"],
     "블레이저": ["blazer", "블레이저"],
@@ -124,10 +146,13 @@ ITEM_TYPE_VOCAB = {
     "탑": ["top", "탑", "sleeveless", "슬리브리스", "민소매", "tank", "탱크", "뷔스티에", "bustier",
            "캐미솔", "camisole", "브라렛", "bralette"],
     # 속옷·수영복도 실측 표가 있는 옷이다 — 매장이 ACC 카테고리에 넣어 두어 잡화로 갔다
-    "언더웨어": ["boxer brief", "boxer", "brief", "브리프", "드로즈", "팬티", "언더웨어", "underwear"],
+    # 「브라」만 두면 「브라운」에 걸린다 — 뒤에 빈칸이 오는 것만 받는다.
+    "언더웨어": ["boxer brief", "boxer", "brief", "브리프", "드로즈", "팬티", "언더웨어",
+             "underwear", "bralette", "브라렛", "브라탑", "bra top", " 브라 "],
     "수영복": ["비키니", "bikini", "수영복", "swimsuit", "swimwear", "래쉬가드", "rashguard"],
     "수영복하의": ["bikini bottom", "swim bottom", "비키니 하의", "swim short", "보드숏", "board short"],
-    "롱슬리브": ["long sleeve", "롱슬리브", "롱 슬리브", "긴팔"],
+    "롱슬리브": ["long sleeve", "long-sleeve", "longsleeve", "long sleeves",
+             "롱슬리브", "롱 슬리브", "긴팔"],
     "쇼츠": ["shorts", "쇼츠"],
     "스웨트팬츠": ["sweatpants", "sweat pants", "sweat pant", "스웨트팬츠", "스웨트 팬츠", "스웻팬츠", "스웻 팬츠", "트레이닝 팬츠", "트레이닝팬츠", "training pants"],
     "카고팬츠": ["cargo pants", "카고팬츠", "cargo"],
@@ -222,15 +247,42 @@ NOISE_CATEGORY = ["sale", "세일", "new", "신상", "best", "베스트", "all",
 CATEGORY_NAME_VOCAB = {code: keys for code, keys in CATEGORY_NAME_RULES}
 
 
+_VOCAB_RX: dict[int, list] = {}
+
+
+def _vocab_patterns(vocab: dict) -> list:
+    """어휘를 정규식으로 굽는다 — 영어 낱말은 앞뒤가 글자면 안 걸린다.
+
+    부분 문자열로 맞추면 「Laye(RED)」가 레드, 「(BUTTER)FLY」가 버터, 「(SAND)als」가 샌드,
+    「(OLIVE)R」이 올리브, 「is(CREAM)」이 크림이 된다 — 상품 289벌의 색이 그렇게 틀려 있었다
+    (2026-09-05 실측). 한글은 낱말을 띄어 쓰지 않으므로 그대로 둔다."""
+    key = id(vocab)
+    got = _VOCAB_RX.get(key)
+    if got is None:
+        got = []
+        for label, keys in vocab.items():
+            for k in keys:
+                alone = k.startswith(" ") and k.endswith(" ")
+                k = k.strip()
+                if re.fullmatch(r"[a-z0-9 '\-]+", k):
+                    rx = re.compile(rf"(?<![a-z]){re.escape(k)}(?![a-z])")
+                elif alone:
+                    rx = re.compile(rf"(?<![가-힣]){re.escape(k)}(?![가-힣])")
+                else:
+                    rx = re.compile(re.escape(k))
+                got.append((label, len(k), rx))
+        got.sort(key=lambda x: -x[1])
+        _VOCAB_RX[key] = got
+    return got
+
+
 def match_vocab(text: str, vocab: dict) -> str:
     """가장 긴 키워드부터 — 'zip up' 이 'up' 보다, 'sweatshirt' 가 'shirt' 보다 먼저."""
     low = text.lower()
-    best, best_len = "", 0
-    for label, keys in vocab.items():
-        for k in keys:
-            if k in low and len(k) > best_len:
-                best, best_len = label, len(k)
-    return best
+    for label, _n, rx in _vocab_patterns(vocab):
+        if rx.search(low):
+            return label
+    return ""
 
 
 # ─── 잡화 세분류 — 신발·가방·모자·주얼리·액세서리·리빙 ───
@@ -273,7 +325,8 @@ ACC_TYPE_VOCAB = {
                 "발라클라바", "balaclava", "baraclava", "귀마개", "ear muff", "earmuff", "이어머프"],
     "선바이저": ["선바이저", "sun visor", "바이저"],
     # 주얼리
-    "목걸이": ["목걸이", "necklace", "네클레이스", "네크리스", "넥클리스", "펜던트", "pendant"],
+    "목걸이": ["목걸이", "necklace", "네클레이스", "네크리스", "넥클리스", "네클레스",
+             "펜던트", "pendant"],
     "팔찌": ["팔찌", "브레이슬렛", "bracelet", "뱅글", "bangle", "앵클릿", "anklet"],
     "반지": ["반지", "ring"],
     "귀걸이": ["귀걸이", "earring", "이어커프", "ear cuff"],
@@ -354,11 +407,18 @@ def _head_patterns(vocab: dict) -> dict[str, list]:
         for label, keys in vocab.items():
             pats = []
             for k in keys:
+                # 「양쪽」에 빈칸을 붙여 적은 열쇠(" 진 ")는 홀로 선 한글 낱말이라는 뜻이다.
+                # 그냥 「진」으로 두면 진주가, 「브라」로 두면 브라운이 걸린다(2026-09-05).
+                # 한쪽만 빈칸인 열쇠("백 ")는 예전부터 있던 것이라 뜻을 바꾸지 않는다 —
+                # 홀로 선 낱말로 오해했더니 핸드백·써클백 33벌이 가방에서 빠졌다.
+                alone = k.startswith(" ") and k.endswith(" ")
                 k = k.strip()
                 if not k:
                     continue
                 body = re.escape(k)
-                if re.fullmatch(r"[a-z0-9 /\-]+", k, re.I):
+                if alone and not re.fullmatch(r"[a-z0-9 /\-]+", k, re.I):
+                    body = r"(?<![가-힣])" + body + r"(?![가-힣])"
+                elif re.fullmatch(r"[a-z0-9 /\-]+", k, re.I):
                     # 복수형은 같은 낱말이다 — 「HALF SHIRTS」·「T-Shirts」·「LOAFERS」가
                     # 뒤에 s 가 붙었다는 이유로 통째로 빠졌다(2026-09-05).
                     body = r"(?<![a-z])" + body + (r"(?:es)?(?![a-z])" if k.endswith("s") else r"(?:es|s)?(?![a-z])")
