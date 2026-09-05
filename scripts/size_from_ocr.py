@@ -48,6 +48,13 @@ ALIAS_SORTED = sorted(ALIAS, key=len, reverse=True)
 # 「밑 위」로 띄어 쓴다. 별칭 키는 공백을 지운 꼴이라 원문과 안 맞았고, 그 한 칸 때문에
 # 머리줄이 라벨 둘을 못 채워 표가 통째로 버려졌다(frizmworks, 2026-09-05).
 LABEL_RX = re.compile("|".join(r"\s*".join(re.escape(c) for c in a) for a in ALIAS_SORTED), re.I)
+# 두 낱말 별칭을 뺀 판. ALIAS 의 키는 이미 공백을 지운 꼴이라(「sleeve length」→
+# 「sleevelength」) 키만 봐서는 두 낱말인지 알 수 없어, 원본 별칭에서 골라 만든다.
+_ONE_WORD = {re.sub(r"\s+", "", a).lower()
+             for canon, als in LABELS.items() if not canon.startswith("_")
+             for a in [canon] + als if " " not in a.strip()}
+LABEL_RX_1W = re.compile("|".join(r"\s*".join(re.escape(c) for c in a)
+                                  for a in ALIAS_SORTED if a in _ONE_WORD), re.I)
 NUM = r"\d{1,3}(?:[.,]\d)?"
 # 행렬 표의 칸에는 다섯 자리까지 받는다 — OCR 이 「104.0cm」를 「10400」으로 흘려 쓴다(easy-no-easy).
 # 머리에 정식 라벨이 둘 이상 있고 칸 수가 정확히 맞을 때만 쓰이는 자리라, 값 대신 가격이 끼어들 여지가 없다.
@@ -57,6 +64,11 @@ NUM = r"\d{1,3}(?:[.,]\d)?"
 NUM_CELL = r"\d{1,5}(?:[.,]\d{1,2})?"
 # 사이즈 이름은 느슨하게 — OCR 이 「002」를 「OOM」으로 읽는다(kirsh). 헤더(정식 라벨 ≥2)와 숫자 개수 일치가 지킨다
 SIZE_NAME = r"(?:xxs|xs|s|m|l|xl|xxl|2xl|3xl|free|f|one\s*size|os|[A-Za-z0-9]{1,4})"
+# 세트 상품은 사이즈 자리에 옷 이름이 들어간다 — kirsh 「볼레로 튜브탑 세트」는 표가 둘이고
+# 줄 머리가 「Tube Top」·「Bolero」다(사람이 화면으로 보여 줌, 2026-09-05). 네 글자 제한에
+# 걸려 통째로 버려지고 있었다. 머리줄에 정식 라벨이 둘 이상이고 칸 수가 정확히 맞을 때만
+# 쓰이는 자리라, 이름을 낱말 두 개까지 늘려도 잡음이 들어올 여지가 없다.
+SET_NAME = r"(?:[A-Za-z가-힣][A-Za-z가-힣.\-]{0,11}(?:\s+[A-Za-z가-힣][A-Za-z가-힣.\-]{0,11})?)"
 
 
 def canon_label(s: str) -> str | None:
@@ -68,6 +80,12 @@ def canon_label(s: str) -> str | None:
 
 
 RANGE_RX = re.compile(r"^\s*(\d+(?:[.,]\d+)?)\s*[~\-–—]\s*(\d+(?:[.,]\d+)?)\s*$")
+
+
+def _row_name_ok(nm: str) -> bool:
+    """값 줄 머리의 사이즈 이름인가. 「M」·「00F」 같은 짧은 표기와, 세트 상품의 옷 이름
+    (「Tube Top」·「Bolero」)을 함께 받는다."""
+    return bool(nm) and (re.fullmatch(SIZE_NAME, nm, re.I) or re.fullmatch(SET_NAME, nm, re.I))
 
 
 def fix_value(label: str, raw: str, girth: bool = False) -> float | None:
@@ -88,12 +106,103 @@ def fix_value(label: str, raw: str, girth: bool = False) -> float | None:
     lo, hi = RANGES.get(label, (3, 200))
     # 소수점이 떨어진 숫자(355 → 35.5, 3500 → 35.0, 10400 → 104.0) — 범위에 들어올 때까지 10 으로 나눈다.
     # 「3225」처럼 어느 자리로도 안 맞는 것은 범위 밖으로 버려진다.
-    if raw.isdigit():
+    # 세 자리 이상일 때만 되살린다. 두 자리 수에는 떨어질 소수점이 없는데도 이 규칙이
+    # 돌아서, 상한을 아슬아슬하게 넘긴 값이 그럴듯한 쓰레기로 바뀌었다 —
+    # 소매길이 상한이 80 이라 「M 67 62 80 / L 68.5 63.5 81 / XL 70 65 82」가
+    # [80, 8.1, 8.2] 가 됐다(frizmworks, 2026-09-05). 범위를 넘으면 버리는 게 맞다.
+    if raw.isdigit() and len(raw) >= 3:
         for _ in range(3):
             if v <= hi:
                 break
             v = v / 10
     return round(v, 1) if lo <= v <= hi else None
+
+
+# 머리를 괄호 안에 몰아 적고 값은 슬래시로 나열하는 표 — 표가 아니라 문장이다.
+#     SIZE ( LENGTH / WAIST / CROTCH / HIP / THIGH / HEM)
+#     S l 108cm / 29cm / 22cm / 40cm / 22cm / 15cm
+# badblood 가 이 꼴이라 「원본에 실측이 없다」로 세고 있었다(사람이 화면으로 짚어 줌,
+# 2026-09-05). 사이즈 이름과 값 사이의 「l」은 세로선을 OCR·폰트가 흘려 쓴 것이다.
+_PAREN_HEAD = re.compile(r"(?:size|사이즈)\s*[\(（]\s*([^)）]{6,140})[\)）]", re.I)
+
+
+def parse_paren_slash(text: str) -> tuple[list[str], dict[str, list[float]]] | None:
+    best = None
+    for m in _PAREN_HEAD.finditer(text or ""):
+        labels = [canon_label(w) for w in re.split(r"[/,·|]", m.group(1))]
+        # 같은 라벨이 두 번 나오면(「Front rise / Back rise」는 둘 다 밑위) 뒤엣것을
+        # 「모르는 칸」으로 둔다 — 통째로 거부하면 자리가 멀쩡한 표를 버리게 된다.
+        seen_lab: set[str] = set()
+        for i, c in enumerate(labels):
+            if c and c in seen_lab:
+                labels[i] = None
+            elif c:
+                seen_lab.add(c)
+        known = [c for c in labels if c]
+        if len(known) < 2:
+            continue
+        n = len(labels)
+        # 밴딩 허리는 「34~44」처럼 범위로 적는다(9999archive) — 칸 하나로 받아
+        # fix_value 가 가운뎃값을 쓰게 한다. 숫자만 긁으면 34 와 44 가 두 칸이 된다.
+        num = r"\d{1,4}(?:[.,]\d{1,2})?"
+        cell = rf"{num}(?:\s*[~\-–]\s*{num})?\s*(?:cm)?"
+        row_rx = re.compile(rf"\s*(?:\ufeff\s*)?({SIZE_NAME})\s*[l|I:\-–]?\s*"
+                            rf"((?:{cell}\s*/\s*){{{n - 1}}}{cell})", re.I)
+        names, cols = [], {c: [] for c in known}
+        pos = m.end()
+        while len(names) < 8:
+            r = row_rx.match(text, pos)
+            if not r:
+                break
+            nums = [re.sub(r"\s*cm\s*$", "", x.strip(), flags=re.I)
+                    for x in re.split(r"\s*/\s*", r.group(2))][:n]
+            if len(nums) < n:
+                break
+            names.append(r.group(1).upper())
+            for c, raw in zip(labels, nums):
+                if c:
+                    v = fix_value(c, raw)
+                    cols[c].append(v)
+            pos = r.end()
+        cols = {c: v for c, v in cols.items() if any(x is not None for x in v)}
+        if names and len(cols) >= 2 and (best is None or len(cols) > len(best[1])):
+            best = (names, cols)
+    return best
+
+
+def _row_cells(row: str) -> list[str]:
+    """값 줄을 칸으로 나눈다(맨 앞 사이즈 이름은 뺀다)."""
+    r = re.sub(r"[|ㅣ:;=_]", " ", row).strip()
+    r = re.sub(r"(?<=\d)\s*(?:cm|cem|c[^\w\s]m|em|om|¢m|crn)\b", " ", r, flags=re.I)
+    # 한 칸에 두 수를 붙여 적는 표 — dnsr 의 레이어드 소매는 「35/19」(겉/안)다. 앞엣것이 값이다.
+    # 붙여 쓴 것만 접는다 — 「66 / 34~44」처럼 띄어 쓴 슬래시는 칸 구분이라 접으면 표가 무너진다.
+    r = re.sub(r"(?<!\S)(\d[\d.,]*)/(\d[\d.,]*)(?!\S)", r"\1", r)
+    tok = re.sub(r"\s+", " ", r).split()
+    return tok[1:] if len(tok) >= 2 else []
+
+
+def pick_labels(head_line: str, greedy: list[str], next_lines: list[str]) -> list[str]:
+    """머리줄을 어떻게 끊을지 값 줄의 칸 수로 고른다.
+
+    「SIZE GUIDE (CM) SHOULDER CHEST SLEEVE LENGTH」에서 SLEEVE LENGTH 가 한 별칭으로
+    붙어 별개 열인 LENGTH(총장)를 삼킨다(dnsr). 쪼갠 안을 늘 쓰면 「소매 기장」이
+    소매+기장으로 갈려 다른 매장이 무너지므로(2026-09-05 실측 440 라벨 손실),
+    값 줄의 칸 수와 맞아떨어지는 쪽만 쓴다 — 칸 수는 표가 스스로 말해 주는 답이다."""
+    alt: list[str] = []
+    for m in LABEL_RX_1W.finditer(re.sub(r"[|ㅣ]", " ", head_line)):
+        c = ALIAS.get(re.sub(r"\s+", "", m.group(0)).lower())
+        if c and c not in alt:
+            alt.append(c)
+    if len(alt) <= len(greedy):
+        return greedy
+    for row in next_lines:
+        cells = _row_cells(row)
+        if len(cells) < 2 or not all(re.fullmatch(rf"{NUM_CELL}|[-–—]", c) for c in cells):
+            continue
+        if len(cells) == len(alt) != len(greedy):
+            return alt
+        return greedy
+    return greedy
 
 
 def parse_slots(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] | None:
@@ -180,6 +289,7 @@ def parse_matrix(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] |
                 labels.append(c)
         if len(labels) < 2:
             continue
+        labels = pick_labels(ln, labels, lines[i + 1:i + 6])
         names, cols = [], {c: [] for c in labels}
         for row in lines[i + 1:i + 12]:
             # 세로선(|)은 칸 구분(frizmworks). 콜론·세미콜론은 OCR 이 세로선이나 점을 잘못 읽은 것이다
@@ -187,9 +297,14 @@ def parse_matrix(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] |
             r = re.sub(r"[|ㅣ:;=_]", " ", row).strip()
             # OCR 이 cm 을 em·cem·c¢m·om 으로 흘려 쓴다(easy-no-easy) — 숫자 뒤에 붙은 것만 지운다
             r = re.sub(r"(?<=\d)\s*(?:cm|cem|c[^\w\s]m|em|om|¢m|crn)\b", " ", r, flags=re.I)
+            r = re.sub(r"(?<!\S)(\d[\d.,]*)/(\d[\d.,]*)(?!\S)", r"\1", r)   # 「35/19」= 겉/안
             r = re.sub(r"\s+", " ", r)
             # 사이즈 이름: 「1」「M」뿐 아니라 「1 SIZE」「1 SIZE [9]」(easy-no-easy) 도 한 칸이다.
             # 숫자 뒤에 남는 부스러기(「Th (cm)」 — kirsh)는 버린다.
+            # SET_NAME 을 여기 넣었다가 되돌렸다(2026-09-05) — 줄 머리를 느슨하게 받으면
+            # 엉뚱한 머리줄이 점수에서 이겨 값이 세로로 긁힌다(the-coldest-moment
+            # 「어깨[37,39] 가슴[40,42]」가 「소매길이[37,40,42,58]」로 뭉갰다, 892 라벨 손실).
+            # 세트 상품 한 건을 얻자고 치를 값이 아니다. 아래 「-」 칸 갈래에서만 받는다.
             m = re.match(rf"^\(?({SIZE_NAME})\)?(?:\s*size)?(?:\s*[\[(][^\])]{{0,8}}[\])])?\s+"
                          rf"((?:{NUM_CELL}\s*){{{len(labels)},{len(labels)+1}}})\s*(?:\D{{0,10}})?$", r, re.I)
             if m:
@@ -199,7 +314,7 @@ def parse_matrix(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] |
                 # 빈 칸을 「-」로 두는 표(민소매의 SLEEVE — dnsr) 는 칸 수가 맞을 때만 받는다
                 tok = r.split()
                 nm, cells = (tok[0], tok[1:]) if tok else ("", [])
-                if len(cells) != len(labels) or not re.fullmatch(SIZE_NAME, nm, re.I) \
+                if len(cells) != len(labels) or not _row_name_ok(nm) \
                         or not all(re.fullmatch(rf"{NUM_CELL}|[-–—]", c) for c in cells) \
                         or not any(re.fullmatch(NUM_CELL, c) for c in cells):
                     if names:      # 표가 끝났다
@@ -360,6 +475,9 @@ def from_ocr(text: str) -> tuple[list[str] | None, dict[str, list[float]]]:
     flat = parse_flat(text)
     if flat and len(flat[1]) >= 2:
         return flat[0], clean_ocr(flat[1])
+    par = parse_paren_slash(text)
+    if par and len(par[1]) >= 2:
+        return par[0], clean_ocr(par[1])
     # 라벨 하나가 깨져 칸이 밀린 표 — 자리로 맞춘다(parse_slots 주석)
     for cand in (lines, resegment(text)):
         slot = parse_slots(cand)
@@ -600,9 +718,15 @@ def main():
             # 크롤러의 SIZE_RX 가 「라벨 뒤 숫자 전부」로 잘못 자른 표는 설명글에서 다시 읽는다 —
             # kamien 은 표가 전부 설명글에 정방향으로 들어 있는데 59개가 그렇게 버려졌다(2026-09-04).
             if len(sizes) < 2:
-                flat = parse_flat(d.get("description") or "")
+                body = "\n".join(t for t in (d.get("description") or "", d.get("detail_text") or "") if t)
+                flat = parse_flat(body)
                 if flat and len(clean_ocr(flat[1])) > len(sizes):
                     sizes, names, source = clean_ocr(flat[1]), flat[0], "html"
+                # 괄호 머리 + 슬래시 나열(badblood) — 표가 아니라 문장이라 위 갈래로는 안 잡힌다
+                if len(sizes) < 2:
+                    par = parse_paren_slash(body)
+                    if par and len(clean_ocr(par[1])) > len(sizes):
+                        sizes, names, source = clean_ocr(par[1]), par[0], "html"
             # 브라우저가 본 표·설명글 — 서버 HTML 에 없던 것이 여기 있다
             b = brw.get(r["source_url"])
             if len(sizes) < 2 and b:

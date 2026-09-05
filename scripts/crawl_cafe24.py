@@ -99,8 +99,8 @@ ITEM_TYPE_VOCAB = {
     "집업": ["zip-up", "zipup", "zip up", "집업", "half zip", "하프집업", "full zip", "풀집업", "quarter zip", "쿼터 집", "쿼터집"],
     # 스웻은 별도 품목이 아니다(사람 결정 2026-09-02): 스웻셔츠=맨투맨, 스웻팬츠=스웨트팬츠. 품목 단어 없는 「스웻」은 build_csv 가 상의일 때만 맨투맨
     "맨투맨": ["sweatshirt", "sweat shirt", "맨투맨", "crewneck", "crew neck", "스웻셔츠", "스웨트셔츠", "스웨트 셔츠", "스웻 셔츠", "스웻 크루넥", "sweat crew"],
-    "티셔츠": ["t-shirt", "tshirt", "tee", "티셔츠"],
-    "셔츠": ["shirt", "blouse", "셔츠", "블라우스"],
+    "티셔츠": ["t-shirt", "tshirt", "tee", "티셔츠", "t"],
+    "셔츠": ["shirt", "blouse", "셔츠", "블라우스", "셔켓", "shacket", "overshirt", "오버셔츠"],
     "니트": ["knit", "sweater", "니트", "스웨터", "cardigan", "카디건", "pullover", "풀오버",
             "turtle neck", "turtleneck", "터틀넥", "mock neck", "모크넥", "하이넥", "high neck"],
     "재킷": ["jacket", "자켓", "재킷", "blouson", "블루종", "jk", "트러커", "trucker"],
@@ -111,7 +111,7 @@ ITEM_TYPE_VOCAB = {
     "스커트": ["skirt", "스커트"],
     "원피스": ["dress", "원피스", "드레스", "one-piece", "onepiece", "one piece"],
     "베스트": ["vest", "베스트"],
-    "바람막이": ["windbreak", "windbreaker", "바람막이", "아노락", "anorak"],
+    "바람막이": ["windbreak", "windbreaker", "바람막이", "윈드브레이커", "윈드스토퍼", "windstopper", "아노락", "anorak"],
     "숏팬츠": ["shorts", "숏팬츠", "반바지"],
     "점프수트": ["jumpsuit", "점프수트", "overall", "오버올"],
     "가디건": ["가디건", "shrug", "슈러그", "볼레로", "bolero"],
@@ -135,7 +135,7 @@ ITEM_TYPE_VOCAB = {
     "MA-1/봄버": ["bomber", "ma-1", "봄버"],
     "플리스": ["fleece", "플리스"],
     "후드집업": ["hood zip", "hooded zip", "후드집업", "hoodie zip"],
-    "반팔": ["half sleeve", "short sleeve", "half t", "half tee", "반팔", "s/s tee", "ss tee"],
+    "반팔": ["half sleeve", "short sleeve", "half t", "half tee", "반팔", "하프 슬리브", "하프슬리브", "s/s tee", "ss tee"],
     "피케": ["polo", "pique", "피케", "폴로"],
     "레깅스": ["leggings", "레깅스"],
     "조거팬츠": ["jogger", "track pants", "조거"],
@@ -243,10 +243,10 @@ ACC_TYPE_VOCAB = {
     "로퍼": ["loafer", "로퍼"],
     "메리제인": ["maryjane", "mary jane", "메리제인"],
     "플랫": ["ballet flat", "발레플랫", "발레 플랫", "flats", "플랫슈즈", "펌프스", "pumps"],
-    "샌들": ["sandal", "샌들"],
+    "샌들": ["sandal", "샌들", "플립플랍", "flip flop", "flipflop", "쪼리"],
     "뮬": ["mule", "뮬 ", "슬리퍼", "slipper", "슬라이드", "slide"],
     # 가방
-    "숄더백": ["숄더백", "shoulder bag", "숄더 백", "shoulder", "숄더"],
+    "숄더백": ["숄더백", "shoulder bag", "숄더 백", "shoulder", "숄더", "사첼", "satchel"],
     "토트백": ["토트백", "tote bag", "토트 백", "shopper", "쇼퍼"],
     "크로스백": ["크로스백", "cross bag", "crossbag", "crossbody", "크로스 백", "크로스", "sling bag", "슬링백"],
     "백팩": ["백팩", "backpack", "knapsack", "냅색", "짐색", "gym sack"],
@@ -266,14 +266,15 @@ ACC_TYPE_VOCAB = {
     "비니": ["비니", "beanie", "watch cap"],
     "버킷햇": ["버킷햇", "bucket hat", "버킷 햇", "boonie", "부니"],
     "베레": ["베레", "beret", "페도라", "fedora", "헌팅캡", "hunting cap", "베이커보이"],
-    "트루퍼햇": ["트루퍼", "trooper", "ear flap", "이어플랩", "우샨카", "ushanka"],
+    "트루퍼햇": ["트루퍼", "trooper", "ear flap", "이어플랩", "우샨카", "ushanka",
+                "발라클라바", "balaclava", "baraclava", "귀마개", "ear muff", "earmuff", "이어머프"],
     "선바이저": ["선바이저", "sun visor", "바이저"],
     # 주얼리
     "목걸이": ["목걸이", "necklace", "펜던트", "pendant"],
     "팔찌": ["팔찌", "브레이슬렛", "bracelet", "뱅글", "bangle", "앵클릿", "anklet"],
     "반지": ["반지", "ring"],
     "귀걸이": ["귀걸이", "earring", "이어커프", "ear cuff"],
-    "브로치": ["브로치", "brooch", "pin badge", "뱃지", "badge"],
+    "브로치": ["브로치", "brooch", "pin badge", "뱃지", "badge", "pin"],
     # 액세서리
     "벨트": ["벨트", "belt"],
     "양말": ["양말", "socks", "삭스", "sock"],
@@ -284,12 +285,14 @@ ACC_TYPE_VOCAB = {
     "아이웨어": ["선글라스", "sunglass", "안경", "eyewear", "glasses"],
     "넥타이": ["넥타이", "necktie", "tie", "보타이", "bow tie"],
     "키링": ["키링", "keyring", "key ring", "키홀더", "key holder", "charm", "카라비너", "karabiner"],
-    "폰액세서리": ["그립톡", "grip ring", "그립링", "폰케이스", "phone case", "iphone case", "airpod", "에어팟"],
+    "가방끈": ["스트랩", "strap", "핸들", "handle", "체인 스트랩"],
+    "폰액세서리": ["그립톡", "grip ring", "그립링", "폰케이스", "phone case", "iphone case", "airpod", "에어팟", "case", "케이스"],
     "레그웨어": ["타이츠", "tights", "레그워머", "leg warmer", "스타킹", "stocking"],
     # 리빙·굿즈
     "러그": ["러그", "rug", "매트", "mat"],
     "테이블웨어": ["머그", "mug", "텀블러", "tumbler", "glass", "잔 ", "컵 ", "접시", "plate", "saucer"],
-    "캔들": ["캔들", "candle", "인센스", "incense", "디퓨저", "diffuser", "방향제"],
+    "캔들": ["캔들", "candle", "인센스", "incense", "디퓨저", "diffuser", "방향제",
+            "핸드크림", "hand cream", "퍼퓸", "parfum", "perfume", "향수"],
     "문구": ["포스터", "poster", "스티커", "sticker", "엽서", "postcard", "노트", "notebook", "카드 "],
     "블랭킷": ["블랭킷", "blanket", "담요", "타월", "towel"],
 }
@@ -305,7 +308,7 @@ ACC_TO_CATEGORY = {
     "목걸이": "jewelry", "팔찌": "jewelry", "반지": "jewelry", "귀걸이": "jewelry", "브로치": "jewelry",
     "벨트": "accessories", "양말": "accessories", "스카프": "accessories", "장갑": "accessories",
     "헤어": "accessories", "아이웨어": "accessories", "넥타이": "accessories", "키링": "accessories",
-    "폰액세서리": "accessories", "레그웨어": "accessories",
+    "폰액세서리": "accessories", "레그웨어": "accessories", "가방끈": "accessories",
     "러그": "lifestyle", "테이블웨어": "lifestyle", "캔들": "lifestyle", "문구": "lifestyle",
     "블랭킷": "lifestyle",
 }
@@ -433,10 +436,24 @@ def match_acc(name: str) -> str:
 # 매장이 스스로 PET 칸에 넣어 둔 것만 뺀다 — 넓게 걸면 사람 옷 59벌이 잘린다(2026-09-05).
 PET_CATEGORY = re.compile(r"^\s*(pet|펫|반려|강아지|고양이|dog|cat)\s*$", re.I)
 
+# 아동복 — 사람 지시로 목록에서 아예 뺀다(2026-09-05). 이것도 이름만으로는 못 가른다:
+#   「BABY BLUE」는 색, 「BABY ALPACA」는 실, 「Baby Tee」는 성인 티셔츠 스타일,
+#   「GIRL'S HEART MESSAGE SWEATER」·「Triple Henley Neck Tee (Girl)」는 여성복,
+#   「BOY HOOD T-SHIRT」는 그래픽 이름이다. 넓게 걸면 153벌이 잘못 잘린다.
+# 그래서 (1) 매장이 스스로 KIDS 칸에 넣은 것, (2) 이름 맨 앞의 KIDS/키즈,
+# (3) 한국어 낱말(키즈·아동·유아·주니어)만 본다.
+KIDS_CATEGORY = re.compile(r"^\s*(kids?|키즈|아동|주니어|junior|유아|baby|베이비)\s*$", re.I)
+KIDS_NAME = re.compile(r"^\s*[\[\(]?\s*(kids?|키즈|아동|주니어)\b|키즈|아동복|유아복|주니어", re.I)
+# 「KID MOHAIR」는 새끼염소 털(실 이름)이지 아동복이 아니다 — 성인 니트 넉 벌이 잘렸다
+KIDS_FALSE = re.compile(r"kid[\s-]*mohair|키드[\s-]*모헤어|kid[\s-]*silk", re.I)
+
 
 def classify_category(name: str, category_names: list[str], description: str = "") -> str:
     if any(PET_CATEGORY.match(c or "") for c in category_names):
         return "pet"
+    if not KIDS_FALSE.search(name) and (
+            any(KIDS_CATEGORY.match(c or "") for c in category_names) or KIDS_NAME.search(name)):
+        return "kids"
     if SHOE_FALSE.search(name):
         return "bottoms"
     # 잡화 세분류가 먼저다 — 옷 어휘와 겹치는 낱말(니트 스카프·플리스 베레·데님 캡)이 있고,
@@ -1359,7 +1376,7 @@ CSV_FIELDS = [
 ]
 CATEGORY_LABEL = {"tops": "Tops", "outer": "Outerwear", "bottoms": "Pants", "dress": "Dresses", "skirt": "Skirts",
                   "shoes": "Shoes", "bags": "Bags", "accessories": "Accessories", "suiting": "Suiting",
-                  "headwear": "Headwear", "jewelry": "Jewelry", "lifestyle": "Lifestyle", "pet": "Pet", "other": ""}
+                  "headwear": "Headwear", "jewelry": "Jewelry", "lifestyle": "Lifestyle", "pet": "Pet", "kids": "Kids", "other": ""}
 
 
 def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
@@ -1369,6 +1386,7 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
     dropped_dupe = 0
     dropped_noimg = 0
     dropped_junk = 0
+    dropped_kidpet = 0
     for path in sorted(CRAWL_DIR.glob("*.jsonl")):
         if path.name.startswith("_"):
             continue
@@ -1432,6 +1450,9 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
             if LOOKBOOK_NAME.search(d["name"]) and code == "other" and not acc:
                 dropped_junk += 1     # 룩북·에디토리얼·시즌 캠페인 — 상품이 아니다
                 continue
+            if code in ("kids", "pet"):
+                dropped_kidpet += 1   # 아동복·반려동물 옷은 목록에서 뺀다(사람 지시 2026-09-05)
+                continue
             # 데님은 category 라벨을 따로 둔다(기존 데이터 관례: category=Denim)
             label = "Denim" if item == "데님" else ("Knitwear" if item in ("니트", "가디건") else ("Shirts" if item == "셔츠" else CATEGORY_LABEL.get(code, "")))
             # categories_seed.csv 의 depth-2 코드 — 앱이 「가방 > 숄더백」으로 훑을 자리다
@@ -1467,7 +1488,7 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
         w = csv.DictWriter(f, fieldnames=CSV_FIELDS)
         w.writeheader()
         w.writerows(rows)
-    return len(rows), {"per_brand": per_brand, "dropped_dupe_image": dropped_dupe, "dropped_no_image": dropped_noimg, "dropped_junk_name": dropped_junk}
+    return len(rows), {"per_brand": per_brand, "dropped_dupe_image": dropped_dupe, "dropped_no_image": dropped_noimg, "dropped_junk_name": dropped_junk, "dropped_kids_pet": dropped_kidpet}
 
 
 # ─── main ───
@@ -1490,7 +1511,7 @@ def main():
 
     if args.build_csv:
         n, info = build_csv(brand_gender)
-        print(f"{n}행 → {OUT_CSV}  (사진 중복 제외 {info['dropped_dupe_image']} · 사진 없음 제외 {info['dropped_no_image']} · 상품 아닌 이름 제외 {info['dropped_junk_name']})")
+        print(f"{n}행 → {OUT_CSV}  (사진 중복 제외 {info['dropped_dupe_image']} · 사진 없음 제외 {info['dropped_no_image']} · 상품 아닌 이름 제외 {info['dropped_junk_name']} · 아동·반려동물 제외 {info['dropped_kids_pet']})")
         for s, c in sorted(info["per_brand"].items(), key=lambda x: -x[1]):
             print(f"{c:5d} {s}")
         return
