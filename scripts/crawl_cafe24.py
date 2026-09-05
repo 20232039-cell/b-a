@@ -101,24 +101,30 @@ ITEM_TYPE_VOCAB = {
     "맨투맨": ["sweatshirt", "sweat shirt", "맨투맨", "crewneck", "crew neck", "스웻셔츠", "스웨트셔츠", "스웨트 셔츠", "스웻 셔츠", "스웻 크루넥", "sweat crew"],
     "티셔츠": ["t-shirt", "tshirt", "tee", "티셔츠"],
     "셔츠": ["shirt", "blouse", "셔츠", "블라우스"],
-    "니트": ["knit", "sweater", "니트", "스웨터", "cardigan", "카디건"],
-    "재킷": ["jacket", "자켓", "재킷", "blouson", "블루종"],
-    "코트": ["coat", "코트"],
+    "니트": ["knit", "sweater", "니트", "스웨터", "cardigan", "카디건", "pullover", "풀오버",
+            "turtle neck", "turtleneck", "터틀넥", "mock neck", "모크넥", "하이넥", "high neck"],
+    "재킷": ["jacket", "자켓", "재킷", "blouson", "블루종", "jk", "트러커", "trucker"],
+    "코트": ["coat", "코트", "raincoat", "레인코트", "robe", "로브"],
     "패딩": ["padding", "puffer", "패딩", "다운"],
     "데님": ["jeans", "denim", "데님", "청바지"],
-    "팬츠": ["pants", "trousers", "팬츠", "슬랙스", "slacks"],
+    "팬츠": ["pants", "trousers", "팬츠", "슬랙스", "slacks", "트라우저", "치노", "chino"],
     "스커트": ["skirt", "스커트"],
     "원피스": ["dress", "원피스", "드레스"],
     "베스트": ["vest", "베스트"],
     "바람막이": ["windbreak", "windbreaker", "바람막이", "아노락", "anorak"],
     "숏팬츠": ["shorts", "숏팬츠", "반바지"],
     "점프수트": ["jumpsuit", "점프수트", "overall", "오버올"],
-    "가디건": ["가디건"],
+    "가디건": ["가디건", "shrug", "슈러그", "볼레로", "bolero"],
     "블레이저": ["blazer", "블레이저"],
     "트렌치": ["trench", "트렌치"],
     "점퍼": ["jumper", "점퍼"],
-    "탑": ["top", "탑", "sleeveless", "슬리브리스", "민소매"],
-    "롱슬리브": ["long sleeve", "롱슬리브", "긴팔"],
+    "탑": ["top", "탑", "sleeveless", "슬리브리스", "민소매", "tank", "탱크", "뷔스티에", "bustier",
+           "캐미솔", "camisole", "브라렛", "bralette"],
+    # 속옷·수영복도 실측 표가 있는 옷이다 — 매장이 ACC 카테고리에 넣어 두어 잡화로 갔다
+    "언더웨어": ["boxer brief", "boxer", "brief", "드로즈", "팬티", "언더웨어", "underwear"],
+    "수영복": ["비키니", "bikini", "수영복", "swimsuit", "swimwear", "래쉬가드", "rashguard"],
+    "수영복하의": ["bikini bottom", "swim bottom", "비키니 하의", "swim short", "보드숏", "board short"],
+    "롱슬리브": ["long sleeve", "롱슬리브", "롱 슬리브", "긴팔"],
     "쇼츠": ["shorts", "쇼츠"],
     "스웨트팬츠": ["sweatpants", "sweat pants", "sweat pant", "스웨트팬츠", "스웨트 팬츠", "스웻팬츠", "스웻 팬츠", "트레이닝 팬츠", "트레이닝팬츠", "training pants"],
     "카고팬츠": ["cargo pants", "카고팬츠", "cargo"],
@@ -147,6 +153,7 @@ ITEM_TO_CATEGORY = {
     "스커트": "skirt", "원피스": "dress", "점프수트": "dress",
     "저지": "tops", "반팔": "tops", "피케": "tops", "후드집업": "tops",
     "버뮤다": "bottoms", "레깅스": "bottoms", "조거팬츠": "bottoms",
+    "언더웨어": "bottoms", "수영복": "tops", "수영복하의": "bottoms",
     "파카": "outer", "MA-1/봄버": "outer", "플리스": "outer",
     "스니커즈": "shoes", "부츠": "shoes", "샌들": "shoes", "구두": "shoes",
 }
@@ -205,17 +212,217 @@ def match_vocab(text: str, vocab: dict) -> str:
     return best
 
 
+# ─── 잡화 세분류 — 신발·가방·모자·주얼리·액세서리·리빙 ───
+# 왜 따로 두나: 잡화가 4,700건인데 「액세서리」 한 칸에 2,800이 몰려 있어 앱에서 훑을 수가
+# 없었다. categories_seed.csv 의 「세분화 예정」 자리를 이 어휘로 채운다(2026-09-05).
+# 머리 낱말은 뒤에 오므로 「가장 뒤에 걸린 것」이 이긴다 — 「니트 스카프」는 니트가 아니라
+# 스카프이고, 「스카프 톱」은 스카프가 아니라 탑이다. match_vocab 의 「가장 긴 것」과 다르다.
+ACC_TYPE_VOCAB = {
+    # 신발
+    "스니커즈": ["sneaker", "스니커", "trainer", "트레이너", "runner", "러너", "clog", "클로그"],
+    "부츠": ["boots", "boot", "부츠", "워커", "첼시"],
+    "더비": ["derby", "더비", "oxford", "옥스포드", "monk", "몽크", "brogue", "브로그"],
+    "로퍼": ["loafer", "로퍼"],
+    "메리제인": ["maryjane", "mary jane", "메리제인"],
+    "플랫": ["ballet flat", "발레플랫", "발레 플랫", "flats", "플랫슈즈", "펌프스", "pumps"],
+    "샌들": ["sandal", "샌들"],
+    "뮬": ["mule", "뮬 ", "슬리퍼", "slipper", "슬라이드", "slide"],
+    # 가방
+    "숄더백": ["숄더백", "shoulder bag", "숄더 백", "shoulder", "숄더"],
+    "토트백": ["토트백", "tote bag", "토트 백", "shopper", "쇼퍼"],
+    "크로스백": ["크로스백", "cross bag", "crossbody", "크로스 백", "크로스", "sling bag", "슬링백"],
+    "백팩": ["백팩", "backpack", "knapsack", "냅색", "짐색", "gym sack"],
+    "미니백": ["미니백", "mini bag", "미니 백"],
+    "호보백": ["호보백", "hobo bag", "호보 백", "호보"],
+    "보스턴백": ["보스턴", "boston", "더플", "duffle", "duffel", "weekender"],
+    "클러치": ["클러치", "clutch"],
+    "파우치": ["파우치", "pouch", "필통"],
+    "에코백": ["에코백", "ecobag", "eco bag", "canvas bag", "캔버스백"],
+    "지갑": ["지갑", "wallet", "월렛"],
+    "카드지갑": ["카드지갑", "card holder", "카드홀더", "카드 홀더", "card case", "명함"],
+    # 무슨 가방인지 안 적은 것 — 「bags-etc」로 받는다(안 받으면 대분류조차 못 정한다)
+    "가방": ["가방", "bag", "백 "],
+    # 모자
+    "볼캡": ["볼캡", "ball cap", "baseball cap", "야구모자", "캠프캡", "camp cap", "5패널",
+            "five panel", "6패널", "snapback", "스냅백", "work cap", "워크캡", "cap", "캡"],
+    "비니": ["비니", "beanie", "watch cap"],
+    "버킷햇": ["버킷햇", "bucket hat", "버킷 햇", "boonie", "부니"],
+    "베레": ["베레", "beret", "페도라", "fedora", "헌팅캡", "hunting cap", "베이커보이"],
+    "트루퍼햇": ["트루퍼", "trooper", "ear flap", "이어플랩", "우샨카", "ushanka"],
+    "선바이저": ["선바이저", "sun visor", "바이저"],
+    # 주얼리
+    "목걸이": ["목걸이", "necklace", "펜던트", "pendant"],
+    "팔찌": ["팔찌", "브레이슬렛", "bracelet", "뱅글", "bangle", "앵클릿", "anklet"],
+    "반지": ["반지", "ring"],
+    "귀걸이": ["귀걸이", "earring", "이어커프", "ear cuff"],
+    "브로치": ["브로치", "brooch", "pin badge", "뱃지", "badge"],
+    # 액세서리
+    "벨트": ["벨트", "belt"],
+    "양말": ["양말", "socks", "삭스", "sock"],
+    "스카프": ["스카프", "scarf", "머플러", "muffler", "넥워머", "neck warmer", "shawl"],
+    "장갑": ["장갑", "glove", "글러브", "미튼", "mitten", "암워머", "arm warmer"],
+    "헤어": ["헤어밴드", "hair band", "헤어핀", "hairpin", "바레트", "barrette", "스크런치",
+            "scrunchie", "머리끈", "집게핀", "헤어 클립", "hair clip"],
+    "아이웨어": ["선글라스", "sunglass", "안경", "eyewear", "glasses"],
+    "넥타이": ["넥타이", "necktie", "tie", "보타이", "bow tie"],
+    "키링": ["키링", "keyring", "key ring", "키홀더", "key holder", "charm", "카라비너", "karabiner"],
+    "폰액세서리": ["그립톡", "grip ring", "그립링", "폰케이스", "phone case", "iphone case", "airpod", "에어팟"],
+    "레그웨어": ["타이츠", "tights", "레그워머", "leg warmer", "스타킹", "stocking"],
+    # 리빙·굿즈
+    "러그": ["러그", "rug", "매트", "mat"],
+    "테이블웨어": ["머그", "mug", "텀블러", "tumbler", "glass", "잔 ", "컵 ", "접시", "plate", "saucer"],
+    "캔들": ["캔들", "candle", "인센스", "incense", "디퓨저", "diffuser", "방향제"],
+    "문구": ["포스터", "poster", "스티커", "sticker", "엽서", "postcard", "노트", "notebook", "카드 "],
+    "블랭킷": ["블랭킷", "blanket", "담요", "타월", "towel"],
+}
+
+ACC_TO_CATEGORY = {
+    "스니커즈": "shoes", "부츠": "shoes", "더비": "shoes", "로퍼": "shoes", "메리제인": "shoes",
+    "플랫": "shoes", "샌들": "shoes", "뮬": "shoes",
+    "숄더백": "bags", "토트백": "bags", "크로스백": "bags", "백팩": "bags", "미니백": "bags",
+    "호보백": "bags", "보스턴백": "bags", "클러치": "bags", "파우치": "bags", "에코백": "bags",
+    "지갑": "bags", "카드지갑": "bags", "가방": "bags",
+    "볼캡": "headwear", "비니": "headwear", "버킷햇": "headwear", "베레": "headwear",
+    "트루퍼햇": "headwear", "선바이저": "headwear",
+    "목걸이": "jewelry", "팔찌": "jewelry", "반지": "jewelry", "귀걸이": "jewelry", "브로치": "jewelry",
+    "벨트": "accessories", "양말": "accessories", "스카프": "accessories", "장갑": "accessories",
+    "헤어": "accessories", "아이웨어": "accessories", "넥타이": "accessories", "키링": "accessories",
+    "폰액세서리": "accessories", "레그웨어": "accessories",
+    "러그": "lifestyle", "테이블웨어": "lifestyle", "캔들": "lifestyle", "문구": "lifestyle",
+    "블랭킷": "lifestyle",
+}
+# 세분류 → categories_seed.csv 의 depth-2 코드
+ACC_SUB_CODE = {
+    "스니커즈": "sneakers", "부츠": "boots", "더비": "derby-oxford", "로퍼": "loafer",
+    "메리제인": "mary-jane", "플랫": "flats", "샌들": "sandals", "뮬": "mules-slippers",
+    "숄더백": "shoulder-bag", "토트백": "tote-bag", "크로스백": "cross-bag", "백팩": "backpack",
+    "미니백": "mini-bag", "호보백": "hobo-bag", "보스턴백": "boston-duffle", "클러치": "clutch",
+    "파우치": "pouch", "에코백": "eco-bag", "지갑": "wallet", "카드지갑": "card-holder", "가방": "bags-etc",
+    "볼캡": "ball-cap", "비니": "beanie", "버킷햇": "bucket-hat", "베레": "beret",
+    "트루퍼햇": "trooper-hat", "선바이저": "sun-visor",
+    "목걸이": "necklace", "팔찌": "bracelet", "반지": "ring", "귀걸이": "earring", "브로치": "brooch",
+    "벨트": "belt", "양말": "socks", "스카프": "scarf-muffler", "장갑": "gloves", "헤어": "hair-acc",
+    "아이웨어": "eyewear", "넥타이": "tie", "키링": "keyring-charm", "폰액세서리": "phone-acc",
+    "레그웨어": "legwear",
+    "러그": "rug-mat", "테이블웨어": "tableware", "캔들": "candle-incense", "문구": "stationery",
+    "블랭킷": "blanket-towel",
+}
+
+
+_HEAD_RX: dict[int, dict[str, list]] = {}
+
+
+def _head_patterns(vocab: dict) -> dict[str, list]:
+    """어휘를 「낱말 경계를 지키는」 정규식으로 바꿔 둔다.
+
+    그냥 부분 일치로 재면 SHIRRING·keyring 이 ring 으로, MATIN·rugby 가 mat·rug 로,
+    showcase 가 case 로 잡힌다(2026-09-05 표본 검사에서 195건 중 넷 중 셋이 오분류였다).
+    영문 낱말은 앞뒤에 영문자가 붙지 못하게 하고, 한글은 그대로 둔다(붙여 쓰는 말이 많다)."""
+    key = id(vocab)
+    if key not in _HEAD_RX:
+        out = {}
+        for label, keys in vocab.items():
+            pats = []
+            for k in keys:
+                k = k.strip()
+                if not k:
+                    continue
+                body = re.escape(k)
+                if re.fullmatch(r"[a-z0-9 /\-]+", k, re.I):
+                    # 복수형은 같은 낱말이다 — 「HALF SHIRTS」·「T-Shirts」·「LOAFERS」가
+                    # 뒤에 s 가 붙었다는 이유로 통째로 빠졌다(2026-09-05).
+                    body = r"(?<![a-z])" + body + (r"(?![a-z])" if k.endswith("s") else r"s?(?![a-z])")
+                pats.append(re.compile(body, re.I))
+            out[label] = pats
+        _HEAD_RX[key] = out
+    return _HEAD_RX[key]
+
+
+def match_head(text: str, vocab: dict) -> str:
+    """가장 「뒤에서 끝나는」 낱말이 이긴다 — 상품명은 꾸밈말이 앞, 무엇인지가 뒤다.
+    끝나는 자리가 같으면 긴 쪽이 이긴다(「sweatshirt」가 「shirt」를, 「zip up」이 「up」을).
+
+    시작 자리로 재면 안 된다 — sweatshirt 안의 shirt 가 더 뒤에서 시작해 셔츠가 이긴다.
+    길이로만 재면(match_vocab) 「슬리브리스 드레스」가 슬리브리스라서 상의가 된다."""
+    low = " " + (text or "").lower() + " "
+    best, best_end, best_len = "", -1, 0
+    for label, pats in _head_patterns(vocab).items():
+        for rx in pats:
+            m = None
+            for m in rx.finditer(low):
+                pass
+            if m is None:
+                continue
+            if m.end() > best_end or (m.end() == best_end and len(m.group(0)) > best_len):
+                best, best_end, best_len = label, m.end(), len(m.group(0))
+    return best
+
+
+def head_end(text: str, vocab: dict, label: str) -> int:
+    """label 의 낱말이 마지막으로 끝나는 자리(없으면 -1)."""
+    low = " " + (text or "").lower() + " "
+    end = -1
+    for rx in _head_patterns(vocab).get(label, []):
+        for m in rx.finditer(low):
+            end = max(end, m.end())
+    return end
+
+
 # 신발 낱말이지만 옷인 것 — 부츠컷은 바지, 카고부츠는 없다. match_vocab 은 부분 일치라
 # 어휘로는 못 막고 여기서 먼저 걸러야 한다(2026-09-05: 「레이스업 부츠컷 데님」이 신발이 됐다).
-SHOE_FALSE = re.compile(r"부츠\s*컷|boot\s*cut|bootcut", re.I)
+SHOE_FALSE = re.compile(r"부츠\s*[-–]?\s*컷|boot\s*[-–]?\s*cut|bootcut", re.I)
 
+# 한글은 낱말 경계가 없어 안에 잡화 낱말이 든 옷이 걸린다 — 「슈러그」의 러그, 「캡소매」의 캡.
+ACC_FALSE = re.compile(r"슈러그|shrug|캡\s*소매|cap\s*sleeve|숄칼라|shawl\s*collar", re.I)
+
+
+# 소재 낱말이 머리 낱말을 이기던 것 — 「FLEECED BERET」이 플리스라서 아우터로, 「WS DENIM CAP」이
+# 데님이라서 하의로 갔다(wkndrs 19벌, 2026-09-05). 무엇으로 만들었는지보다 무엇인지가 먼저다.
+HEAD_ACC = re.compile(
+    r"베레|beret|넥워머|neck\s*warmer|\bcap\b(?!\s*sleeve)|볼캡|비니|beanie|버킷햇|bucket\s*hat|"
+    r"헤어밴드|헤어핀|hairpin|barrette|바레트|앵클릿|anklet|브로치|brooch|스크런치|scrunchie|"
+    r"키링|keyring|키홀더|목걸이|necklace|귀걸이|earring|팔찌|bracelet", re.I)
+# 옷도 잡화도 아닌 굿즈 — 러그·소주잔·물총이 「other」가 아니라 옷으로 세어지고 있었다.
+HEAD_MISC = re.compile(
+    r"\brug\b|\bmat\b|\bglass\b|\btoy\b|머그|\bmug\b|텀블러|tumbler|포스터|poster|"
+    r"스티커|sticker|엽서|postcard|캔들|candle|인센스|incense|방향제|디퓨저|diffuser", re.I)
+
+
+
+def match_acc(name: str) -> str:
+    """잡화 세분류 — 옷 낱말이 잡화 낱말보다 뒤에 있으면 옷이다.
+    「Cotton scarf top」은 스카프가 아니라 탑, 「BELT LAYERED JEANS」는 벨트가 아니라 청바지.
+    「A with B」의 B 는 딸린 것이라 잘라 낸다(「드레스 with 스카프」는 원피스)."""
+    if SHOE_FALSE.search(name or "") or ACC_FALSE.search(name or ""):
+        return ""                      # 부츠컷은 신발이 아니고 슈러그는 러그가 아니다
+    n = re.split(r"\bwith\b|\bw/\b", name or "", maxsplit=1, flags=re.I)[0]
+    # 꼬리의 색·소재는 머리 낱말이 아니다(「shoulder bag _ sashiko denim」)
+    n = re.sub(r"[_,]\s*(?:[\w가-힣#/&+.-]+\s*){1,3}$", " ", n)
+    acc = match_head(n, ACC_TYPE_VOCAB)
+    if not acc:
+        return ""
+    at_acc = head_end(n, ACC_TYPE_VOCAB, acc)
+    for label in ITEM_TYPE_VOCAB:
+        if ITEM_TO_CATEGORY.get(label) in ("shoes", None):
+            continue        # 신발은 위 어휘가 이미 본다
+        if head_end(n, ITEM_TYPE_VOCAB, label) > at_acc:
+            return ""       # 옷 낱말이 더 뒤 = 그게 머리 낱말이다
+    return acc
 
 def classify_category(name: str, category_names: list[str], description: str = "") -> str:
     if SHOE_FALSE.search(name):
         return "bottoms"
-    item = match_vocab(name, ITEM_TYPE_VOCAB)
+    # 잡화 세분류가 먼저다 — 옷 어휘와 겹치는 낱말(니트 스카프·플리스 베레·데님 캡)이 있고,
+    # 상품명은 「무엇인지」를 뒤에 적으므로 뒤에 걸린 쪽이 머리 낱말이다.
+    acc = match_acc(name)
+    if acc:
+        return ACC_TO_CATEGORY[acc]
+    item = match_head(name, ITEM_TYPE_VOCAB)
     if item in ITEM_TO_CATEGORY:
         return ITEM_TO_CATEGORY[item]
+    # 굿즈 낱말은 옷 낱말 뒤에 본다 — 「Toy Puff T-Shirt」는 장난감이 아니라 티셔츠다.
+    if HEAD_MISC.search(name):
+        return "other"
     for cat in category_names:
         low = cat.lower()
         if any(n in low for n in NOISE_CATEGORY):
@@ -1064,7 +1271,7 @@ def crawl_brand(http: PoliteSession, shop: Shop, refresh: bool, log, refetch_ids
 CSV_FIELDS = [
     "brand_slug", "category_code", "item_type", "name", "gender_target", "price",
     "representative_color", "season", "status", "image_url", "source_url", "crawled_at",
-    "category", "subtype",
+    "category", "subtype", "sub_code",
     # 이하 추가 열 — 기존 파이프라인은 무시한다
     "product_no", "category_path", "gallery_count", "options",
     # 주간 갱신(weekly_update.py)이 채운다 — 매장이 내린 상품(연속 2주 목록에서 사라지고 상세 404). 지난 상품에 두되 링크가 죽었다는 표시
@@ -1075,7 +1282,8 @@ CSV_FIELDS = [
     "detail_empty",
 ]
 CATEGORY_LABEL = {"tops": "Tops", "outer": "Outerwear", "bottoms": "Pants", "dress": "Dresses", "skirt": "Skirts",
-                  "shoes": "Shoes", "bags": "Bags", "accessories": "Accessories", "suiting": "Suiting", "other": ""}
+                  "shoes": "Shoes", "bags": "Bags", "accessories": "Accessories", "suiting": "Suiting",
+                  "headwear": "Headwear", "jewelry": "Jewelry", "lifestyle": "Lifestyle", "other": ""}
 
 
 def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
@@ -1139,12 +1347,16 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
                 continue
             else:
                 seen_images.add(img)
-            item = match_vocab(d["name"], ITEM_TYPE_VOCAB)
             code = classify_category(d["name"], d.get("category_names", []), d.get("description", ""))
+            # 잡화는 잡화 어휘로 품목을 매긴다 — 옷 어휘를 태우면 「니트 스카프」가 니트가 된다
+            acc = match_acc(d["name"]) if code in ACC_TO_CATEGORY.values() else ""
+            item = acc or match_head(d["name"], ITEM_TYPE_VOCAB)
             if not item and code == "tops" and re.search(r"스웻|스웨트|sweat", d["name"], re.I):
                 item = "맨투맨"   # 「Toy Sweat」처럼 품목 단어 없이 스웻만 적은 상의 — 비니·백팩은 code 가 다르니 안 걸린다
             # 데님은 category 라벨을 따로 둔다(기존 데이터 관례: category=Denim)
             label = "Denim" if item == "데님" else ("Knitwear" if item in ("니트", "가디건") else ("Shirts" if item == "셔츠" else CATEGORY_LABEL.get(code, "")))
+            # categories_seed.csv 의 depth-2 코드 — 앱이 「가방 > 숄더백」으로 훑을 자리다
+            sub_code = ACC_SUB_CODE.get(acc, "") if acc else ""
             rows.append({
                 "brand_slug": slug,
                 "category_code": code,
@@ -1161,6 +1373,7 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
                 "crawled_at": d.get("crawled_at", ""),
                 "category": label,
                 "subtype": item,
+                "sub_code": sub_code,
                 "product_no": d["product_no"],
                 "category_path": " | ".join(d.get("category_names", [])),
                 "gallery_count": len(d.get("gallery", [])),

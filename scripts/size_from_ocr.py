@@ -31,6 +31,9 @@ OCR = CRAWL / "ocr"
 BROWSER = CRAWL / "browser"
 OUT = DATA / "product_sizes.json"
 
+NON_APPAREL_CODES = {"shoes", "bags", "accessories", "headwear", "jewelry", "lifestyle"}
+# 옷에만 있는 실측 항목 — 잡화 행에 이게 있으면 표를 잘못 물어 온 것이다
+GARMENT_ONLY = {"어깨", "가슴", "밑위", "허벅지", "암홀", "화장", "소매길이"}
 GARMENT_LABELS = {"Tops", "Pants", "Outerwear", "Knitwear", "Shirts", "Denim", "Skirts", "Dresses"}
 LABELS = json.loads((DATA / "size_labels.json").read_text(encoding="utf-8"))
 RANGES = LABELS["_ranges_cm"]
@@ -537,6 +540,11 @@ def main():
                 if len(sizes2) > len(sizes):
                     sizes, names, source = sizes2, names2, "ocr"
             if not sizes:
+                continue
+            # 잡화에 옷 실측 표를 붙이지 않는다 — 매장 공용 안내표가 모자·양말·백팩에까지
+            # 「가슴 허리」를 물려 주고 있었다(thebarnnet 33 등 96건, 2026-09-05 검사).
+            # 가방에 어깨너비가 있을 리 없고, 있다면 그건 남의 옷 표다.
+            if r.get("category_code") in NON_APPAREL_CODES and set(sizes) & GARMENT_ONLY:
                 continue
             # 사이즈 개수가 라벨마다 다르면(OCR 누락) 가장 짧은 길이로 맞춘다
             n = min(len(v) for v in sizes.values())

@@ -19,7 +19,11 @@ import glob
 import json
 import os
 import re
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from crawl_cafe24 import HEAD_ACC, HEAD_MISC, classify_category   # 옷·잡화 판정을 크롤러와 한 잣대로
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
@@ -35,7 +39,11 @@ GARMENT = re.compile(
     r"|블레이저|파카|점프수트|셋업|트랙탑|아노락|플리스|패딩|무스탕|レ"
     r"|pants|trouser|shirt|jacket|coat|knit|cardigan|hoodie|hood\b|sweat|sweater|dress"
     r"|skirt|blouse|vest|tee\b|t-shirt|denim|jeans|blazer|parka|jumpsuit|anorak|fleece"
-    r"|puffer|shorts|top\b|tank\b|polo\b",
+    r"|puffer|shorts|top\b|tank\b|polo\b|jumper|점퍼|windbreaker|바람막이|셔츠|봄버|bomber|slacks"
+    # 속옷·수영복도 실측 표가 있는 옷이다 — 「ADSB BOXER BRIEFS」·「YY SCRUNCHED BIKINI」가
+    # 매장 카테고리 때문에 잡화로 세어지고 있었다(2026-09-05).
+    r"|팬티|드로즈|boxer|brief|언더웨어|underwear|비키니|bikini|수영복|swimsuit|swimwear"
+    r"|래쉬가드|rashguard|레깅스|legging|캐미솔|camisole|브라렛|bralette",
     re.I,
 )
 
@@ -47,7 +55,10 @@ ACC_HEAD = re.compile(
     r"|신발|스니커즈|슬리퍼|샌들|로퍼|스크런치|헤어밴드|선글라스|안경|우산|벨트"
     r"|backpack|handbag|tote\s*bag|shoulder\s*bag|cross\s*bag|mini\s*bag|clutch|pouch"
     r"|wallet|beanie|bucket\s*hat|ball\s*cap|necklace|bracelet|earring|keyring|scarf"
-    r"|muffler|socks?|sneakers?|slippers?|sandals?|loafer|scrunchie|sunglass|umbrella|\bbelt\b)",
+    r"|muffler|socks?|sneakers?|slippers?|sandals?|loafer|scrunchie|sunglass|umbrella|\bbelt\b"
+    # 카드홀더·명함집은 지갑이다 — 이름에 옷 낱말도 잡화 낱말도 없어 「other」로 빠져나갔다.
+    r"|card\s*holder|카드홀더|카드지갑|business\s*card\s*case|명함|그립톡|grip\s*ring|그립링|charm\b|참\b"
+    r"|쇼퍼|shopper|더플백|duffle\s*bag|보스턴백|boston\s*bag)",
     re.I,
 )
 
@@ -66,23 +77,28 @@ NON_APPAREL = re.compile(
 )
 
 
-def is_apparel(row: dict) -> bool:
-    """옷인가. 순서가 중요하다 — 이름을 먼저, 카테고리는 마지막에 본다.
+APPAREL_CODES = {"tops", "outer", "bottoms", "dress", "skirt", "suiting"}
+NON_APPAREL_CODES = {"shoes", "bags", "accessories", "headwear", "jewelry", "lifestyle"}
 
-    카테고리를 같이 넣고 넓은 그물로 거르던 시절, 「Museum Shirt」가 매장의 SHOES
-    카테고리에 얹혀 있다는 이유로 잡화가 됐다. 그래서 판단은 이름으로 한다.
+
+def _last(rx: re.Pattern, s: str) -> int | None:
+    """정규식이 마지막으로 걸린 자리. 머리 낱말을 가리는 데 쓴다."""
+    pos = None
+    for m in rx.finditer(s):
+        pos = m.start()
+    return pos
+
+
+def is_apparel(row: dict) -> bool:
+    """옷인가. 판단은 크롤러의 classify_category 한 곳에서만 한다.
+
+    예전엔 여기서 이름 정규식을 따로 굴렸다. 그러다 두 잣대가 어긋나서 「트러커 캡」이
+    한쪽에선 모자, 다른 쪽에선 옷이 됐다(2026-09-05 검사에서 170건). 잣대는 하나여야 한다.
+    「other」는 옷으로 둔다 — 옷을 분모에서 빼면 퍼센트가 저절로 오르고 그 숫자는 거짓이다.
     """
-    # 밑줄·마침표는 공백으로 바꾼다. 정규식에서 _ 는 단어 문자라 「Drawstring Bag_Blue」의
-    # \bbag\b 가 안 맞았고, 그 가방이 옷으로 세어졌다(2026-09-05).
-    name = re.sub(r"[_./|]+", " ", row.get("name") or "")
-    if ACC_HEAD.search(name):          # 이름에 「백팩·숄더백」이 있으면 가방이다
-        return False
-    if GARMENT.search(name):           # 옷 낱말이 있으면 옷이다
-        return True
-    if NON_APPAREL.search(name):
-        return False
-    cats = " ".join(row.get("category_names") or [])
-    return not NON_APPAREL.search(cats)
+    code = (row.get("category_code") or "").strip().lower() or classify_category(
+        row.get("name") or "", row.get("category_names") or [], row.get("description") or "")
+    return code not in NON_APPAREL_CODES
 
 
 def load(name: str) -> dict:
