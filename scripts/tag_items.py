@@ -91,19 +91,31 @@ class Tagger:
 
     @staticmethod
     def _scan(rules, text: str) -> dict[str, set]:
+        """긴 낱말이 짧은 낱말을 먹는다 — 단, 같은 축 안에서만.
+
+        예전에는 축을 가리지 않고 먹었다. 그래서 「카고 팬츠」에 pants_type 어휘를 더하자
+        construction 의 「카고포켓」 409벌이 사라졌다(2026-09-05). 한 낱말이 두 가지를
+        동시에 말하는 일은 흔하다 — 카고는 바지 종류이면서 주머니고, 밴딩은 바지 종류이면서
+        허리 만듦새다(사람 지적). 축마다 따로 가려야 둘 다 남는다.
+        「가먼트 워싱」이 「워싱」을 먹는 것은 같은 축 안이라 그대로 지켜진다.
+        """
         text = text.lower()
-        masked = list(text)
         hits: dict[str, set] = defaultdict(set)
-        cur = text
-        for _, ax, value, rx in rules:
-            found = False
-            for m in rx.finditer(cur):
-                found = True
-                for i in range(m.start(), m.end()):
-                    masked[i] = "\x00"
-            if found:
-                hits[ax].add(value)
-                cur = "".join(masked)
+        by_ax: dict[str, list] = defaultdict(list)
+        for r in rules:
+            by_ax[r[1]].append(r)
+        for ax, rs in by_ax.items():
+            masked = list(text)
+            cur = text
+            for _, _, value, rx in rs:
+                found = False
+                for m in rx.finditer(cur):
+                    found = True
+                    for i in range(m.start(), m.end()):
+                        masked[i] = "\x00"
+                if found:
+                    hits[ax].add(value)
+                    cur = "".join(masked)
         return hits
 
     def tag(self, category: str, name: str, body: str, color_text: str, quality: str) -> dict[str, list]:

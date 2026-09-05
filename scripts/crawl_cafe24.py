@@ -104,7 +104,47 @@ COLOR_VOCAB = {
     "살몬": ["salmon", "살몬"], "라임": ["lime", "라임"], "멀티": ["멀티"],
     "모카": ["mocha", "모카"], "텐저린": ["tangerine", "텐저린"], "그레이프": ["그레이프"],
     "마젠타": ["magenta", "마젠타"], "로즈": ["rose", "로즈"],
+    # 매장이 이름 끝에 쓰는데 어휘에 없던 색(2026-09-05: 색 빈 상품의 이름 끝 낱말을 세어
+    # 눈으로 골랐다). 색이 아닌 것은 넣지 않았다 — camo·stripe 는 무늬, NIMBUS·MARS·
+    # TROPICAL 은 매장이 지은 이름이라 무슨 색인지 알 수 없다.
+    "브릭": ["brick", "브릭"], "틸": ["teal", "틸"],
+    "스톤": ["stone", "스톤"], "클레이": ["clay", "클레이"], "앰버": ["amber", "앰버"],
+    "건메탈": ["gunmetal", "gun metal", "건메탈"], "그레이프": ["grape"],
+    "모브": ["mauve", "모브"], "브론즈": ["bronze", "브론즈"], "카라멜": ["caramel", "카라멜"],
+    "누드": ["nude", "누드"], "그레이지": ["greige", "그레이지"],
+    "카푸치노": ["cappuccino", "카푸치노"], "라일락": ["lilac", "라일락"],
+    "에그플랜트": ["eggplant", "에그플랜트"],
 }
+COLOR_VOCAB["브라운"] += ["chestnut", "체스트넛"]
+COLOR_VOCAB["초코"] += ["cocoa", "코코아"]
+COLOR_VOCAB["차콜"] += ["anthracite", "안트라사이트", "carbon", "카본", "chacoal"]
+COLOR_VOCAB["버건디"] += ["bordeaux", "보르도"]
+COLOR_VOCAB["그레이"] += ["heather grey", "heather gray", "헤더그레이"]
+# 「midnight」 홀로는 색이 아니다 — 45벌 중 16벌이 MIDNIGHT BLACK·MIDNIGHT GRAY·
+# 「Midnight star」(무늬 이름)인데 전부 네이비가 됐다(2026-09-05). 붙은 꼴만 받는다.
+COLOR_VOCAB["네이비"] += ["midnight blue", "미드나잇블루", "미드나잇 블루"]
+COLOR_VOCAB["멀티"] += ["multi", "멀티 컬러", "멀티컬러", "multi color", "multi colour"]
+# 매장이 쓰는 색 이름 — 사진을 열어 눈으로 확인하고 우리 이름으로 묶었다(2026-09-05).
+#   nimbus 회색 파카 · mars 올리브 베스트 · mayo 연노랑 파카 · soda 하늘색 집업 ·
+#   네온 형광 연두 · 세일링샴페인 크림색 폴로(사람은 와인색으로 짐작했으나 사진은 크림이다).
+COLOR_VOCAB["그레이"] += ["nimbus", "님버스", "w.mel", "melange", "heather"]
+COLOR_VOCAB["올리브"] += ["mars", "마스", "old moss", "forest night", "forest suede", "바질"]
+COLOR_VOCAB["버터"] += ["mayo", "마요"]
+COLOR_VOCAB["스카이블루"] += ["soda", "소다", "sora", "denim sky"]
+COLOR_VOCAB["라임"] += ["네온", "neon"]
+COLOR_VOCAB["크림"] += ["세일링샴페인", "샴페인", "champagne", "icy milk", "oat milk", "vanila", "vanilla", "콘실크"]
+COLOR_VOCAB["브라운"] += ["maple", "메이플", "sepia", "세피아", "toffee", "토피", "dark pecan",
+                        "polish wood", "blond wood", "ebony 브라운"]
+COLOR_VOCAB["블랙"] += ["ebony", "에보니", "bkny"]
+COLOR_VOCAB["레드"] += ["ruby", "루비", "cherry", "체리", "scarlet", "스칼렛", "카민", "carmine",
+                       "chili", "칠리", "cherry coke"]
+COLOR_VOCAB["핑크"] += ["cotton candy", "코튼캔디", "strawberry", "스트로베리"]
+COLOR_VOCAB["옐로우"] += ["marigold", "메리골드", "바나나", "banana"]
+COLOR_VOCAB["그린"] += ["avocado", "아보카도", "applegreen", "apple green"]
+COLOR_VOCAB["퍼플"] += ["플럼", "plum"]
+COLOR_VOCAB["실버"] += ["antiqued nickel", "surgical steel", "니켈"]
+COLOR_VOCAB["화이트"] += ["ice", "아이스", "cloud", "클라우드"]
+COLOR_VOCAB["블루"] += ["mid denim", "light denim"]
 
 # 매장은 색을 붙여 쓰기도 한다 — MELANGEGRAY·DARKBROWN·OFFWHITE·JETBLACK. 낱말 경계를
 # 넣은 뒤로는 이런 것이 통째로 빠져서, 꾸밈말+색을 붙인 꼴을 어휘에 만들어 넣는다.
@@ -136,9 +176,12 @@ ITEM_TYPE_VOCAB = {
     # 스웻은 별도 품목이 아니다(사람 결정 2026-09-02): 스웻셔츠=맨투맨, 스웻팬츠=스웨트팬츠. 품목 단어 없는 「스웻」은 build_csv 가 상의일 때만 맨투맨
     "맨투맨": ["sweatshirt", "sweat shirt", "맨투맨", "crewneck", "crew neck", "스웻셔츠", "스웨트셔츠", "스웨트 셔츠", "스웻 셔츠", "스웻 크루넥", "sweat crew", "mtm", "엠티엠", "sweat", "스웻", "스웨트"],
     "티셔츠": ["t-shirt", "tshirt", "tee", "티셔츠", "t"],
-    "셔츠": ["shirt", "blouse", "셔츠", "블라우스", "셔켓", "shacket", "overshirt", "오버셔츠"],
+    "셔츠": ["shirt", "blouse", "셔츠", "블라우스", "셔켓", "shacket", "shirket", "셔킷", "overshirt", "오버셔츠"],
     "니트": ["knit", "sweater", "니트", "스웨터", "cardigan", "카디건", "pullover", "풀오버",
             "turtle neck", "turtleneck", "터틀넥", "mock neck", "모크넥", "하이넥", "high neck"],
+    # 「fur」·「shearling」·「sheepskin」은 소재지 품목이 아니다. 품목으로 넣었더니
+    # 「FUR MINIBAG」·「Real Mink Fur Hat」·「퍼 블랙 버블백」이 겉옷이 됐다(2026-09-05).
+    # diafvine 가죽 겉옷 17벌은 「기타」로 남는다 — 모자·가방을 잃는 값보다 싸다.
     "재킷": ["jacket", "자켓", "재킷", "blouson", "블루종", "jk", "트러커", "trucker"],
     "코트": ["coat", "코트", "raincoat", "레인코트", "robe", "로브"],
     "패딩": ["padding", "puffer", "푸퍼", "패딩", "다운", "duck down", "덕다운",
@@ -157,7 +200,7 @@ ITEM_TYPE_VOCAB = {
     "숏팬츠": ["shorts", "숏팬츠", "반바지", "숏츠", "쇼츠"],
     "점프수트": ["jumpsuit", "점프수트", "overall", "오버올"],
     "가디건": ["가디건", "shrug", "슈러그", "볼레로", "bolero"],
-    "블레이저": ["blazer", "블레이저"],
+    "블레이저": ["blazer", "블레이저", "블레이져", "브레이저"],
     "트렌치": ["trench", "트렌치"],
     "점퍼": ["jumper", "점퍼"],
     "탑": ["top", "탑", "sleeveless", "슬리브리스", "민소매", "tank", "탱크", "뷔스티에", "bustier",
@@ -386,10 +429,15 @@ ACC_TYPE_VOCAB = {
     # 리빙·굿즈
     "러그": ["러그", "rug", "lug", "매트", "mat", "터프팅", "tufting"],
     "테이블웨어": ["머그", "mug", "텀블러", "tumbler", "glass", "잔 ", "컵 ", "접시", "plate", "saucer"],
+    # 「크림」·「스프레이」를 홑낱말로 두면 안 된다 — 크림색 옷이 전부 잡화가 된다.
+    # badblood 후드·팬츠·스커트 200여 벌이 「lifestyle / 캔들」이었다(2026-09-05).
+    # 화장품은 늘 앞말이 붙는다(핸드크림·바디크림·섬유탈취 스프레이).
     "캔들": ["캔들", "candle", "인센스", "incense", "디퓨저", "diffuser", "방향제",
-            "에센스", "essence", "클리너", "크리너", "cleaner", "reiniger", "balsam", "밤 ", "왁스", "보호제",
-            "크림", "cream", "스프레이", "spray",
-            "핸드크림", "hand cream", "퍼퓸", "parfum", "perfume", "향수"],
+            "에센스", "essence", "클리너", "크리너", "cleaner", "reiniger", "balsam", "왁스", "보호제",
+            "핸드크림", "hand cream", "바디크림", "body cream", "풋크림", "foot cream",
+            "탈취 스프레이", "섬유 스프레이", "fabric spray",
+            "퍼퓸", "parfum", "perfume", "향수", "코롱", "cologne",
+            "프레그런스", "fragrance", "사쉐", "sachet", "룸스프레이", "room spray"],
     "문구": ["포스터", "poster", "스티커", "sticker", "엽서", "postcard", "노트", "notebook", "카드 "],
     "블랭킷": ["블랭킷", "blanket", "담요", "타월", "towel"],
 }
@@ -611,7 +659,7 @@ _NOT_COLOR = re.compile(r"cotton|polyester|nylon|wool|linen|모달|면\s*\d|혼�
 
 # 색이 아닌데 색 낱말을 품은 말. 「블루종」은 겉옷 이름이지 파랑이 아니다.
 # 색 낱말을 품었지만 색이 아닌 말. 「스탠다드」가 탠으로 잡혔다(2026-09-05).
-_KO_TRAP = re.compile(r"블루종|블라우종|스탠다드|스탠딩|머드가드")
+_KO_TRAP = re.compile(r"블루종|블라우종|스탠다드|스탠딩|머드가드|브릭\s*로퍼|brick\s*loafer|stone\s*beads|스톤\s*비즈|원석", re.I)
 _COLOR_RX: list = []
 
 
@@ -643,13 +691,30 @@ def match_color(text: str) -> str:
     low = _KO_TRAP.sub(" ", (text or "").lower())
     best, best_len = "", 0
     for label, n, rx in _color_patterns():
+        # 「멀티」는 여러 색이라는 말이지 색 이름이 아니다. 매장이 딴 색을 함께 적었으면
+        # 그게 그 옷 색이다 — 「Multi Zip Hoodie Blue」는 파랑, 「MULTI WAY TOP IN NAVY」는
+        # 남색이다(2026-09-05: 이 규칙이 없으면 139벌 중 서른 남짓이 멀티로 덮였다).
+        if label == "멀티":
+            continue
         if n > best_len and rx.search(low):
             best, best_len = label, n
-    return best
+    if best:
+        return best
+    for label, n, rx in _color_patterns():
+        if label == "멀티" and rx.search(low):
+            return label
+    return ""
 
 
 def pick_color(name: str, description: str, spec: dict | None = None,
                options: list | None = None) -> str:
+    # 이름 끝 괄호에 색을 적어 두면 그게 매장이 말하는 그 옷 색이다 — 앞은 제품 라인 이름이다.
+    # 「CARBON BACKPACK aaa512u(BLACK)」이 carbon 이 더 길다는 이유로 차콜이 됐다(2026-09-05).
+    tail = re.search(r"[(\[]([^)\]]{1,30})[)\]]\s*$", name or "")
+    if tail:
+        c = match_color(tail.group(1))
+        if c:
+            return c
     c = match_color(name)
     if c:
         return c
@@ -670,12 +735,19 @@ def pick_color(name: str, description: str, spec: dict | None = None,
             c = match_color(v)
             if c:
                 return c
-    # 옵션이 한 가지 색만 말할 때 — fabrega 「실버-FREE」, divein 「1 (95~100)-MELANGE GRAY」.
-    # 여러 색이면 아무거나 고를 수 없으니 비워 둔다. 없는 색보다 틀린 색이 나쁘다.
-    seen = {match_color(o) for o in (options or []) if "선택" not in str(o)}
-    seen.discard("")
-    if len(seen) == 1:
-        return seen.pop()
+    # 옵션에 적힌 색 — fabrega 「실버-FREE」, divein 「1 (95~100)-MELANGE GRAY」.
+    # 여러 색이면 다 적는다(사람 지시 2026-09-05). 「SIS PANTS [2COLOR]」처럼 한 목록에
+    # 여러 색을 함께 파는 상품이 317벌인데, 옵션에는 beige·grey 라고 멀쩡히 적혀 있다.
+    # 하나만 고르면 나머지 색을 산 사람에게 거짓말이 되고, 비워 두면 있는 것을 버린다.
+    seen: list[str] = []
+    for o in (options or []):
+        if "선택" in str(o):
+            continue
+        c = match_color(o)
+        if c and c not in seen:
+            seen.append(c)
+    if seen:
+        return "·".join(seen[:6])
     return ""
 
 
@@ -1719,8 +1791,10 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
             if LOOKBOOK_NAME.search(d["name"]) and code == "other" and not acc:
                 dropped_junk += 1     # 룩북·에디토리얼·시즌 캠페인 — 상품이 아니다
                 continue
-            if code in ("kids", "pet"):
-                dropped_kidpet += 1   # 아동복·반려동물 옷은 목록에서 뺀다(사람 지시 2026-09-05)
+            if code in ("kids", "pet", "lifestyle"):
+                # 아동복·반려동물 옷, 그리고 살림살이(머그컵·캔들·러그·블랭킷)는 목록에서 뺀다.
+                # 패션과 거리가 멀다(사람 지시 2026-09-05).
+                dropped_kidpet += 1
                 continue
             # 데님은 category 라벨을 따로 둔다(기존 데이터 관례: category=Denim)
             label = "Denim" if item == "데님" else ("Knitwear" if item in ("니트", "가디건") else ("Shirts" if item == "셔츠" else CATEGORY_LABEL.get(code, "")))

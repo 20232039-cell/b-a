@@ -543,7 +543,7 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
     # 읽게 바꾼 뒤 kirsh 10440 은 라벨이 한 칸씩 밀려 있던 것이 바로잡혔다(밑위 49cm·
     # 허벅지 25.5cm → 밑위 25.5·허벅지 33.8, 2026-09-05). 빠진 것뿐 아니라 틀린 것도 있다.
     ocr_sized: set[str] = set()
-    if select == "ocr":
+    if select in ("ocr", "all"):
         sp2 = CRAWL_DIR.parent / "product_sizes.json"
         if sp2.exists():
             for u, e in json.loads(sp2.read_text(encoding="utf-8")).items():
@@ -567,12 +567,16 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
             if no not in done:
                 continue
             if select != "ocr" and d.get("source_url") in sized_urls:
-                continue
+                # select=all 에서도 「그림에서 읽은」 사이즈는 다시 읽는다 — 판독기가 바뀌면
+                # 같은 그림에서 다른 값이 나온다. HTML 로 얻은 사이즈는 건드릴 까닭이 없다
+                # (2026-09-05: 되찾은 그림 읽기와 판독기 재판독을 한 판에 돌리려고).
+                if not (select == "all" and d.get("source_url") in ocr_sized):
+                    continue
             if select == "ocr" and d.get("source_url") not in ocr_sized:
                 continue
             # 사이즈 없는 옷만 고르는 판(no-size)에서는 장 수를 따지지 않는다 — 읽는 방법이
             # 바뀌면(2026-09-05 머리줄 낱말 단위 판독) 같은 그림에서 새 글이 나온다.
-            if select in ("no-size", "ocr"):
+            if select in ("no-size", "ocr") or (select == "all" and d.get("source_url") in ocr_sized):
                 done.discard(no)
                 continue
             avail = len([u for u in (d.get("detail_images") or [])
