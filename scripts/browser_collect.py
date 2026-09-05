@@ -243,12 +243,22 @@ def main():
                         except Exception:
                             pass
                         table = read_table(page)
-                        # 프레임·선택자를 모두 보고 가장 긴 글을 쓴다 — 첫 선택자가 빈 껍데기인
-                        # 스킨이 있다(diafvine #prdDetail 이 공백 문자 8자).
+                        # 상세 칸이 실제로 차기를 기다린다 — 안 기다리면 아래 body 폴백이
+                        # 메뉴를 긁는다.
+                        try:
+                            page.wait_for_selector("#prdDetail, .xans-product-detail, .detailArea",
+                                                   timeout=6000)
+                        except Exception:
+                            pass
+                        # 「가장 긴 글」로 고르면 안 된다. 상세가 비어 있는 페이지에서는 body 가
+                        # 늘 이겨서 내비게이션 메뉴와 「유사한 상품 추천」이 설명글로 저장됐다
+                        # (2026-09-05 insilence: 260건 전부 그 꼴이라 소재 태깅이 하나도 안 됐다).
+                        # 좁은 선택자부터 보고 충분히 긴 첫 것을 쓴다. body 는 마지막 수단이고,
+                        # 그마저도 사이즈·소재 낌새가 있을 때만 받는다.
                         desc = ""
                         for fr in list(page.frames):
                             for sel in ("#prdDetail", ".xans-product-detail", ".detailArea",
-                                        "#detail", ".prd-detail", "body"):
+                                        "#detail", ".prd-detail"):
                                 try:
                                     el = fr.query_selector(sel)
                                 except Exception:
@@ -256,8 +266,18 @@ def main():
                                 if not el:
                                     continue
                                 t = " ".join((el.inner_text() or "").split())
-                                if len(t) > len(desc):
+                                if len(t) >= 120:
                                     desc = t[:8000]
+                                    break
+                            if desc:
+                                break
+                        if not desc:
+                            try:
+                                t = " ".join((page.inner_text("body") or "").split())
+                            except Exception:
+                                t = ""
+                            if re.search(r"총장|가슴|어깨|소매|실측|단면|소재|혼용률|겉감|FABRIC", t, re.I):
+                                desc = t[:8000]
                         imgs = []
                         for im in page.query_selector_all("img"):
                             s = im.get_attribute("src") or im.get_attribute("data-src") or ""
