@@ -174,7 +174,7 @@ def main() -> None:
                 if n != len(b) or not n:
                     continue
                 if any(abs(x - y) > 3 for x, y in zip(a, b)):
-                    fails["색만 다른 같은 옷인데 치수가 다름"].append(
+                    fails["(참고) 색만 다른 같은 옷인데 치수가 다름 — 남녀 차이일 수 있어 고치지 않는다"].append(
                         (slug, f"{nm[:40]} {lab}: {a[:3]} vs {b[:3]}", u))
                     break
             else:
