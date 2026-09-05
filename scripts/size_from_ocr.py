@@ -172,6 +172,57 @@ def parse_paren_slash(text: str) -> tuple[list[str], dict[str, list[float]]] | N
     return best
 
 
+_PAIR = re.compile(r"([가-힣A-Za-z][가-힣A-Za-z0-9]{0,9})\s*[:\-]?\s*"
+                   r"(\d{1,3}(?:[.,]\d{1,2})?)\s*(?:cm|CM|센티)?(?![\d.])")
+
+
+def parse_named_pairs(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] | None:
+    """한 줄 안에서 「이름 값 이름 값」이 되풀이되는 표.
+
+    레이어드 옷은 한 상품에 옷이 둘이라 표가 이렇게 눕는다(2026-09-05 the-coldest-moment,
+    사람이 화면으로 짚어 줌):
+
+        Shoulder (어깨) 반팔 39cm 긴팔 39cm
+        Chest (가슴)   반팔 49cm 긴팔 43cm
+
+    「반팔·긴팔」이 사이즈 이름 자리다. 잘못 걸리지 않도록 이름 묶음이 여러 줄에서
+    똑같아야 하고(「가슴 단면 52 밑단 50」 같은 줄은 이름이 줄마다 달라 걸리지 않는다),
+    이름이 그 자체로 치수 라벨이면 버린다.
+    """
+    rows: list[tuple[str, tuple[str, ...], list[str]]] = []
+    for ln in lines:
+        m = LABEL_RX.search(ln)
+        if not m:
+            continue
+        lab = canon_label(m.group(0))
+        if not lab:
+            continue
+        rest = ln[m.end():]
+        rest = re.sub(r"^\s*\([^)]*\)", "", rest)          # 「(뒷면 중심선 기준)」
+        pairs = _PAIR.findall(rest)
+        if len(pairs) < 2:
+            continue
+        names = tuple(n.upper() for n, _ in pairs)
+        if len(set(names)) != len(names):
+            continue
+        if any(canon_label(n) for n, _ in pairs):
+            continue
+        rows.append((lab, names, [v for _, v in pairs]))
+    if len(rows) < 2:
+        return None
+    key = Counter(r[1] for r in rows).most_common(1)[0][0]
+    rows = [r for r in rows if r[1] == key]
+    if len(rows) < 2:
+        return None
+    cols: dict[str, list[float]] = {}
+    for lab, _, vals in rows:
+        if lab in cols:
+            continue
+        cols[lab] = [fix_value(lab, v) for v in vals]
+    cols = {c: v for c, v in cols.items() if any(x is not None for x in v)}
+    return (list(key), cols) if len(cols) >= 2 else None
+
+
 def _row_cells(row: str) -> list[str]:
     """값 줄을 칸으로 나눈다(맨 앞 사이즈 이름은 뺀다)."""
     r = re.sub(r"[|ㅣ:;=_]", " ", row).strip()
@@ -484,6 +535,9 @@ def from_ocr(text: str) -> tuple[list[str] | None, dict[str, list[float]]]:
     par = parse_paren_slash(text)
     if par and len(par[1]) >= 2:
         return par[0], clean_ocr(par[1])
+    pair = parse_named_pairs(lines)
+    if pair and len(pair[1]) >= 2:
+        return pair[0], clean_ocr(pair[1])
     # 라벨 하나가 깨져 칸이 밀린 표 — 자리로 맞춘다(parse_slots 주석)
     for cand in (lines, resegment(text)):
         slot = parse_slots(cand)

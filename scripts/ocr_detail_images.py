@@ -180,6 +180,153 @@ def ocr_dark_bands(im) -> str:
     return "\n".join(out)
 
 
+LABEL_WORD = re.compile(r"총장|총 ?기장|어깨|가슴|소매|밑단|허리|밑위|암홀|허벅지|엉덩이|"
+                        r"화장|기장|둘레|목|품|길이|shoulder|chest|sleeve|length|waist|"
+                        r"hip|thigh|hem|rise|bust", re.I)
+CELL_NUM = re.compile(r"\d{1,4}(?:[.,]\d{1,2})?|[-–—~]")
+
+
+def _tsv_rows(im, psm: str = "6") -> list[list[tuple[int, int, int, int, str]]]:
+    """tesseract 의 tsv 로 낱말 상자를 받아 줄 단위로 묶는다."""
+    import csv as _csv
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=True) as f:
+        im.save(f.name)
+        try:
+            out = subprocess.run(
+                ["tesseract", f.name, "stdout", "-l", "kor+eng", "--psm", psm, "tsv"],
+                capture_output=True, text=True, timeout=120,
+                env={**os.environ, "OMP_THREAD_LIMIT": "1"},
+            ).stdout
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return []
+    rows: dict[tuple, list] = {}
+    for r in _csv.DictReader(io.StringIO(out), delimiter="\t", quoting=_csv.QUOTE_NONE):
+        try:
+            if int(r["level"]) != 5:
+                continue
+            t = (r["text"] or "").strip()
+            if not t:
+                continue
+            k = (int(r["block_num"]), int(r["par_num"]), int(r["line_num"]))
+            rows.setdefault(k, []).append(
+                (int(r["left"]), int(r["top"]), int(r["width"]), int(r["height"]), t))
+        except (KeyError, ValueError, TypeError):
+            continue
+    return [sorted(v, key=lambda x: x[0]) for _, v in sorted(rows.items())]
+
+
+def _cell_crop(src, box, band, ratio: float, cut: float = 0.0):
+    """머리줄의 낱말 하나를 자른다 — 세로는 줄 전체 높이를 쓴다.
+
+    낱말 상자 높이만 믿으면 안 된다. 「a어깨」처럼 굵은 알파벳이 붙으면 tesseract 가
+    한글의 윗부분을 상자 밖으로 흘려서, 그 상자만 잘라 읽으면 `ani` 가 나온다
+    (2026-09-05 diafvine). 줄의 위·아래 끝까지 넉넉히 잘라야 「어깨」가 나온다.
+    """
+    from PIL import Image
+    L, W = int(box[0] * ratio), int(box[2] * ratio)
+    if cut:
+        L, W = L + int(W * cut), W - int(W * cut)
+    T, B = int(band[0] * ratio), int(band[1] * ratio)
+    padx, pady = max(3, W // 12), max(4, (B - T) // 3)
+    c = src.crop((max(0, L - padx), max(0, T - pady),
+                  min(src.width, L + W + padx), min(src.height, B + pady)))
+    if c.width < 8 or c.height < 8:
+        return None
+    k = max(2, min(6, 140 // max(1, c.height)))
+    return c.resize((c.width * k, c.height * k), Image.LANCZOS)
+
+
+def _cell_text(src, box, band, ratio: float, alt=None) -> str:
+    """낱말 하나만 크게 키워 읽는다.
+
+    왜 낱말마다 따로 읽나: 라벨이 「a어깨 b가슴 c밑단」처럼 굵은 알파벳과 붙어 있으면
+    tesseract 가 줄 단위로는 `aon bas cet` 같은 잡음을 낸다. 같은 글자를 상자 하나씩
+    떼어 psm 7 로 읽으면 「어깨·가슴·밑단·소매기장·총장」이 전부 나온다
+    (2026-09-05 diafvine 실측). 값 줄은 멀쩡한데 라벨만 잡음이라 표가 통째로 버려졌다.
+    원본과 줄인 것 중 어느 쪽이 읽히는지는 매장마다 달라서 둘 다 본다.
+    """
+    best = ""
+    # 「a어깨」의 굵은 알파벳이 한글에 붙어 뭉개진다 — 왼쪽 조금을 떼어 낸 것도 본다.
+    tries = [(src, ratio, 0.0), (alt, 1.0, 0.0), (src, ratio, 0.28), (alt, 1.0, 0.28)]
+    for img, r, cut in tries:
+        if img is None:
+            continue
+        c = _cell_crop(img, box, band, r, cut)
+        if c is None:
+            continue
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=True) as f:
+            c.save(f.name)
+            for psm in ("7", "8"):
+                try:
+                    t = subprocess.run(
+                        ["tesseract", f.name, "-", "-l", "kor+eng", "--psm", psm],
+                        capture_output=True, text=True, timeout=30,
+                        env={**os.environ, "OMP_THREAD_LIMIT": "1"},
+                    ).stdout
+                except (subprocess.TimeoutExpired, FileNotFoundError):
+                    continue
+                t = re.sub(r"^[^가-힣A-Za-z]+", "", " ".join(t.split()))
+                # 라벨이 보이면 바로 채택 — 길이로만 고르면 잡음이 이긴다
+                if LABEL_WORD.search(t):
+                    return t
+                if len(t) > len(best):
+                    best = t
+    return best
+
+
+def _is_value_row(toks) -> bool:
+    if len(toks) < 3:
+        return False
+    num = sum(1 for t in toks if CELL_NUM.fullmatch(t[4]))
+    # 첫 칸은 사이즈 이름(S·M·L·95)이라 숫자가 아닐 수 있다
+    return num >= 2 and num >= len(toks) - 1
+
+
+def ocr_cell_grid(small, src=None, ratio: float = 1.0, max_tables: int = 3) -> str:
+    """값 줄이 보이면 그 바로 위 줄을 낱말 하나씩 다시 읽어 「라벨 줄 + 값 줄」을 짜 준다."""
+    rows = _tsv_rows(small)
+    if not rows:
+        return ""
+    out, used = [], 0
+    i = 0
+    while i < len(rows) and used < max_tables:
+        toks = rows[i]
+        if not _is_value_row(toks):
+            i += 1
+            continue
+        head = None
+        for j in range(i - 1, max(-1, i - 3), -1):
+            h = rows[j]
+            if len(h) < 2:
+                continue
+            if _is_value_row(h) or abs(len(h) - len(toks)) > 1:
+                break
+            head = h
+            break
+        if head is None:
+            i += 1
+            continue
+        band = (min(b[1] for b in head), max(b[1] + b[3] for b in head))
+        labs = [_cell_text(src if src is not None else small, b, band, ratio, alt=small)
+                for b in head]
+        if sum(1 for l in labs if LABEL_WORD.search(l)) < 2:
+            i += 1
+            continue
+        block = [" ".join(l or "-" for l in labs)]
+        n = len(toks)
+        gap = 0
+        while i < len(rows) and gap <= 2:
+            if _is_value_row(rows[i]) and abs(len(rows[i]) - n) <= 1:
+                block.append(" ".join(t[4] for t in rows[i]))
+                gap = 0
+            else:
+                gap += 1
+            i += 1
+        out.append("\n".join(block))
+        used += 1
+    return "\n".join(out)
+
+
 SIZE_HINT = re.compile(r"총장|어깨|가슴|소매|밑단|허리|허벅지|밑위|암홀|SIZE|실측|단면|길이", re.I)
 
 
@@ -248,8 +395,33 @@ def _cap(texts: list[str], limit: int = 12000) -> str:
     return full[:limit // 3] + "\n…\n" + full[lo:lo + (limit * 2) // 3]
 
 
+VALUE_LINE = re.compile(r"(?:(?<!\d)\d{1,3}(?:[.,]\d)?(?!\d)[^\dA-Za-z가-힣]{0,4}){3,}")
+
+
+def add_cell_grid(joined: str, data: bytes, orig: bytes) -> str:
+    """값 줄이 보이는데 라벨이 잡음이면, 머리줄을 낱말 단위로 다시 읽어 앞에 붙인다.
+
+    tsv 한 번 + 머리줄 낱말 수만큼 tesseract 를 더 부르므로(장당 3~4초) 표가 실제로
+    보이는 장에서만 돈다. 결과는 앞에 붙이기만 하고 원문은 그대로 둔다 — 파서가
+    출처를 골라 쓰므로 이미 되던 것을 망칠 수 없다.
+    """
+    if not any(VALUE_LINE.search(ln) for ln in joined.splitlines()):
+        return joined
+    try:
+        from PIL import Image as _I
+        import io as _io
+        small = _I.open(_io.BytesIO(data)).convert("L")
+        src = _I.open(_io.BytesIO(orig)).convert("L")
+        ratio = src.width / max(1, small.width)
+        grid = ocr_cell_grid(small, src, ratio)
+    except Exception:
+        return joined
+    return (grid + "\n" + joined) if grid else joined
+
+
 def ocr_bytes(data: bytes) -> str:
     """tesseract 로 한 장. --psm 6(균일 블록)이 상품 상세의 세로 긴 이미지에 가장 안정적이었다."""
+    orig = data
     data = preprocess(data)
     # 세로로 긴 띠는 통짜로 못 읽는다 — 두 단계 훑기로 넘긴다(ocr_tall 주석).
     try:
@@ -266,7 +438,9 @@ def ocr_bytes(data: bytes) -> str:
             if bands:
                 joined = bands + "\n" + joined
             words = re.findall(r"[가-힣]{2,}|[A-Za-z]{3,}", joined)
-            return joined if len(words) >= 3 else ""
+            if len(words) < 3:
+                return ""
+            return add_cell_grid(joined, data, orig)
     except Exception:
         pass
     with tempfile.NamedTemporaryFile(suffix=".img", delete=True) as f:
@@ -298,7 +472,9 @@ def ocr_bytes(data: bytes) -> str:
     if bands:
         joined = bands + "\n" + joined
     words = re.findall(r"[가-힣]{2,}|[A-Za-z]{3,}", joined)
-    return joined if len(words) >= 3 else ""
+    if len(words) < 3:
+        return ""
+    return add_cell_grid(joined, data, orig)
 
 
 def _has_size_table(text: str) -> bool:
@@ -371,6 +547,11 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
                     read_n[o["product_no"]] = len(o.get("images") or [])
         for no, d in latest.items():
             if no not in done or d.get("source_url") in sized_urls:
+                continue
+            # 사이즈 없는 옷만 고르는 판(no-size)에서는 장 수를 따지지 않는다 — 읽는 방법이
+            # 바뀌면(2026-09-05 머리줄 낱말 단위 판독) 같은 그림에서 새 글이 나온다.
+            if select == "no-size":
+                done.discard(no)
                 continue
             avail = len([u for u in (d.get("detail_images") or []) if not SKIP_NAME.search(u.rsplit("/", 1)[-1])])
             if read_n.get(no, 0) < min(max_images, avail):
