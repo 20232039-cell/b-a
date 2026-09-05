@@ -24,6 +24,7 @@ tesseract(kor+eng) 가 활자로 박힌 한글은 잘 읽는다 — 샘플에서
 from __future__ import annotations
 
 import argparse
+import collections
 import io
 import json
 import os
@@ -574,9 +575,22 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
             if select in ("no-size", "ocr"):
                 done.discard(no)
                 continue
-            avail = len([u for u in (d.get("detail_images") or []) if not SKIP_NAME.search(u.rsplit("/", 1)[-1])])
+            avail = len([u for u in (d.get("detail_images") or [])
+                         if u not in shared and not SKIP_NAME.search(u.rsplit("/", 1)[-1])])
             if read_n.get(no, 0) < min(max_images, avail):
                 done.discard(no)
+
+    # 매장 공용 안내 그림은 읽어도 소용없다 — 결제 아이콘·저작권 안내·교환반품 규정이
+    # 상품마다 붙어 상세 그림의 45%(101,405장 중 46,032장)를 차지한다. 그것들이 「앞
+    # 12장」 예산을 먹어 정작 사이즈 표가 안 읽혔다(2026-09-05: kirsh 에서 글자가 가장
+    # 많은 그림이 「NOTICE 배송안내」였다). 한 브랜드 안에서 열 상품 넘게, 그리고 전체의
+    # 20% 넘게 쓰는 그림은 상품 그림이 아니다 — 색만 다른 형제도 그렇게 많지 않다.
+    use: collections.Counter = collections.Counter()
+    for d in latest.values():
+        for u in set(d.get("detail_images") or []):
+            use[u] += 1
+    floor = max(10, len(latest) * 0.2)
+    shared = {u for u, c in use.items() if c >= floor}
 
     todo = []
     for no, d in sorted(latest.items(), key=lambda kv: int(kv[0])):
@@ -604,7 +618,8 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
             # 소재·디테일·사이즈표는 상세 이미지의 「뒤쪽」에 오는 경우가 많다(사람 지적 2026-09-04).
             # 앞에서 자르면 착용컷만 읽고 정작 필요한 표를 놓친다. 그래서 뒤에서부터 고르되,
             # 파일 이름에 size/detail/info 가 든 그림은 어디에 있든 먼저 읽는다.
-            cand = [u for u in d["detail_images"] if not SKIP_NAME.search(u.rsplit("/", 1)[-1])]
+            cand = [u for u in d["detail_images"]
+                    if u not in shared and not SKIP_NAME.search(u.rsplit("/", 1)[-1])]
             hinted = [u for u in cand if HINT_NAME.search(u)]
             rest = [u for u in cand if u not in hinted]
             picked = hinted[:max_images] + rest[-(max_images - len(hinted[:max_images])):] if max_images > len(hinted[:max_images]) else hinted[:max_images]

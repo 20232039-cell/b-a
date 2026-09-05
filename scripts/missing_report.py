@@ -47,6 +47,18 @@ MAT_HINT = re.compile(r"코튼|cotton|폴리에스터|polyester|나일론|nylon|
 COLOR_HINT = re.compile(r"(?:^|[\n\r•▪|·\-\s])(?:colou?r|색상|컬러)\s*[:：]", re.I)
 # 「S 36.5」처럼 이름과 숫자만 있는 줄 — 도식 위에 찍힌 치수라 라벨을 복원할 수 없다
 SKIP_IMG = re.compile(r"shipping|delivery|notice|issue|banner|event|coupon|logo|icon|배송|공지", re.I)
+
+
+def readable_images(d: dict, ocr_rec: dict | None) -> int:
+    """실제로 읽을 수 있는 상세 그림 수.
+
+    주소만 세면 안 된다 — badblood 13벌은 53×16px 아이콘 하나뿐인데 「그림 있음」으로
+    세어 재판독 대상이 됐다(2026-09-05). OCR 을 이미 돌린 적이 있으면 그때 실제로 읽은
+    장수가 답이다(너무 작거나 못 받은 그림은 그 목록에서 빠져 있다).
+    """
+    if ocr_rec is not None:
+        return len(ocr_rec.get("images") or [])
+    return len([u for u in (d.get("detail_images") or []) if not SKIP_IMG.search(u)])
 DRAW = re.compile(r"^\s*(XS|S|M|L|XL|XXL|2XL|3XL|F|FREE|OS|\d{2,3})\s*(\d{1,3}(?:\.\d)?)\s*(?:cm)?\s*$", re.I)
 
 
@@ -89,7 +101,7 @@ def main() -> None:
                 d = json.loads(line)
             except Exception:
                 continue
-            ocr[(slug, d["product_no"])] = d.get("ocr_text") or ""
+            ocr[(slug, d["product_no"])] = d
 
     out = []
     for path in sorted(DATA.glob("crawl/*.jsonl")):
@@ -100,7 +112,8 @@ def main() -> None:
             r = by_key.get((slug, str(no)))
             if not r or r["status"] != "ON_SALE":
                 continue
-            t = ocr.get((slug, no)) or ""
+            ocr_rec = ocr.get((slug, no))
+            t = (ocr_rec or {}).get("ocr_text") or ""
             body = " ".join([d.get("description") or "", d.get("detail_text") or "", t,
                              " ".join(f"{k} {v}" for k, v in (d.get("spec") or {}).items())])
             opts = " / ".join(str(o) for o in (d.get("options") or []))
@@ -111,7 +124,7 @@ def main() -> None:
                     why.append("사이즈: 원문에 있음 — 읽어야 함")
                 elif draw_runs(t) >= 2:
                     why.append("사이즈: 도식형 — 못 채움")
-                elif [u for u in (d.get("detail_images") or []) if not SKIP_IMG.search(u)]:
+                elif readable_images(d, ocr_rec):
                     # 그림이 있는데 읽은 글에 치수가 없다 — 아직 모른다(재판독으로 갈린다)
                     why.append("사이즈: 그림 재판독 대상")
                 else:

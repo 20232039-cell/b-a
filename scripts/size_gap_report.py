@@ -42,6 +42,18 @@ HINT = re.compile(rf"(?:{_LAB})[^0-9가-힣A-Za-z]{{0,12}}\d{{1,3}}(?:[.,]\d)?"
                   rf"|\d{{1,3}}(?:[.,]\d)?\s*(?:cm|CM)?[^0-9가-힣A-Za-z]{{0,4}}(?:{_LAB})", re.I)
 # 「S 36.5」처럼 사이즈 이름과 숫자만 있는 줄 — 도식 위에 찍힌 치수
 SKIP_IMG = re.compile(r"shipping|delivery|notice|issue|banner|event|coupon|logo|icon|배송|공지", re.I)
+
+
+def readable_images(d: dict, ocr_rec: dict | None) -> int:
+    """실제로 읽을 수 있는 상세 그림 수.
+
+    주소만 세면 안 된다 — badblood 13벌은 53×16px 아이콘 하나뿐인데 「그림 있음」으로
+    세어 재판독 대상이 됐다(2026-09-05). OCR 을 이미 돌린 적이 있으면 그때 실제로 읽은
+    장수가 답이다(너무 작거나 못 받은 그림은 그 목록에서 빠져 있다).
+    """
+    if ocr_rec is not None:
+        return len(ocr_rec.get("images") or [])
+    return len([u for u in (d.get("detail_images") or []) if not SKIP_IMG.search(u)])
 DRAW = re.compile(r"^\s*(XS|S|M|L|XL|XXL|2XL|3XL|F|FREE|OS|\d{2,3})\s*(\d{1,3}(?:\.\d)?)\s*(?:cm)?\s*$", re.I)
 
 
@@ -118,7 +130,7 @@ def main() -> None:
             elif draw_runs(t) >= 2:
                 row["왜"] = "도식형 — 그림 위 숫자만 있고 라벨이 화살표뿐"
                 gone.append(row)
-            elif [u for u in (d.get("detail_images") or []) if not SKIP_IMG.search(u)]:
+            elif readable_images(d, ocr.get((slug, no))):
                 # 그림은 있는데 읽은 글에 치수가 없다 — 매장이 안 적었는지, 우리가 못 읽었는지
                 # 아직 모른다. 새 판독기로 다시 읽어 봐야 갈린다(2026-09-05).
                 row["왜"] = "그림은 있는데 아직 못 읽음 — 재판독 대상"
