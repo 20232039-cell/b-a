@@ -46,7 +46,25 @@ CRAWL_DIR = ROOT / "data" / "crawl"
 OCR_DIR = CRAWL_DIR / "ocr"
 UA = "Mozilla/5.0 (compatible; LayerCatalog/0.2; +https://github.com/20232039-cell/layer-brand-agent)"
 MIN_BYTES = 20 * 1024
-SKIP_NAME = re.compile(r"shipping|delivery|notice|issue|exchange|refund|return|banner|event|coupon|logo|icon|배송|공지|교환|반품", re.I)
+# 안내문 그림은 읽어도 소용없다. 다만 「logo」·「icon」은 상품 이름에도 들어간다 —
+# 수집기에서 고친 것과 같은 함정이다(2026-09-05). the-coldest-moment 의 되찾은 그림
+# 「상세_TCM mini logo pocket work jacket(BLACK).jpg」이 여기서 다시 버려져, 그림을
+# 되찾아 놓고도 27벌을 못 읽었다. 짧은 이름에서 구분자에 붙은 낱말만 자산으로 본다.
+SKIP_NAME = re.compile(r"shipping|delivery|notice|issue|exchange|refund|return|banner|event|coupon"
+                       r"|배송|공지|교환|반품", re.I)
+_ASSET_WORD = re.compile(r"(?:^|[/_.\-])(?:ico|icon|btn|logo|blank|spacer|badge|arrow)s?"
+                         r"(?:[0-9]|[/_.\-]|$)", re.I)
+_SIZE_WORD = re.compile(r"size|chart|guide|measure|사이즈|실측|치수", re.I)
+
+
+def skip_image(url: str) -> bool:
+    name = re.sub(r"\?.*$", "", url).rsplit("/", 1)[-1]
+    if SKIP_NAME.search(name):
+        return True
+    stem = re.sub(r"\.[a-z0-9]{2,4}$", "", name, flags=re.I)
+    if _SIZE_WORD.search(stem):
+        return False
+    return len(stem) <= 24 and bool(_ASSET_WORD.search(stem))
 MAX_IMAGES = 5
 SHORT_TEXT = 80
 
@@ -580,7 +598,7 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
                 done.discard(no)
                 continue
             avail = len([u for u in (d.get("detail_images") or [])
-                         if u not in shared and not SKIP_NAME.search(u.rsplit("/", 1)[-1])])
+                         if u not in shared and not skip_image(u)])
             if read_n.get(no, 0) < min(max_images, avail):
                 done.discard(no)
 
@@ -623,7 +641,7 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
             # 앞에서 자르면 착용컷만 읽고 정작 필요한 표를 놓친다. 그래서 뒤에서부터 고르되,
             # 파일 이름에 size/detail/info 가 든 그림은 어디에 있든 먼저 읽는다.
             cand = [u for u in d["detail_images"]
-                    if u not in shared and not SKIP_NAME.search(u.rsplit("/", 1)[-1])]
+                    if u not in shared and not skip_image(u)]
             hinted = [u for u in cand if HINT_NAME.search(u)]
             rest = [u for u in cand if u not in hinted]
             picked = hinted[:max_images] + rest[-(max_images - len(hinted[:max_images])):] if max_images > len(hinted[:max_images]) else hinted[:max_images]
