@@ -1468,6 +1468,20 @@ def _strip_tags(s: str) -> str:
     return re.sub(r"\s+", " ", htmlmod.unescape(re.sub(r"<[^>]+>", " ", s or ""))).strip()
 
 
+# 옵션 칸에 든 안내 문구 — 사이즈가 아니다. 예전엔 한 문장만 정확히 맞춰 뺐는데
+# 매장마다 말이 달라서 2,958벌이 새고 있었다(2026-09-06 실측):
+#   low-classic 「- [필수] SELECT SIZE -」 768 · open-yy 「- [필수] SIZE 선택 -」 727 ·
+#   andersson-bell 「- [필수] Choose your size -」 664 · thebarnnet 「옵션 선택」 470 ·
+#   kamien 「OPTION」 57
+OPTION_PROMPT = re.compile(
+    r"^\s*[-–*\[\(]*\s*(?:\[?필수\]?|옵션\s*선택|옵션을?\s*선택|선택\s*하세요|사이즈\s*선택|"
+    r"색상\s*선택|choose\b|select\b|please\b|option\s*$|-{2,}|={2,}|\.{2,})", re.I)
+
+# 「S [품절]」처럼 재고 딱지가 이름에 붙어 온다. 이름에서 떼고 어느 사이즈가 품절인지는
+# 따로 적어 둔다 — 앱에 「S [품절]」이 사이즈 이름으로 서면 안 된다(1,879벌).
+OPTION_SOLDOUT = re.compile(r"\s*[\[\(]?\s*(?:품절|sold\s?out|일시\s?품절|재입고\s?예정)\s*[\]\)]?\s*$", re.I)
+
+
 def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
     soup = BeautifulSoup(html_text, "lxml")
     ld = parse_json_ld_product(html_text)
@@ -1706,10 +1720,20 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
         if src not in detail_images and src != image and src not in gallery:
             detail_images.insert(0, src)
 
-    options = []
+    options, soldout_options = [], []
     for opt in soup.select('select[id^="product_option_id"] option, select[name^="option"] option'):
         v = opt.get_text(" ", strip=True)
-        if v and not v.startswith("*") and v not in ("- [필수] 옵션을 선택해 주세요 -", "-------------------") and len(v) < 60:
+        if not v or v.startswith("*") or len(v) >= 60:
+            continue
+        if OPTION_PROMPT.match(v):
+            continue          # 「- [필수] SELECT SIZE -」 같은 안내 문구는 사이즈가 아니다
+        m = OPTION_SOLDOUT.search(v)
+        if m:
+            v = v[:m.start()].strip()
+            if not v:
+                continue
+            soldout_options.append(v)
+        if v:
             options.append(v)
 
     return {
@@ -1727,6 +1751,7 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
         "spec": spec,
         "detail_images": detail_images[:40],
         "options": options[:30],
+        "soldout_options": soldout_options[:30],
     }
 
 
