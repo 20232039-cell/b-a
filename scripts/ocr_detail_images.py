@@ -601,6 +601,16 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
         for no, d in latest.items():
             if no not in done:
                 continue
+            # 옛 6000자 상한에 잘린 기록은 무엇보다 먼저 본다 — 사이즈가 이미 있어도.
+            # 아래의 「사이즈 있으면 건너뜀」이 먼저 오는 바람에 이 검사에 아예 닿지 못했고,
+            # 어젯밤 재판독이 성공으로 끝났는데도 956벌이 그대로 남았다(2026-09-06).
+            # 그 중 237벌은 사이즈만 있고 소재·색·디테일이 잘린 채였다(siyazu 126 ·
+            # rough-side 28 · dnsr 15). 사이즈 표는 상세 그림 맨 끝에 있어 앞에서 자르면
+            # 통째로 날아간다 — 그 뒤에 오는 소재·케어 글도 함께 날아갔다.
+            # 대상은 여전히 select 의 목록(gaps 면 빈 축이 있는 상품)이 정한다.
+            if 5995 <= text_len.get(no, 0) <= 6005:
+                done.discard(no)
+                continue
             if select != "ocr" and d.get("source_url") in sized_urls:
                 # select=all 에서도 「그림에서 읽은」 사이즈는 다시 읽는다 — 판독기가 바뀌면
                 # 같은 그림에서 다른 값이 나온다. HTML 로 얻은 사이즈는 건드릴 까닭이 없다
@@ -614,11 +624,6 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
             if select in ("no-size", "ocr", "gaps") or (select == "all" and d.get("source_url") in ocr_sized):
                 done.discard(no)
                 continue
-            # 옛 6000자 상한에 잘린 기록은 어떤 갈래에서도 다시 읽는다. 사이즈 표는 상세
-            # 그림 맨 끝에 있어 앞에서 자르면 통째로 날아간다 — 그래서 「원문에 치수가 없다」로
-            # 세어졌다(2026-09-06: siyazu 389 등 956벌이 그대로 남아 있었다).
-            if 5995 <= text_len.get(no, 0) <= 6005:
-                done.discard(no)
             avail = len([u for u in (d.get("detail_images") or [])
                          if u not in shared and not skip_image(u)])
             if read_n.get(no, 0) < min(max_images, avail):
