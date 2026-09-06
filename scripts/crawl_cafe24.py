@@ -658,6 +658,18 @@ def head_end(text: str, vocab: dict, label: str) -> int:
 # 어휘로는 못 막고 여기서 먼저 걸러야 한다(2026-09-05: 「레이스업 부츠컷 데님」이 신발이 됐다).
 SHOE_FALSE = re.compile(r"부츠\s*[-–]?\s*컷|boot\s*[-–]?\s*cut|bootcut", re.I)
 
+# 옥스포드는 구두 이름이면서 셔츠 원단이다. 이름에 옷 낱말이 같이 있으면 원단 쪽이다.
+# moif 는 「WIDE UTILITY SHIRT / BLACK OXFORD」처럼 뒤에 색·원단을 적어서, 「뒤에 걸린 쪽이
+# 머리 낱말」 규칙에 걸려 셔츠 열한 벌이 신발이 됐다(hatching-room 「Volume Pants Oxford
+# Washed」까지 열두 벌, 2026-09-06). 사이즈 표까지 같이 버려지고 있었다.
+# 옷 낱말이 없는 것은 그대로 둔다 — open-yy 「OXFORD FLATS」·frizmworks 「Leather oxford」는
+# 진짜 구두다.
+FABRIC_NOT_SHOE = re.compile(r"oxford|옥스포드|옥스퍼드", re.I)
+GARMENT_WORD = re.compile(
+    r"shirts?|셔츠|팬츠|pants|trousers|자켓|재킷|jackets?|코트|coats?|니트|knit|"
+    r"t-?shirts?|tees?|티셔츠|후디|hood(?:ie|ed)?|맨투맨|sweat|스커트|skirts?|원피스|dress|"
+    r"블라우스|blouse|점퍼|블루종|베스트|vest|가디건|cardigan|shorts|쇼츠|슬랙스|slacks", re.I)
+
 # 한글은 낱말 경계가 없어 안에 잡화 낱말이 든 옷이 걸린다 — 「슈러그」의 러그, 「캡소매」의 캡.
 ACC_FALSE = re.compile(r"슈러그|shrug|캡\s*소매|cap\s*sleeve|숄칼라|shawl\s*collar", re.I)
 
@@ -731,6 +743,8 @@ def classify_category(name: str, category_names: list[str], description: str = "
     name = _TRAIL_PAREN.sub("", name)
     # 잡화 세분류가 먼저다 — 옷 어휘와 겹치는 낱말(니트 스카프·플리스 베레·데님 캡)이 있고,
     # 상품명은 「무엇인지」를 뒤에 적으므로 뒤에 걸린 쪽이 머리 낱말이다.
+    if GARMENT_WORD.search(name):
+        name = FABRIC_NOT_SHOE.sub(" ", name)   # 옥스포드 셔츠는 구두가 아니다
     acc = match_acc(name)
     if acc:
         return ACC_TO_CATEGORY[acc]

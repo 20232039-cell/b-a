@@ -555,7 +555,10 @@ def images_of(d: dict) -> list[str]:
         sinoon  Authentic Logo Hoodie        644자
         glowny  HUGGING BIKINI SKIRT       1,386자
         learve  퍼티그 라운지 팬츠              479자
+        the-museum-visitor "WE ARE BUDDY" FLOWER KNIT  1,737자
+        sinoon  Round Neck Sleeveless Knit  2,159자
         coor    메리노 울 크루넥 스웨터           0자 (갤러리가 한 장뿐)
+    열두 벌을 재서 일곱 벌(58%)에 80자 넘는 글이 있었다.
 
     상세 그림이 있으면 지금처럼 그것만 읽는다 — 갤러리는 대개 착장컷이라 글이 없고,
     괜히 예산만 먹는다. 없을 때만 대신 본다.
