@@ -288,6 +288,12 @@ BRAND_GENDER = {"Womenswear": "WOMENSWEAR", "Menswear": "MENSWEAR", "Unisex": "U
 
 # 상품이 아닌 페이지의 이름 — 개인결제·스태프 결제·룩북·테스트. 가격이 있어도 상품이 아니다.
 # ^@ — glowny 가 고객 착용샷을 「@인스타아이디」 상품(2,500,000원)으로 830건 올려 둠. ^[¥*]+ — insilence 비공개 자리표시자 159건 (사람 결정 2026-09-02)
+# 쇼핑백·기프트백·더스트백은 상품이 아니라 포장이다 — 다만 이름만으로는 못 가른다.
+# the-museum-visitor 「PAINTING ART PRINTED DUST BAG」 세 벌은 145,000원짜리 진짜 가방이고,
+# vunque 「쇼핑백」 1,500원·glowny 「GIFT BAG」 3,000원은 포장이다. 값이 가른다(2026-09-06).
+PACKAGING = re.compile(r"쇼핑백|shopping\s*bag|기프트\s*백|gift\s*(?:bag|box)|더스트\s*백|dust\s*bag|포장\s*백", re.I)
+PACKAGING_MAX = 10000
+
 JUNK_NAME = re.compile(r"^@|^[¥*\s]+$|실장님|이사님|원장님|디자이너\s*님|\s님\s*$|개인\s*결제|테스트|샘플|배송비|추가\s*금|lookbook|룩북|campaign|캠페인|\d{4}\s*(spring|summer|fall|autumn|winter)", re.I)
 
 # 상품이 아니라 룩북·에디토리얼·팝업·시즌 캠페인 페이지 — cafe24 매장이 이런 것도 /product/
@@ -2250,6 +2256,10 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
                 continue
             # 상품 이름을 한 개인결제·룩북 페이지 — lecyto 「박민희 실장님 팀」 217건(가격 있음),
             # insilence 「셀럽 테스트」, opus-0012 「2024 spring summer」. 이름만으로 갈린다.
+            if (PACKAGING.search(d["name"] or "")
+                    and 0 < int(d.get("price") or 0) <= PACKAGING_MAX):
+                dropped_junk += 1
+                continue
             if JUNK_NAME.search(d["name"]) or not_a_product(d["name"]):
                 # not_a_product 는 값 없는 페이지를 가르려고 만든 것인데, 값이 있는 행에도
                 # 태워 둔다. 지금 38,341벌 가운데 셋만 걸리고 그 셋이 divein 의
