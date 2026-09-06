@@ -27,6 +27,10 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
+import tag_items
+
+WITH_DESC = False
+
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
 
@@ -58,7 +62,19 @@ def full(r: dict, tags: dict, sizes: dict, crawl: dict) -> dict:
         "tags": (tags.get(r["source_url"]) or {}).get("tags") or {},
         "size": sizes.get(r["source_url"]),
         "gallery": d.get("gallery") or [],
-        "desc": d.get("description") or "",
+        # 설명문(31MB)은 기본으로 안 내보낸다 — 사람 결정을 기다린다(2026-09-07).
+        # 매장 「description」 칸은 상품 설명이 아니라 페이지를 긁은 것이라, 앱에 그대로
+        # 보여 주면 남의 말이 상품 설명 자리에 뜬다. 브랜드별로 무엇이 들어 있었는지:
+        #   siyazu 783벌  손님 후기 통째로 —「커서 스몰사이즈로 교환했는데도 크네요」
+        #   vunque·kirsh·blayer·andersson-bell  후기 신고 안내문 —「관련없는 내용 욕설/비방 …」
+        #   divein   「Q & A Write View all 상품명 … 판매가 109,000원」
+        #   dnsr     「RELATED ITEMS 원턱 버뮤다 데님 팬츠 블루 KRW 74,000 …」 옆 상품 목록
+        #   badblood 「Delivery / Returns * Estimated delivery dates …」 배송 안내
+        # 태거는 이것들을 걷어 내고 읽지만, 걷어 낸 결과는 사람에게 보여 줄 글이 아니다
+        # (「원턱 버뮤다 데님 팬츠 블루 KRW 74,000」 → 「원턱 버뮤다 턱 버뮤다」).
+        # 상품이 어떤 옷인지는 tags 가 말한다. 정말 필요하면 --with-desc 로 켠다.
+        **({"desc": tag_items.strip_other_products(
+            tag_items.strip_reviews(d.get("description") or "")).strip()} if WITH_DESC else {}),
         "options": r.get("options") or "",
         "color_name": r.get("representative_color") or "",
         "price_log": d.get("price_log") or [],
@@ -80,7 +96,11 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
     ap.add_argument("--dry", action="store_true", help="쓰지 않고 크기만 잰다")
+    ap.add_argument("--with-desc", action="store_true",
+                    help="매장 설명문도 내보낸다(31MB 늘어난다. full() 의 주석을 먼저 읽어라)")
     args = ap.parse_args()
+    global WITH_DESC
+    WITH_DESC = args.with_desc
     out = Path(args.out)
 
     rows = list(csv.DictReader(open(DATA / "products_full.csv", encoding="utf-8-sig")))
