@@ -330,12 +330,22 @@ def spec_texts(spec) -> tuple[str, str]:
 
 
 def quality_of(body: str) -> str:
-    letters = re.sub(rf"[^{HANGUL}A-Za-z]", "", body)
-    if CSS_RX.search(body):
-        return "css_fragment"
-    if len(letters) < SHORT_TEXT:
-        return "too_short"
-    return "ok"
+    """CSS 가 섞였다고 글이 없는 것은 아니다.
+
+    매장이 설명 안에 <style> 블록을 넣어 두면 진짜 글은 그 뒤에 온다 —
+    「details.fa { border-top: 1px solid #e5e5e5; … }」 다음에
+    「▪ Material: Cotton 100% ▪ Color: Washed Black ▪ Size (…)」가 이어진다.
+    그런데 본문 어디든 CSS 가 보이면 css_fragment 로 낙인을 찍고 있었다. 621벌이 그렇게
+    묶였는데 594벌은 CSS 를 걷어 내면 50자 넘는 글이 남고, 376벌은 400자가 넘는다.
+    단색 추론이 「quality == ok」일 때만 도는 탓에 500벌이 패턴을 통째로 못 받았다
+    (badblood 102 · siyazu 82 · far-from-what 72 · mardi-mercredi 64, 2026-09-06).
+
+    CSS 를 걷어 내고 남은 글로 판정한다. 남은 것이 짧으면 그때 css_fragment 다."""
+    clean = CSS_RX.sub(" ", body)
+    letters = re.sub(rf"[^{HANGUL}A-Za-z]", "", clean)
+    if len(letters) >= SHORT_TEXT:
+        return "ok"
+    return "css_fragment" if CSS_RX.search(body) else "too_short"
 
 
 def main():
