@@ -248,6 +248,9 @@ class Tagger:
         if category not in BOTTOMS | {""}:
             for ax, val in self.bottoms_only:  # 하의 전용 값이 코디 문장으로 상의에 붙는 것 방지
                 hits.get(ax, set()).discard(val)
+        # 데님 칸에 든 바지는 청바지다 — 이름에 「데님」이라고 안 적은 223벌이 있다.
+        if category == "Denim":
+            hits["pants_type"].add("진")
         if category in SKIRTY and MINI_NAME.search(name):
             hits["length"].add("미니")
         if category not in NON_GARMENT:
