@@ -1358,9 +1358,13 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
     name = _strip_tags(name)
 
     # 판매가 — product_price(정가). product_sale_price(할인가)는 의도적으로 안 본다.
+    # 0 은 가격이 아니라 「여기 안 적었다」는 뜻이다. 0 을 값으로 받으면 뒤의 JSON-LD 갈래가
+    # 「price is None」 조건에 걸려 아예 안 돌고, 마지막에 0 이 거짓이라 상품이 통째로 버려진다.
+    # blr 은 JS 변수를 0 으로 두고 사이즈별 offers 배열에만 가격을 적는다 — 66벌이 그렇게
+    # 날아갔다(2026-09-06). 「Faded Layer Hoodie Zip-Up Jacket Ivory」 187,000원 · InStock.
     price = None
     p = _js_str(html_text, "product_price")
-    if p and p.strip().isdigit():
+    if p and p.strip().isdigit() and int(p) > 0:
         price = int(p)
     if price is None and str(ld_offer.get("price", "")).replace(".", "").isdigit():
         price = int(float(ld_offer["price"]))
@@ -1368,7 +1372,7 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
         span = soup.select_one("#span_product_price_text")
         if span:
             digits = re.sub(r"[^\d]", "", span.get_text())
-            price = int(digits) if digits else None
+            price = int(digits) if digits and int(digits) > 0 else None
 
     soldout = False
     m = re.search(r"(?:is_)?soldout_icon\s*=\s*'(\w)'", html_text)
