@@ -719,6 +719,18 @@ GARMENT_WORD = re.compile(
 # 한글은 낱말 경계가 없어 안에 잡화 낱말이 든 옷이 걸린다 — 「슈러그」의 러그, 「캡소매」의 캡.
 ACC_FALSE = re.compile(r"슈러그|shrug|캡\s*소매|cap\s*sleeve|숄칼라|shawl\s*collar", re.I)
 
+# 잡화 낱말이 실은 옷의 생김새를 말하는 자리. ACC_FALSE 는 이름 전체를 포기하는데 여기서는
+# 그 말만 지운다 — 매장이 가방 이름을 그냥 「Bessette Shoulder」로 적는 일이 흔해서
+# 「shoulder」 자체는 살려 두어야 하기 때문이다(loeuvre·osoi·vunque·margesherwood 130여 벌).
+#   오프숄더 = 목선   mardi-mercredi 티셔츠 21벌이 숄더백이 되어 있었다
+#   핀 체크·핀 스트라이프 = 무늬   hatching-room 셔츠 3벌이 브로치가 되어 있었다
+#   새들 브라운 = 색   lmood 니트 한 벌이 숄더백이 되어 있었다 (2026-09-07)
+ACC_MASK = re.compile(
+    r"off[\s_-]*shoulder|오프[\s_-]*숄더|one[\s_-]*shoulder|원[\s_-]*숄더|"
+    r"drop[\s_-]*shoulder|드롭[\s_-]*숄더|"
+    r"\bpin[\s_-]*(?:check|stripe|striped)\b|핀[\s_-]*(?:체크|스트라이프)|"
+    r"saddle\s*brown|새들\s*브라운", re.I)
+
 
 # 소재 낱말이 머리 낱말을 이기던 것 — 「FLEECED BERET」이 플리스라서 아우터로, 「WS DENIM CAP」이
 # 데님이라서 하의로 갔다(wkndrs 19벌, 2026-09-05). 무엇으로 만들었는지보다 무엇인지가 먼저다.
@@ -742,6 +754,7 @@ def match_acc(name: str) -> str:
     n = re.split(r"\bwith\b|\bw/\b", name or "", maxsplit=1, flags=re.I)[0]
     # 꼬리의 색·소재는 머리 낱말이 아니다(「shoulder bag _ sashiko denim」)
     n = re.sub(r"[_,]\s*(?:[\w가-힣#/&+.-]+\s*){1,3}$", " ", n)
+    n = ACC_MASK.sub(" ", n)           # 목선·무늬·색 이름은 잡화 낱말이 아니다
     acc = match_head(n, ACC_TYPE_VOCAB)
     if not acc:
         return ""
