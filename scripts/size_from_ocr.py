@@ -21,6 +21,7 @@ import csv
 import glob
 import json
 import re
+import statistics
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -979,6 +980,44 @@ def drop_strays(brand: str, c: str, vs: list[float], med: dict) -> list[float]:
     return keep if any(isinstance(v, (int, float)) for v in keep) else vs
 
 
+def _monotone(a: list[float]) -> bool:
+    return all(x <= y for x, y in zip(a, a[1:])) or all(x >= y for x, y in zip(a, a[1:]))
+
+
+def drop_lone_outlier(vs: list, thr: float = 0.15) -> list:
+    """한 라벨에서 혼자 튀는 칸 하나를 비운다 — 판독기가 그 칸만 잘못 읽은 것이다.
+
+    같은 옷의 사이즈가 커지면 치수도 커진다(줄어드는 표는 없다). 그래서 값이 순서대로면
+    손대지 않는다. 순서가 깨졌을 때만, 그 칸 하나를 빼서 순서가 잡히고 그 값이 나머지의
+    중앙값에서 15% 넘게 벗어날 때 비운다. 뺄 후보가 여럿이면 남는 값들이 가장 촘촘해지는
+    쪽을 고른다 — 「소매길이 57 · 9 · 61」에서 9 를 빼야지 61 을 빼면 안 된다(2026-09-06).
+
+    잘못 읽은 칸 68개를 비운다: noirer 35 · loeuvre 8 · easy-no-easy 5 · frizmworks 5.
+    「총장 109 · 110 · 71.1」(dnsr 플레어 데님) · 「어깨 49.5 · 31 · 52.5」(noirer 가디건)
+    같은 것들이다. drop_strays 의 1.6배 잣대로는 아슬아슬하게 살아남는다.
+    값을 지어내지 않고 비우기만 한다 — 없는 치수보다 틀린 치수가 나쁘다.
+    """
+    idx = [i for i, v in enumerate(vs) if isinstance(v, (int, float)) and v > 0]
+    if len(idx) < 3 or _monotone([vs[i] for i in idx]):
+        return vs
+    best = None
+    for i in idx:
+        others = [vs[j] for j in idx if j != i]
+        if not _monotone(others):
+            continue
+        m = statistics.median(others)
+        if m <= 0 or abs(vs[i] - m) / m < thr:
+            continue
+        spread = max(others) / min(others)
+        if best is None or spread < best[0]:
+            best = (spread, i)
+    if best is None:
+        return vs
+    out = list(vs)
+    out[best[1]] = None
+    return out
+
+
 def normalize_html(st: dict, brand: str = "", girth_keys: set | None = None,
                    med: dict | None = None) -> dict[str, list[float]]:
     if sweep_all(st):
@@ -1167,6 +1206,17 @@ _OCR_SIZE = {"8": "S", "5": "S", "$": "S"}
 _UNIT_TAIL = re.compile(r"\s*[\[(]\s*c?m\s*[\])]\s*$", re.I)
 
 
+def _mergeable(vals: dict, a: int, b: int) -> bool:
+    """두 자리의 값이 서로 어긋나지 않는가 — 한쪽이 비었거나 같으면 접어도 된다."""
+    for v in vals.values():
+        if b >= len(v):
+            continue
+        x, y = v[a], v[b]
+        if x is not None and y is not None and x != y:
+            return False
+    return True
+
+
 def clean_names(out: dict) -> dict:
     """사이즈 「이름」을 마지막에 한 번 훑는다. 값이 맞아도 이름이 「HEM」·「BLACK」이면 그 표는
     사이즈 표가 아니다 — 앱에서 사람이 그 글자를 그대로 본다(2026-09-05).
@@ -1216,6 +1266,29 @@ def clean_names(out: dict) -> dict:
             elif canon_label(y) or re.fullmatch(r"[가-힣]", y) or NOT_A_SIZE.match(y):
                 y = ""; n["이름이 아니라 지움"] += 1
             new.append(y)
+        # ① 이름도 값도 없는 자리는 통째로 뺀다 — 표 밑에 붙은 「MODEL 179cm/68kg」 줄이
+        #    사이즈 한 칸으로 잡혀 앱에 값 없는 「?」 사이즈가 섰다(frizmworks).
+        vals = e.get("sizes") or {}
+        keep = [i for i, y in enumerate(new)
+                if y or any(i < len(v) and v[i] is not None for v in vals.values())]
+        if keep and len(keep) < len(new):
+            new = [new[i] for i in keep]
+            e["sizes"] = {c: [v[i] for i in keep if i < len(v)] for c, v in vals.items()}
+            n["값 없는 빈 자리 뺌"] += 1
+        # ② 같은 이름이 잇달아 나오고 값이 서로 어긋나지 않으면 한 줄로 접는다 — 판독기가
+        #    같은 줄을 두 번 읽은 것이다(mardi 「S M M L」). 값이 정말 다르면 접지 않는다.
+        vals = e.get("sizes") or {}
+        i = 1
+        while i < len(new):
+            if new[i] and new[i] == new[i - 1] and _mergeable(vals, i - 1, i):
+                for v in vals.values():
+                    if i < len(v):
+                        v[i - 1] = v[i - 1] if v[i - 1] is not None else v[i]
+                        del v[i]
+                del new[i]
+                n["같은 이름 두 줄을 접음"] += 1
+            else:
+                i += 1
         if not any(new):
             e["size_names"] = None
         elif new != low:
@@ -1325,8 +1398,10 @@ def main():
                         names = n2
             # 어디서 왔든(HTML·브라우저·OCR) 무리를 벗어난 값은 여기서 한 번에 뺀다 —
             # normalize_html 안에만 두었더니 OCR 로 읽은 「밑단 [10.5, 32]」가 그대로 남았다.
-            sizes = {c: v for c, v in ((c, drop_strays(k[0], c, v, label_med))
-                                       for c, v in sizes.items()) if v}
+            # 값이 하나도 안 남은 라벨은 뺀다 — 「가슴: [null]」만 남으면 앱에 빈 줄이 선다.
+            sizes = {c: v for c, v in ((c, drop_lone_outlier(drop_strays(k[0], c, v, label_med)))
+                                       for c, v in sizes.items())
+                     if any(isinstance(x, (int, float)) for x in v)}
             if not sizes:
                 continue
             # 잡화에 옷 실측 표를 붙이지 않는다 — 매장 공용 안내표가 모자·양말·백팩에까지
@@ -1336,7 +1411,12 @@ def main():
                 continue
             # 사이즈 개수가 라벨마다 다르면(OCR 누락) 가장 짧은 길이로 맞춘다
             n = min(len(v) for v in sizes.values())
+            # 길이를 맞추고 나서 다시 본다 — 자르고 나면 값이 하나도 안 남는 라벨이 생긴다
+            # (noirer 「가슴: [null]」 — 앱 상세에 빈 줄이 선다).
             sizes = {c: v[:n] for c, v in sizes.items()}
+            sizes = {c: v for c, v in sizes.items() if any(isinstance(x, (int, float)) for x in v)}
+            if not sizes:
+                continue
             if names:
                 names = names[:n]
             out[r["source_url"]] = {"brand_slug": k[0], "source": source, "size_names": names, "sizes": sizes}
