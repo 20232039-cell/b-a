@@ -48,6 +48,35 @@ GARMENT_AXES = {"neckline", "sleeve_length", "silhouette", "length", "pants_type
 NON_GARMENT = {"Accessories", "Bags", "Shoes"}
 PANTS = {"Pants", "Denim", ""}
 BOTTOMS = {"Pants", "Denim", "Skirts"}
+# 품목 이름이 곧 소매를 말하는 옷 — 맨투맨·후디·자켓/코트는 사실상 전부 긴소매다.
+# 글로 소매를 아는 2,588벌에 대 보니 97.53% 가 롱슬리브였다(틀림 64: 반팔 46 · 퍼프소매 8 ·
+# 슬리브리스 7). 니트 76.7% · 티셔츠 62.5% · 셔츠 48.2% 는 쓰지 않는다 — 반팔 니트·반팔
+# 셔츠가 흔해서 짐작이 서지 않는다(2026-09-06).
+# 이름에 베스트·슬리브리스·반팔이 들어가면 손대지 않는다 — 그때는 이름이 이미 말해 준다.
+# 소재가 곧 기능인 것 — 다운·기모(플리스)·시어링은 따뜻하라고 쓰는 소재고, 메쉬는
+# 통하라고 쓴다. 매장이 그 말을 굳이 적지 않을 뿐이다: 다운 1,362벌 가운데 보온성이
+# 붙은 것은 12.9%, 기모 421벌 중 31.8%, 메쉬 351벌 중 34.5%뿐이었다(2026-09-06).
+# 치마·원피스 이름의 「mini」·「미니」는 기장이다. 어휘에는 「mini skirt」처럼 붙은 꼴만
+# 있어서 「MINI PLEATS SKIRT」·「PLEATS MINI CHECKED SKIRT」가 빠졌다. 이 두 품목에서는
+# 낱말 순서와 무관하게 기장이다 — 기장을 아는 219벌에 대 보니 219벌 모두 미니였다.
+# 다른 품목에는 쓰지 않는다: 「Mini Logo Fitted Long Sleeve T-Shirt」·「Mini Pocket
+# Denim Pants」의 mini 는 로고와 주머니를 꾸미는 말이다(2026-09-06).
+MINI_NAME = re.compile(r"(?<![a-z])mini(?![a-z])|미니(?!멀)", re.I)
+SKIRTY = {"Skirts", "Dresses"}
+
+WARM_MATERIALS = {"다운", "기모", "시어링"}
+# 스판덱스는 함량이 적혀 있을 때만 신축성으로 본다. 숫자를 찾은 1,326벌 중 87%가 3% 이상
+# 이었지만 2% 이하도 173벌 있었다 — 우븐 셔츠에 2% 든 스판은 늘어난다고 하기 어렵다.
+# 숫자를 못 찾은 2,797벌은 확인할 길이 없으니 손대지 않는다.
+SPAN_PCT = re.compile(r"(?:스판덱스|스판|폴리우레탄|elastane|spandex)\s*[:：]?\s*(\d{1,2}(?:\.\d)?)\s*%", re.I)
+
+LONG_SLEEVE_KIND = re.compile(
+    r"sweat\s?shirts?|맨투맨|스웨트셔츠|hoodie|hoody|후디|jackets?|자켓|재킷|"
+    r"coats?|코트|blouson|블루종|parka|파카|점퍼", re.I)
+NOT_LONG_SLEEVE = re.compile(
+    r"vest|베스트|조끼|sleeveless|슬리브리스|민소매|나시|반팔|half\s?sleeve|"
+    r"short\s?sleeve|숏슬리브|s/s|캡슬리브", re.I)
+
 SLEEVED = {"Tops", "Shirts", "Knitwear", "Outerwear", "Dresses"}
 # 치마에 쓸 수 있는 기장 값. 크롭·세미크롭·쇼츠·버뮤다·카프리는 상의·바지의 말이다.
 SKIRT_LENGTH = {"미니", "미디", "맥시", "롱기장"}
@@ -219,6 +248,21 @@ class Tagger:
         if category not in BOTTOMS | {""}:
             for ax, val in self.bottoms_only:  # 하의 전용 값이 코디 문장으로 상의에 붙는 것 방지
                 hits.get(ax, set()).discard(val)
+        # 실측도 없고 글에도 없을 때 품목 이름으로 소매를 짐작한다(위 실측 갈래 다음이다).
+        if (not hits.get("sleeve_length") and category in SLEEVED
+                and LONG_SLEEVE_KIND.search(name) and not NOT_LONG_SLEEVE.search(name)):
+            hits["sleeve_length"].add("롱슬리브")
+        if category in SKIRTY and MINI_NAME.search(name):
+            hits["length"].add("미니")
+        if category not in NON_GARMENT:
+            mats = hits.get("material") or set()
+            if mats & WARM_MATERIALS:
+                hits["function"].add("보온성")
+            if "메쉬" in mats:
+                hits["function"].add("통기성")
+            mp = SPAN_PCT.search(body)
+            if mp and float(mp.group(1)) >= 3:
+                hits["function"].add("신축성")
         if quality == "ok" and not hits.get("pattern"):
             hits["pattern"].add("단색")
         # 소매 길이는 매장이 글로 안 적는다 — 소매가 빈 상의 12,248벌 중 12,170벌(99.4%)이
