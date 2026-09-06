@@ -969,7 +969,11 @@ GROUP_OF = {
 
 # 상품 이름이 성별을 대놓고 말하는 경우. 매장이 제 상품에 붙인 말이라 칸보다 정확하다.
 NAME_UNISEX = re.compile(r"\bunisex\b|유니섹스|남녀\s?공용", re.I)
-NAME_WOMEN = re.compile(r"\bwomen'?s?\b|\bwmn\b|여성용?|우먼(?:즈)?", re.I)
+# 「(W)」·「[W]」로 시작하는 이름은 그 매장의 여성 라인이다. tonywack 313벌 · lmood 179 ·
+# the-coldest-moment 65 · afterpray 21 — 600벌인데 그중 314벌이 남성복으로 들어가 있었다
+# (2026-09-06). 맨 앞에 있을 때만 본다 — 이름 가운데의 (W) 는 다른 뜻일 수 있다.
+# 「(M)」·「(F)」로 시작하는 상품은 카탈로그에 하나도 없어서 넣지 않는다.
+NAME_WOMEN = re.compile(r"^\s*[\(\[]\s*(?:w|women)\s*[\)\]]|\bwomen'?s?\b|\bwmn\b|여성용?|우먼(?:즈)?", re.I)
 NAME_MEN = re.compile(r"\bmen'?s?\b|남성용?|맨즈", re.I)
 
 
