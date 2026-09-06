@@ -117,13 +117,22 @@ def refetch(http: cc.PoliteSession, shop: cc.Shop, only_missing: bool, log, fiel
             continue
         if "text" in fields:
             nd = cc.parse_detail(r.text, url, shop)
-            if nd and nd.get("price"):
+            # 예전에는 「값이 있을 때만」 받아 적었다. 값이 사라진 줄은 통째로 건너뛰었으니
+            # 두 시간마다 도는 이 일이 품절도, 값 변동도 적지 못했다(창고 40,880줄에
+            # price_log 0줄, 실측 2026-09-06). 여기 오는 것은 이미 값 1,000원 넘게 받아 둔
+            # 진짜 상품이라, 이름은 읽히는데 값만 없으면 매장이 품절 상품의 값을 내린 것이다.
+            if nd and (nd.get("price") or nd.get("name")):
+                prev = dict(d)          # 덮어쓰기 전 옛 줄 — carry_over 가 이걸 본다
                 for key in ("description", "description_source", "detail_text", "spec", "detail_images", "size_table", "soldout", "price"):
                     if nd.get(key) not in (None, "", [], {}):
                         d[key] = nd[key]
+                if not nd.get("price"):
+                    d["price_missing"] = True
+                    d["soldout"] = True
                 d["refetched_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
                 if sel == "gaps":
                     d["gaps_seen_at"] = d["refetched_at"]
+                cc.carry_over(prev, d, d["refetched_at"])
                 touched.append(no)
                 if nd.get("size_table"):
                     got += 1

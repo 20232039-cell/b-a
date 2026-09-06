@@ -173,14 +173,6 @@ def update_brand(http: cc.PoliteSession, shop: cc.Shop, log, first_week_of_month
             for k in ("first_seen", "soldout_since", "missing_weeks"):
                 if k in prev:
                     d[k] = prev[k]
-            # 한 번 안 값은 다시 잃지 않는다(사람 지시 2026-09-06). 매장이 품절 상품의 값을
-            # 내려도 우리 값은 그대로 둔다 — 새 행이 옛 행을 통째로 갈아치우기 때문이다.
-            if not d.get("price") and prev.get("price"):
-                d["price"] = prev["price"]
-                d["price_kept"] = True
-                d["price_seen_at"] = prev.get("price_seen_at") or prev.get("crawled_at")
-            elif d.get("price"):
-                d["price_seen_at"] = d["crawled_at"]
             if prev.get("price") != d.get("price"):
                 rep["price_changed"] += 1
             if not prev.get("soldout") and d.get("soldout"):
@@ -191,16 +183,8 @@ def update_brand(http: cc.PoliteSession, shop: cc.Shop, log, first_week_of_month
             d["first_seen"] = now
             if d.get("soldout"):
                 d["soldout_since"] = now
-        # 값·재고가 바뀔 때만 자국을 남긴다 — 나중에 재입고·할인 알림의 바탕이다.
-        plog = list((prev or {}).get("price_log") or [])
-        if d.get("price") and (not plog or plog[-1][1] != d["price"]):
-            plog.append([now, d["price"]])
-        d["price_log"] = plog[-20:]
-        slog = list((prev or {}).get("stock_log") or [])
-        now_stock = "품절" if d.get("soldout") else "판매중"
-        if not slog or slog[-1][1] != now_stock:
-            slog.append([now, now_stock])
-        d["stock_log"] = slog[-20:]
+        # 값 물려받기와 값·재고 자국은 수집기와 같은 판단이라 한 곳(cc.carry_over)에 둔다.
+        cc.carry_over(prev or {}, d, d.get("crawled_at") or now)
         d["missing_weeks"] = 0
         d.pop("delisted", None)
         rows[no] = d

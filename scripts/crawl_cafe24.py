@@ -393,6 +393,46 @@ MEDIA_PAGE = re.compile(r"\bvideo\b|\bfilm\b|\bshowroom\b|\bstore\b|\bpop-?up\b|
 
 
 
+def carry_over(prev: dict, d: dict, when: str) -> None:
+    """옛 줄에서 잃으면 안 되는 것을 새 줄로 옮기고, 값·재고가 바뀐 자국을 남긴다.
+
+    창고는 이름과 달리 쌓이지 않는다 — Actions 의 합치기 단계가 상품 번호로 접어 한 상품
+    한 줄로 다시 쓴다(40,880줄 = 40,880상품, 실측 2026-09-06). 그래서 매장이 품절 상품의
+    값을 내리는 순간 우리 값도 같이 사라졌다. 옛 줄에 값이 있으면 그 값을 이어 쓰고,
+    언제 본 값인지 적는다(사람 지시 2026-09-06: 「이젠 가격 안 잃어버리게 박아두자」).
+
+    자국(price_log·stock_log)은 바뀔 때만 한 줄씩 쌓는다. 접혀 다시 쓰여도 줄 **안**에
+    있으니 살아남는다 — 나중에 재입고·할인 알림을 붙일 때 쓸 바탕이다(사람 2026-09-06:
+    「api까지 생기면 실시간 재입고나 할인율 변동 등 알람도 보내줄 수 있겠네」).
+
+    세 곳(첫 수집·주간 점검·상세 보정)이 같은 판단을 하므로 여기 한 곳에 둔다.
+    """
+    if not d.get("price") and prev.get("price"):
+        d["price"] = prev["price"]
+        d["price_kept"] = True
+        d["price_seen_at"] = prev.get("price_seen_at") or prev.get("crawled_at")
+    elif d.get("price"):
+        # 값이 돌아왔으면 「물려받은 값」 딱지를 뗀다 — 상세 보정은 옛 줄을 고쳐 쓰므로
+        # 떼 주지 않으면 딱지가 남아 오래된 값처럼 읽힌다.
+        d.pop("price_kept", None)
+        d.pop("price_missing", None)
+        d["price_seen_at"] = when
+    plog = list(prev.get("price_log") or [])
+    if d.get("price") and (not plog or plog[-1][1] != d["price"]):
+        plog.append([when[:10], d["price"]])
+    d["price_log"] = plog[-20:]
+    slog = list(prev.get("stock_log") or [])
+    now_stock = "품절" if d.get("soldout") else "판매중"
+    if not slog or slog[-1][1] != now_stock:
+        slog.append([when[:10], now_stock])
+    d["stock_log"] = slog[-20:]
+    if prev.get("size_table") and not d.get("size_table"):
+        d["size_table"] = prev["size_table"]
+        d["size_table_kept"] = True
+    for k in ("detail_text", "description"):
+        if len(d.get(k) or "") < len(prev.get(k) or "") // 2:
+            d[k] = prev.get(k)
+
 def not_a_product(name: str, shop_titles: set[str] = frozenset()) -> str | None:
     """상품이 아닌 페이지면 그 까닭을, 상품 같으면 None 을 준다."""
     n = (name or "").strip()
@@ -1953,37 +1993,7 @@ def crawl_brand(http: PoliteSession, shop: Shop, refresh: bool, log, refetch_ids
             d["crawled_at"] = datetime.now(KST).strftime("%Y-%m-%dT%H:%M:%S")
             # 마지막 줄이 이기므로, 새로 받은 값이 빈 채로 옛 값을 덮으면 데이터가 사라진다.
             # 매장이 품절 상품의 사이즈 아코디언을 내리는 경우가 있어 실제로 일어난다(rough-side).
-            # 값을 잃지 않게 박아 둔다(사람 지시 2026-09-06: 「이젠 가격 안 잃어버리게 박아두자」).
-            #
-            # 창고는 이름과 달리 쌓이지 않는다 — Actions 의 합치기 단계가 상품 번호로 접어
-            # 한 상품 한 줄로 다시 쓴다(40,880줄 = 40,880상품, 실측 2026-09-06). 그래서 매장이
-            # 품절 상품의 값을 내리는 순간 우리 값도 같이 사라졌다. 예전 줄에 값이 있으면
-            # 그 값을 이어 쓰고, 언제 본 값인지 적는다.
-            prev = done.get(no) or {}
-            if not d.get("price") and prev.get("price"):
-                d["price"] = prev["price"]
-                d["price_kept"] = True
-                d["price_seen_at"] = prev.get("price_seen_at") or prev.get("crawled_at")
-            elif d.get("price"):
-                d["price_seen_at"] = d.get("crawled_at")
-            # 값·재고가 바뀐 때만 자국을 남긴다. 접어 다시 쓰여도 줄 안에 있으니 살아남는다.
-            # 나중에 재입고·할인 알림을 붙일 때 쓸 바탕이다(사람 2026-09-06).
-            plog = list(prev.get("price_log") or [])
-            if d.get("price") and (not plog or plog[-1][1] != d["price"]):
-                plog.append([d["crawled_at"][:10], d["price"]])
-            d["price_log"] = plog[-20:]
-            slog = list(prev.get("stock_log") or [])
-            now_stock = "품절" if d.get("soldout") else "판매중"
-            if not slog or slog[-1][1] != now_stock:
-                slog.append([d["crawled_at"][:10], now_stock])
-            d["stock_log"] = slog[-20:]
-            prev_st = (done.get(no) or {}).get("size_table")
-            if prev_st and not d.get("size_table"):
-                d["size_table"] = prev_st
-                d["size_table_kept"] = True
-            for k in ("detail_text", "description"):
-                if len(d.get(k) or "") < len((done.get(no) or {}).get(k) or "") // 2:
-                    d[k] = (done.get(no) or {}).get(k)
+            carry_over(done.get(no) or {}, d, d["crawled_at"])
             f.write(json.dumps(d, ensure_ascii=False) + "\n")
             f.flush()
             done[no] = d
