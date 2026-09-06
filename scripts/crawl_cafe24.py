@@ -2271,11 +2271,16 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
             if fix and fix.get("분류"):
                 code = fix["분류"]      # 사람이 열어 보고 고친 분류가 이긴다
             # 잡화는 잡화 어휘로 품목을 매긴다 — 옷 어휘를 태우면 「니트 스카프」가 니트가 된다
-            acc = match_acc(d["name"]) if code in ACC_TO_CATEGORY.values() else ""
-            item = acc or match_head(d["name"], ITEM_TYPE_VOCAB)
+            # 이름 맨 뒤 괄호는 색·소재를 적는 자리다 — classify_category 는 이미 떼고 보는데
+            # 여기서는 안 떼서 두 칸이 어긋났다. osoi 「SHOULDER BROCLE_SMALL [DENIM SKY]」는
+            # category_code 가 bags 인데 category 라벨이 Denim 이었다 — 앱은 라벨로 거르므로
+            # 가방이 청바지 칸에 떴다(23벌, 2026-09-06).
+            head_name = _TRAIL_PAREN.sub("", d["name"])
+            acc = match_acc(head_name) if code in ACC_TO_CATEGORY.values() else ""
+            item = acc or match_head(head_name, ITEM_TYPE_VOCAB)
             if fix and fix.get("품목"):
                 item, acc = fix["품목"], fix["품목"]
-            if not item and code == "tops" and re.search(r"스웻|스웨트|sweat", d["name"], re.I):
+            if not item and code == "tops" and re.search(r"스웻|스웨트|sweat", head_name, re.I):
                 item = "맨투맨"   # 「Toy Sweat」처럼 품목 단어 없이 스웻만 적은 상의 — 비니·백팩은 code 가 다르니 안 걸린다
             if int(d.get("price") or 0) >= PLACEHOLDER_PRICE:
                 dropped_junk += 1     # 자리표시 값 — 룩북·이벤트 페이지다
