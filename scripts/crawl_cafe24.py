@@ -2278,6 +2278,7 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
     dropped_demo = 0
     dropped_gone = 0
     gal_of: dict[tuple, set] = {}
+    tbl_of: dict[tuple, str] = {}   # 같은 옷인지 가릴 때 실측표를 견준다
     gone = load_dropped()
     manual_items = load_manual_items()
     for path in sorted(CRAWL_DIR.glob("*.jsonl")):
@@ -2423,8 +2424,9 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
                                         and len(d.get("description") or "") < 50) else "",
             })
             gal_of[(slug, str(d["product_no"]))] = {x for x in (d.get("gallery") or []) + [d.get("image_url")] if x}
+            tbl_of[(slug, str(d["product_no"]))] = json.dumps(d.get("size_table"), ensure_ascii=False, sort_keys=True) if d.get("size_table") else ""
             per_brand[slug] = per_brand.get(slug, 0) + 1
-    dropped_rerun = fold_reruns(rows, gal_of)
+    dropped_rerun = fold_reruns(rows, gal_of, tbl_of)
     fill_season_gaps(rows)
     # 번호 보간으로도 안 채워진 것은 사진 날짜로 한 번 더 — 브랜드마다 먼저 맞혀 보고서만.
     n_img = season_from_image_date(rows)
@@ -2437,7 +2439,7 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
     return len(rows), {"per_brand": per_brand, "dropped_dupe_image": dropped_dupe, "dropped_no_image": dropped_noimg, "dropped_junk_name": dropped_junk, "dropped_kids_pet": dropped_kidpet, "dropped_demo_shop": dropped_demo, "dropped_gone": dropped_gone, "dropped_rerun": dropped_rerun}
 
 
-def fold_reruns(rows: list[dict], gal: dict) -> int:
+def fold_reruns(rows: list[dict], gal: dict, tbl: dict | None = None) -> int:
     """매장이 같은 옷을 두 번 올린 것을 접는다.
 
     dunst 는 2022~23년 옷을 통째로 다시 등록해 두었다 — 이름·색·값이 같고 갤러리 열두 장이
@@ -2463,7 +2465,15 @@ def fold_reruns(rows: list[dict], gal: dict) -> int:
         if len(v) < 2:
             continue
         sets = [gal.get((k[0], str(r["product_no"])), set()) for r in v]
-        if not any(sets[i] & sets[j] for i in range(len(v)) for j in range(i + 1, len(v))):
+        shared = any(sets[i] & sets[j] for i in range(len(v)) for j in range(i + 1, len(v)))
+        # 사진을 안 나눠 써도 실측표가 글자 하나까지 같으면 같은 옷이다 — 매장이 다시 찍어
+        # 올린 것뿐이다(dunst 「panda sweatshirt black」 no=3709·3921, 주소 조각까지 같다).
+        # 표가 서로 다르면 접지 않는다. 같은 이름·색·값으로 사이즈를 따로 올린 매장이 있어서다:
+        #   coor 「머드 다잉 패디드 데님 자켓 (워시드인디고)」  어깨 54.0 대 50.0 · 총장 65.5 대 64.0
+        # 4cm 차이는 재는 사람의 손떨림이 아니라 다른 치수다. 접으면 한 벌을 잃는다.
+        ts = [(tbl or {}).get((k[0], str(r["product_no"])), "") for r in v]
+        same_table = len(set(ts)) == 1 and ts[0] != ""
+        if not shared and not same_table:
             continue
         keep = max(v, key=lambda r: (r["status"] == "ON_SALE", int(r["product_no"] or 0)))
         for r in v:
