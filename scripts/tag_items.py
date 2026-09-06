@@ -64,6 +64,8 @@ NON_GARMENT = {"Accessories", "Bags", "Shoes"}
 NO_GARMENT_AXES = NON_GARMENT | {"Headwear", "Jewelry"}
 PANTS = {"Pants", "Denim", ""}
 BOTTOMS = {"Pants", "Denim", "Skirts"}
+# 목선·소매가 없는 품목. 하의와 잡화가 여기 든다(잡화는 NO_GARMENT_AXES 로도 지워진다).
+NECKLESS = {"Pants", "Denim", "Skirts"}
 # 품목 이름이 곧 소매를 말하는 옷 — 맨투맨·후디·자켓/코트는 사실상 전부 긴소매다.
 # 글로 소매를 아는 2,588벌에 대 보니 97.53% 가 롱슬리브였다(틀림 64: 반팔 46 · 퍼프소매 8 ·
 # 슬리브리스 7). 니트 76.7% · 티셔츠 62.5% · 셔츠 48.2% 는 쓰지 않는다 — 반팔 니트·반팔
@@ -284,6 +286,13 @@ class Tagger:
         if category in NO_GARMENT_AXES:
             for ax in GARMENT_AXES:
                 hits.pop(ax, None)
+        # 넥라인·소매는 상의류에만 선다. 바지·스커트·데님에 붙은 것은 코디 문장이나 이름의
+        # 다른 말에서 왔다 — 「더블니 스웨트 팬츠」에 후드(9999archive 의 협업 이름 「후디진호」),
+        # 「belted tuck pants」에 슬리브리스, 「BRUSHED STRAIGHT JEANS」에 카라(2026-09-06).
+        # 원피스·셋업은 상의 쪽에 둔다 — 목선과 소매가 있다.
+        if category in NECKLESS:
+            hits.pop("neckline", None)
+            hits.pop("sleeve_length", None)
         if category not in BOTTOMS | {""}:
             for ax, val in self.bottoms_only:  # 하의 전용 값이 코디 문장으로 상의에 붙는 것 방지
                 hits.get(ax, set()).discard(val)
