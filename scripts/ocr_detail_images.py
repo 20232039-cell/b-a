@@ -5,7 +5,7 @@
 tesseract(kor+eng) 가 활자로 박힌 한글은 잘 읽는다 — 샘플에서 장당 0.8초, 소재·제조국·사이즈
 표까지 나왔다(2026-09-02). 손글씨·사진 위 글자는 못 읽고, 그건 여기서 기대하지 않는다.
 
-무엇을 읽나: crawl/<slug>.jsonl 의 detail_images. 상품마다 앞 MAX_IMAGES 장 — 글이 나오는 장은
+무엇을 읽나: crawl/<slug>.jsonl 의 detail_images(없으면 gallery). 상품마다 앞 MAX_IMAGES 장 — 글이 나오는 장은
 앞 세 장에 고르게 퍼져 있었다(위치별 47/87·65/79·42/56, 2026-09-02). 파일명이 배송 안내·
 이슈 배너(shipping/issue/notice…)인 것과 20KB 미만(아이콘·구분선)은 건너뛴다 — OCR 대상
 3,971건의 상세 이미지 중 「shipping info」 913장은 전부 같은 배송 안내 그림이었다.
@@ -544,6 +544,25 @@ def load_categories() -> dict[tuple[str, int], str]:
 HINT_NAME = re.compile(r"size|detail|info|spec|measure|fabric|\uc0ac\uc774\uc988|\uc2e4\uce21", re.I)
 
 
+def images_of(d: dict) -> list[str]:
+    """읽을 그림 — 상세 그림이 없으면 갤러리를 읽는다.
+
+    상세 그림이 한 장도 없는데 갤러리에는 사진이 있는 상품이 7,852벌이다(2026-09-06).
+    매장이 상세 설명을 「추가 이미지」 자리에 올린 경우인데, 우리는 상세 그림만 읽어서
+    그 글을 통째로 못 봤다. 그중 판매중인 옷이면서 아직 빈 곳이 있는 것이 330벌이다.
+
+    무작위로 열어 재 봤다 — 갤러리에서 나온 글자 수:
+        sinoon  Authentic Logo Hoodie        644자
+        glowny  HUGGING BIKINI SKIRT       1,386자
+        learve  퍼티그 라운지 팬츠              479자
+        coor    메리노 울 크루넥 스웨터           0자 (갤러리가 한 장뿐)
+
+    상세 그림이 있으면 지금처럼 그것만 읽는다 — 갤러리는 대개 착장컷이라 글이 없고,
+    괜히 예산만 먹는다. 없을 때만 대신 본다.
+    """
+    return list(d.get("detail_images") or []) or list(d.get("gallery") or [])
+
+
 def process_brand(slug: str, only_short: bool, max_images: int, delay: float, log,
                   shard: tuple[int, int] = (0, 1), out_dir: Path | None = None, select: str = "short",
                   workers: int = 1, cdn_delay: float | None = None, redo: bool = False) -> dict:
@@ -626,7 +645,7 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
             if select in ("no-size", "ocr", "gaps") or (select == "all" and d.get("source_url") in ocr_sized):
                 done.discard(no)
                 continue
-            avail = len([u for u in (d.get("detail_images") or [])
+            avail = len([u for u in images_of(d)
                          if u not in shared and not skip_image(u)])
             if read_n.get(no, 0) < min(max_images, avail):
                 done.discard(no)
@@ -638,14 +657,14 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
     # 20% 넘게 쓰는 그림은 상품 그림이 아니다 — 색만 다른 형제도 그렇게 많지 않다.
     use: collections.Counter = collections.Counter()
     for d in latest.values():
-        for u in set(d.get("detail_images") or []):
+        for u in set(images_of(d)):
             use[u] += 1
     floor = max(10, len(latest) * 0.2)
     shared = {u for u, c in use.items() if c >= floor}
 
     todo = []
     for no, d in sorted(latest.items(), key=lambda kv: int(kv[0])):
-        if no in done or (d.get("price") or 0) <= 1000 or not d.get("detail_images"):
+        if no in done or (d.get("price") or 0) <= 1000 or not images_of(d):
             continue
         if select == "no-size":
             # 사이즈 표 없는 옷만 — 설명 길이와 무관. 사이즈 수집률을 올리는 2차 OCR(사람 결정 2026-09-03)
@@ -673,7 +692,7 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
             # 소재·디테일·사이즈표는 상세 이미지의 「뒤쪽」에 오는 경우가 많다(사람 지적 2026-09-04).
             # 앞에서 자르면 착용컷만 읽고 정작 필요한 표를 놓친다. 그래서 뒤에서부터 고르되,
             # 파일 이름에 size/detail/info 가 든 그림은 어디에 있든 먼저 읽는다.
-            cand = [u for u in d["detail_images"]
+            cand = [u for u in images_of(d)
                     if u not in shared and not skip_image(u)]
             hinted = [u for u in cand if HINT_NAME.search(u)]
             rest = [u for u in cand if u not in hinted]
