@@ -52,6 +52,23 @@ CONTRADICT = [
     # (폴리우레탄100%)」 · amomento 가방 「안감으로 사용된 스웨이드 합성피혁 … 천연가죽은
     # 수분·열에」. 감사기는 「있을 수 없는 것」만 센다(2026-09-06).
 ]
+# 한 브랜드가 어떤 태그를 독차지하면 그 매장 안내문이 태그가 된 것이다.
+# 2026-09-06 에 이 검사를 손으로 해 보고 하루치 버그를 한꺼번에 찾았다:
+#   frizmworks 가 카라의 24% — 「측정 (카라/립 제외)」        1,017벌
+#   mardi 가 랩의 66%       — 「wrap with silver foil」      453벌
+#   TCM 이 브러시드의 72%    — 「스팀·브러싱하면 제거됩니다」      811벌
+# 진짜인 것도 걸린다(tonywack 이 스프레드카라의 99% — 설명에 spread collar 라고 적혀 있다).
+# 그래서 「버그」가 아니라 「열어 볼 것」으로 든다.
+CONCENTRATION_MIN = 200      # 이만큼 붙은 태그만 본다
+CONCENTRATION_SHARE = 0.20   # 한 브랜드가 이만큼 넘게 가져가고
+CONCENTRATION_TIMES = 4      # 그 브랜드 몫의 이 배를 넘으면
+
+# 품목과 어긋나는 태그. 맨투맨에 카라가 달릴 리 없다 — 이것도 위 카라 사고를 바로 짚는다.
+CATEGORY_MISFIT = [
+    (r"sweat\s?shirts?|맨투맨|스웨트셔츠", "neckline", {"카라", "스프레드카라", "오픈카라", "스탠드카라", "숄카라"}),
+    (r"(?<![a-z])(?:t-?shirts?|tees?)(?![a-z])|티셔츠", "neckline", {"스프레드카라", "오픈카라", "스탠드카라"}),
+]
+
 PRICE_RX = re.compile(r"(?:krw|won)\s*\d{1,3},\d{3}|\d{1,3},\d{3}\s*(?:krw|won|원)", re.I)
 
 
@@ -171,7 +188,8 @@ def main() -> int:
 
     # ── 상품 목록
     seen = defaultdict(list)
-    for r in csv.DictReader((DATA / "products_full.csv").open(encoding="utf-8-sig")):
+    prod = list(csv.DictReader((DATA / "products_full.csv").open(encoding="utf-8-sig")))
+    for r in prod:
         seen[(r["brand_slug"], (r["name"] or "").strip().lower(),
               (r.get("representative_color") or "").strip())].append(r)
         try:
@@ -182,6 +200,41 @@ def main() -> int:
             flag("가격이 말이 안 된다", r["source_url"], r["price"])
         if not (r.get("representative_color") or "").strip():
             flag("색이 비었다", r["source_url"], r["name"][:40])
+    # ── 한 브랜드 쏠림
+    brand_n = Counter(r["brand_slug"] for r in prod)
+    n_all = len(prod) or 1
+    per_tag: dict[tuple, Counter] = defaultdict(Counter)
+    tag_n: Counter = Counter()
+    for r in prod:
+        e = tags.get(r["source_url"]) or {}
+        for ax, vals in (e.get("tags") or {}).items():
+            for val in vals:
+                per_tag[(ax, val)][r["brand_slug"]] += 1
+                tag_n[(ax, val)] += 1
+    for key, c in per_tag.items():
+        if tag_n[key] < CONCENTRATION_MIN:
+            continue
+        b, cnt_b = c.most_common(1)[0]
+        share = brand_n[b] / n_all
+        got = cnt_b / tag_n[key]
+        if got >= CONCENTRATION_SHARE and share and got > share * CONCENTRATION_TIMES:
+            url = next((r["source_url"] for r in prod
+                        if r["brand_slug"] == b
+                        and key[1] in ((tags.get(r["source_url"]) or {}).get("tags") or {}).get(key[0], [])), "")
+            flag("한 브랜드가 태그를 독차지한다", url,
+                 f"{key[0]}/{key[1]} — {b} {cnt_b}/{tag_n[key]} ({got * 100:.0f}%), 그 브랜드는 카탈로그의 {share * 100:.1f}%")
+
+    # ── 품목과 어긋나는 태그
+    for pat, ax, bad in CATEGORY_MISFIT:
+        rx = re.compile(pat, re.I)
+        for r in prod:
+            if not rx.search(r["name"] or ""):
+                continue
+            got = set(((tags.get(r["source_url"]) or {}).get("tags") or {}).get(ax) or [])
+            hit = got & bad
+            if hit:
+                flag("품목과 어긋나는 태그", r["source_url"], f"{r['name'][:40]} — {ax}/{'·'.join(sorted(hit))}")
+
     for key, v in seen.items():
         if len(v) > 1:
             flag("브랜드·이름·색이 똑같은 상품이 여럿", v[0]["source_url"], f"{len(v)}벌 — {key[1][:40]}")
