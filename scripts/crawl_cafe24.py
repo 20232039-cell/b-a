@@ -312,6 +312,78 @@ LOOKBOOK_NAME = re.compile(
     re.I)
 
 
+
+# ─── 가격 없는 페이지 가르기 ───
+#
+# 매장이 품절 상품의 값을 내려 버리는 일이 흔하다. 그래서 「가격 없음 = 상품 아님」으로 두면
+# 진짜 옷이 대량으로 사라진다 — sinoon 은 실패 1,169건을 표본 89벌 전수 확인했더니 한 벌도
+# 빠짐없이 품절된 진짜 상품이었다(2026-09-06).
+#
+#   Rose Flower Pullover Knit (Charcoal)   품절 · 사진 2장
+#   Eyelet Punching Midi Skirt (Navy)      품절 · 사진 2장
+#
+# 그러니 이제는 이름으로 가른다. 상품이 아닌 것만 버리고 나머지는 값 없이 품절로 담는다.
+JUNK_HEAD = re.compile(r"^\s*(?:\[[^\]]*\]|【[^】]*】)\s*")
+
+# 시즌 표시 — 「23' A/W COLLECTION」은 룩북이고 「컬렉션 와이드 스트라이프 데님」은 옷이다.
+# 시즌이 붙어 있을 때만 컬렉션을 룩북으로 본다(kirsh 의 컬렉션 라인 71벌이 이 단서로 살았다).
+SEASONISH = re.compile(
+    r"20\d\d|'\s?\d\d|\b\d\d\s*'?\s*(?:s/s|f/w|a/w|ss|fw|aw)\b|\b(?:s/s|f/w|a/w)\s*\d\d\b|"
+    r"\bresort\b|\bholiday\b|\bpre-?\s?(?:spring|fall)\b|\b(?:spring|summer|fall|autumn|winter)\b",
+    re.I)
+
+# 매장이 상품이 아닌 페이지를 모아 두는 칸. 값이 없는 페이지에만 물어본다.
+# 「EPISODE.N」(xlim 상품 898벌) · 「SPECIAL PROJECTS」 · 「GLOWNY MOMENTS」는 진짜 상품 칸이라
+# 재 보고 뺐다. 지금 어휘에 걸리는 정상 상품은 96벌뿐이고, 그것도 값이 있으니 손대지 않는다.
+CONTENT_CAT = re.compile(
+    r"연예인|인플루언서|셀럽|화보|룩북|매거진|캠페인|프레스|"
+    r"\bceleb\w*|\blook\s?-?book\b|\bmagazine\b|\bpress\b|\bcampaign\b|\beditorial\b|"
+    r"\bjournal\b|\bstockists?\b|\brunway\b|"
+    r"^\s*with\s+\S+\s*$|^\s*20\d\d\s*(?:ss|fw|aw|s/s|f/w)\s*$|^\s*vwd\s*$", re.I)
+
+# 아래 낱말은 전부 「정가가 붙은 상품 38,341벌 가운데 0벌」을 확인하고 넣었다(2026-09-06).
+# 재 보고 뺀 것 둘: 「에피소드」는 xlim 상품 898벌이 EP.4 02 T-SHIRT 꼴이라 못 쓰고,
+# 「착용」·「celeb」은 앞머리 대괄호를 뗀 뒤에만 본다 —
+#   [Celeb SEULGI] Flower Halter Neck Knit Vest  ← sinoon 의 진짜 옷
+#   [With GROVE] Celeb 문가영                     ← grove 의 화보
+#   [차정원 착용] FEED KNIT PANTS                 ← grove 의 진짜 옷
+# 앞머리를 떼면 남는 쪽에 celeb·착용이 있는지로 둘이 갈린다.
+NOT_PRODUCT = [
+    ("개인결제창", re.compile(r"개인\s*결제|임직원", re.I), False),
+    ("룩북", re.compile(r"look\s?-?book|룩북", re.I), False),
+    ("캠페인", re.compile(r"\bcampaign\b|캠페인", re.I), False),
+    ("에디토리얼", re.compile(r"\beditorial\b|에디토리얼|화보", re.I), False),
+    ("런웨이", re.compile(r"\brunway\b|런웨이", re.I), False),
+    ("저널", re.compile(r"\bjournals?\b|\bstockists?\b", re.I), False),
+    ("매거진", re.compile(r"^\s*\[[^\]]*magazine[^\]]*\]", re.I), False),
+    ("발매안내", re.compile(r"딜리버리"), False),
+    ("팝업·프리뷰", re.compile(r"\bpop-?up\b|팝업|\bpreview\b", re.I), False),
+    ("이름이번호뿐", re.compile(r"^\s*(?:no\.?|№)\s*\d+\s*$", re.I), False),
+    ("연예인화보", re.compile(r"\bceleb\b|착용", re.I), True),   # 앞머리를 뗀 뒤에 본다
+]
+
+
+def not_a_product(name: str, shop_titles: set[str] = frozenset()) -> str | None:
+    """상품이 아닌 페이지면 그 까닭을, 상품 같으면 None 을 준다."""
+    n = (name or "").strip()
+    if not n:
+        return "이름없음"
+    if n.casefold() in shop_titles:
+        # 이름 자리에 매장 이름만 있는 페이지 — parse_detail 이 <title> 까지 내려가 주운 것이다.
+        # dnsr 438건이 전부 이 꼴이고(detail2.html 안내 페이지) 사진도 한 장 없다.
+        return "매장이름뿐"
+    tail = JUNK_HEAD.sub("", n)
+    for why, rx, after_head in NOT_PRODUCT:
+        if rx.search(tail if after_head else n):
+            return why
+    if re.search(r"\bcollections?\b|(?<![가-힣])컬렉션", n, re.I) and SEASONISH.search(n):
+        # 다만 품목 낱말이 박혀 있으면 옷이다 — the-museum-visitor 의
+        # 「THE MUSEUM VISTIOR COLLECTION 2023-2024 CORDUROY ECO BAG」은 진짜 가방이다.
+        if not (match_head(n, ITEM_TYPE_VOCAB) or match_acc(n)):
+            return "시즌컬렉션"
+    return None
+
+
 # 판매·기획 카테고리 — 대분류 판정에서 뺀다(「SALE」이 tops 로 읽히면 안 된다). 소속은 기록한다.
 NOISE_CATEGORY = ["sale", "세일", "new", "신상", "best", "베스트", "all", "전체", "view", "collection", "컬렉션",
                   "project", "week", "event", "이벤트", "off", "drop", "season", "must", "pick", "clearance", "time", "outlet"]
@@ -909,6 +981,7 @@ class Shop:
     errors: list[str] = field(default_factory=list)
     list_paths: set = field(default_factory=lambda: {"/product/list.html"})
     failures: list[dict] = field(default_factory=list)
+    content_cats: dict[int, str | None] = field(default_factory=dict)   # cate_no → 룩북 칸이면 그 이름
 
     def allowed(self, url: str) -> bool:
         if not self.robots:
@@ -927,6 +1000,17 @@ PRODUCT_NO_IN_URL = [
 
 def product_no_of(url: str) -> int | None:
     for rx in PRODUCT_NO_IN_URL:
+        m = rx.search(url)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+CATE_NO_IN_URL = [re.compile(r"[?&]cate_no=(\d+)"), re.compile(r"/category/(\d+)(?:/|$)")]
+
+
+def cate_no_of(url: str) -> int | None:
+    for rx in CATE_NO_IN_URL:
         m = rx.search(url)
         if m:
             return int(m.group(1))
@@ -1589,6 +1673,50 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
 
 # ─── 브랜드 하나 전체 ───
 
+def is_content_category(http: PoliteSession, shop: Shop, cate_no: int) -> str | None:
+    """룩북·연예인 칸이면 그 칸 이름을, 아니면 None 을 준다.
+
+    load_categories 는 첫 화면 메뉴만 읽는다. 그런데 룩북·연예인 칸은 메뉴에 안 걸어 두는
+    매장이 많아 이름을 모른 채 남는다. 값 없는 페이지를 만났을 때만 묻는다 —
+    칸 하나에 요청 한 번이고 답은 기억한다.
+
+    제목을 통째로 본다. 매장이 뒤쪽에 설명을 붙이기 때문이다:
+      siyazu  cate 50   「PRESS - PRESS」
+      dnsr    cate 187  「CELEBRITY - CELEBRITY - DNSR」
+      sinoon  cate 453  「시눈(SINOON) OUTFIT | 연예인·인플루언서 아웃핏」  ← 뒤쪽에만 단서가 있다
+      sinoon  cate 758  「시눈(SINOON) Top | 여성 탑 컬렉션」               ← 진짜 상품 칸
+    """
+    if cate_no in shop.content_cats:
+        return shop.content_cats[cate_no]
+    r = http.get(f"{shop.base}/product/list.html?cate_no={cate_no}", retries=1)
+    cands: list[str] = []
+    if r is not None and r.status_code == 200:
+        t = BeautifulSoup(r.text, "lxml")
+        # 어느 한 자리만 봐서는 안 된다. siyazu 는 제목이 늘 「Siyazu | 시야쥬 공식홈페이지」라
+        # 칸 이름이 메뉴의 켜진 항목에만 있고(PRESS), sinoon 은 반대로 메뉴엔 없고 제목 뒤쪽에만
+        # 있다(「… | 연예인·인플루언서 아웃핏」). 세 자리를 다 모아 놓고 본다.
+        for sel in (".xans-product-menupackage li.this a", ".xans-product-menupackage .this a",
+                    ".titleArea h2", "h2.title", ".path .cate"):
+            el = t.select_one(sel)
+            if el:
+                cands.append(el.get_text(" ", strip=True))
+        og = t.select_one('meta[property="og:title"]')
+        cands.append(og.get("content") if og else "")
+        cands.append(t.title.get_text(strip=True) if t.title else "")
+    cands = [c.strip() for c in cands if c and c.strip()]
+    verdict = None
+    for c in cands:
+        # 앞 토막도 따로 본다 — 매장이 「VWD - VWD」처럼 겹쳐 적으면 통짜로는 못 맞힌다.
+        head = re.split(r"\s*[-|｜]\s*", c)[0].strip()
+        if CONTENT_CAT.search(c) or (head and CONTENT_CAT.search(head)):
+            verdict = head or c
+            break
+    shop.content_cats[cate_no] = verdict
+    if cands and not shop.categories.get(cate_no):
+        shop.categories[cate_no] = re.split(r"\s*[-|｜]\s*", cands[0])[0].strip()
+    return verdict
+
+
 def crawl_brand(http: PoliteSession, shop: Shop, refresh: bool, log, refetch_ids: set[int] | None = None,
                 refetch_force: bool = False) -> dict:
     out_path = CRAWL_DIR / f"{shop.slug}.jsonl"
@@ -1609,7 +1737,18 @@ def crawl_brand(http: PoliteSession, shop: Shop, refresh: bool, log, refetch_ids
     # 리다이렉트로 정본 도메인이 바뀌면(badblood.co.kr → badbloodstores.com) 그쪽을 base 로.
     final = urlparse(home.url)
     shop.base = f"{final.scheme}://{final.netloc}"
-    load_categories(http, shop, BeautifulSoup(home.text, "lxml"), home.text)
+    home_soup = BeautifulSoup(home.text, "lxml")
+    # 매장 이름 모음 — parse_detail 은 이름을 못 찾으면 <title> 을 줍는다. 그러면 상품 이름
+    # 자리에 매장 이름이 앉는다(dnsr 의 안내 페이지 438건이 전부 이름 「DNSR」이었다).
+    shop_titles = {shop.slug.replace("-", " ").casefold(), shop.slug.casefold()}
+    _t = home_soup.title.get_text(strip=True) if home_soup.title else ""
+    _og = home_soup.select_one('meta[property="og:title"]')
+    for raw in (_t, _og.get("content") if _og else ""):
+        for piece in re.split(r"\s*[-|｜]\s*", raw or ""):
+            piece = piece.strip().casefold()
+            if piece:
+                shop_titles.add(piece)
+    load_categories(http, shop, home_soup, home.text)
 
     # 회원 전용으로 이미 확인된 상품은 다시 열지 않는다(사람 결정 2026-09-04)
     mo_path = CRAWL_DIR / "_members_only.json"
@@ -1668,11 +1807,30 @@ def crawl_brand(http: PoliteSession, shop: Shop, refresh: bool, log, refetch_ids
                 shop.failures.append({"product_no": no, "url": url, "reason": "members-only"})
                 continue
             d = parse_detail(r.text, url, shop)
-            if not d or not d.get("price"):
-                # 이름·가격이 없으면 상품이 아니다(룩북·안내 페이지가 /product/ 에 들어 있는 매장이 있다)
+            if not d:
                 failed += 1
-                shop.failures.append({"product_no": no, "url": url, "reason": "no-name" if not d else "no-price", "bytes": len(r.text)})
+                shop.failures.append({"product_no": no, "url": url, "reason": "no-name", "bytes": len(r.text)})
                 continue
+            if not d.get("price"):
+                # 값이 없다고 상품이 아닌 건 아니다 — 매장이 품절 상품의 값을 내려 버린다.
+                # 그러니 「값 없음」으로 버리지 말고 무엇인지 가려 낸다(사람 지시 2026-09-06:
+                # 「임직원 결제창 이런건 빼야지」·「연예인 착용 페이지·룩북은 버려야지」·
+                # 「품절 상품도 있어야 하긴하지」).
+                why = not_a_product(d["name"], shop_titles)
+                if not why:
+                    cats = sorted(shop.membership.get(no, set())) or ([c] if (c := cate_no_of(url)) else [])
+                    verdicts = [is_content_category(http, shop, c) for c in cats]
+                    if verdicts and all(verdicts):
+                        why = "룩북칸:" + str(verdicts[0])[:24]
+                if not why and not (d.get("gallery") or d.get("image_url")):
+                    why = "사진없음"
+                if why:
+                    failed += 1
+                    shop.failures.append({"product_no": no, "url": url, "reason": why, "bytes": len(r.text)})
+                    continue
+                # 남은 것은 값만 내려놓은 진짜 품절 상품이다. 예전에 받아 둔 값이 있으면 그걸 쓴다.
+                d["price_missing"] = True
+                d["soldout"] = True
             cates = sorted(shop.membership.get(no, set()))
             d["category_nos"] = cates
             d["category_names"] = [shop.categories.get(c, str(c)) for c in cates]
@@ -1680,6 +1838,30 @@ def crawl_brand(http: PoliteSession, shop: Shop, refresh: bool, log, refetch_ids
             d["crawled_at"] = datetime.now(KST).strftime("%Y-%m-%dT%H:%M:%S")
             # 마지막 줄이 이기므로, 새로 받은 값이 빈 채로 옛 값을 덮으면 데이터가 사라진다.
             # 매장이 품절 상품의 사이즈 아코디언을 내리는 경우가 있어 실제로 일어난다(rough-side).
+            # 값을 잃지 않게 박아 둔다(사람 지시 2026-09-06: 「이젠 가격 안 잃어버리게 박아두자」).
+            #
+            # 창고는 이름과 달리 쌓이지 않는다 — Actions 의 합치기 단계가 상품 번호로 접어
+            # 한 상품 한 줄로 다시 쓴다(40,880줄 = 40,880상품, 실측 2026-09-06). 그래서 매장이
+            # 품절 상품의 값을 내리는 순간 우리 값도 같이 사라졌다. 예전 줄에 값이 있으면
+            # 그 값을 이어 쓰고, 언제 본 값인지 적는다.
+            prev = done.get(no) or {}
+            if not d.get("price") and prev.get("price"):
+                d["price"] = prev["price"]
+                d["price_kept"] = True
+                d["price_seen_at"] = prev.get("price_seen_at") or prev.get("crawled_at")
+            elif d.get("price"):
+                d["price_seen_at"] = d.get("crawled_at")
+            # 값·재고가 바뀐 때만 자국을 남긴다. 접어 다시 쓰여도 줄 안에 있으니 살아남는다.
+            # 나중에 재입고·할인 알림을 붙일 때 쓸 바탕이다(사람 2026-09-06).
+            plog = list(prev.get("price_log") or [])
+            if d.get("price") and (not plog or plog[-1][1] != d["price"]):
+                plog.append([d["crawled_at"][:10], d["price"]])
+            d["price_log"] = plog[-20:]
+            slog = list(prev.get("stock_log") or [])
+            now_stock = "품절" if d.get("soldout") else "판매중"
+            if not slog or slog[-1][1] != now_stock:
+                slog.append([d["crawled_at"][:10], now_stock])
+            d["stock_log"] = slog[-20:]
             prev_st = (done.get(no) or {}).get("size_table")
             if prev_st and not d.get("size_table"):
                 d["size_table"] = prev_st
@@ -1867,7 +2049,8 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
         # 값이 통째로 1,000 아래면 그건 룩북이 아니라 외화 매장이다 — xlim 을 en.xlim.link
         # (cafe24 shop6, USD)로 훑은 탓에 921건 중 902건이 「90원」으로 들어와 아래 룩북 문턱에
         # 전멸했다(2026-09-04). 통화가 원이 아닌 매장은 걸러 낼 게 아니라 다시 받아야 한다.
-        cheap = sum(1 for d in latest.values() if int(d.get("price") or 0) <= 1000)
+        cheap = sum(1 for d in latest.values()
+                    if int(d.get("price") or 0) <= 1000 and not d.get("price_missing"))
         if len(latest) >= 20 and cheap / len(latest) > 0.8:
             print(f"[{slug}] 가격 {cheap}/{len(latest)}건이 1,000 이하 — 외화 매장(en.*, /shopN/)을 "
                   f"훑은 게 아닌지 brands_seed 의 official_url 을 확인하라. 이번 판에서는 통째로 뺀다.",
@@ -1882,7 +2065,7 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
             if host_of(d.get("source_url") or "") in stray:
                 dropped_demo += 1
                 continue
-            if int(d.get("price") or 0) <= 1000:
+            if int(d.get("price") or 0) <= 1000 and not d.get("price_missing"):
                 continue
             # 상품 이름을 한 개인결제·룩북 페이지 — lecyto 「박민희 실장님 팀」 217건(가격 있음),
             # insilence 「셀럽 테스트」, opus-0012 「2024 spring summer」. 이름만으로 갈린다.
