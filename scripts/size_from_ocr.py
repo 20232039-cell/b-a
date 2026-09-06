@@ -288,6 +288,22 @@ def pick_labels(head_line: str, greedy: list[str], next_lines: list[str]) -> lis
     return greedy
 
 
+# 두 낱말짜리 라벨은 머리줄을 「자리」로 셀 때 두 칸으로 세어진다. siyazu 는 영문 머리줄을
+# 쓴다 — 「(cm) Length Neck Chest Sleeve Length Sleeve Width」는 값이 다섯인데 토막은
+# 일곱이고, 게다가 Sleeve 와 Length 가 홀로 서서 소매길이·총장으로 두 번 잡혀 자리 세기가
+# 통째로 깨졌다(2026-09-06). 자리를 세기 전에 아는 두 낱말 별칭을 한 토막으로 붙인다.
+_MULTIWORD = sorted({a for canon, als in LABELS.items() if not canon.startswith("_")
+                     for a in [canon] + als if " " in a.strip()}, key=len, reverse=True)
+_MULTIWORD_RX = re.compile("|".join(r"\s+".join(re.escape(w) for w in a.split())
+                                    for a in _MULTIWORD), re.I) if _MULTIWORD else None
+
+
+def join_multiword(line: str) -> str:
+    if not _MULTIWORD_RX:
+        return line
+    return _MULTIWORD_RX.sub(lambda m: re.sub(r"\s+", "", m.group(0)), line)
+
+
 def parse_slots(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] | None:
     """머리줄의 칸 「자리」로 값을 맞춘다 — 라벨 하나가 깨져도 나머지가 산다.
 
@@ -299,10 +315,10 @@ def parse_slots(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] | 
     개수와 같을 때만 자리대로 짝지어 아는 라벨만 취한다. 모르는 칸의 값은 버린다 —
     무엇인지 모르는 수를 아무 라벨에나 붙이는 것보다 비우는 편이 낫다.
     """
-    UNIT = re.compile(r"^[(\[]?\s*(?:cm|size|사이즈|단위|inch|in)\s*[)\]]?$", re.I)
+    UNIT = _UNIT_CELL
     best = None
     for i, ln in enumerate(lines):
-        head = re.sub(r"[|ㅣ]", " ", ln).strip()
+        head = join_multiword(re.sub(r"[|ㅣ]", " ", ln)).strip()
         toks = [t for t in head.split() if t]
         while toks and UNIT.match(toks[0]):
             toks.pop(0)
@@ -384,6 +400,9 @@ def parse_slots(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] | 
     return (names, sizes) if sizes else None
 
 
+_UNIT_CELL = re.compile(r"^[(\[]?\s*(?:cm|size|사이즈|단위|inch|in)\s*[)\]]?$", re.I)
+
+
 def parse_matrix(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] | None:
     """헤더 줄(정식 라벨 ≥2) + 사이즈 행들. 가장 많은 행을 얻는 헤더를 고른다."""
     best = None
@@ -408,6 +427,24 @@ def parse_matrix(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] |
         lab_first = sum(1 for x in nxt if canon_label(x.split()[0]) if x.split())
         if lab_first >= 2:
             continue
+        # 아는 라벨 사이에 모르는 칸이 끼어 있으면 이 갈래로 읽으면 안 된다. parse_matrix 는
+        # 아는 라벨 수만큼만 값을 가져가므로 그 자리가 통째로 밀린다. siyazu 영문 머리줄
+        # 「Length Neck Chest SleeveLength SleeveWidth」에서 Neck 을 빼고 세어 총장이 26
+        # (진짜 53)이 됐다(2026-09-06). 자리로 맞추는 parse_slots 에 넘긴다.
+        htok = [t for t in join_multiword(re.sub(r"[|ㅣ]", " ", ln)).split() if t]
+        while htok and _UNIT_CELL.match(htok[0]):
+            htok.pop(0)
+        hslots = [canon_label(t) for t in htok]
+        last = max((x for x, c in enumerate(hslots) if c), default=-1)
+        if any(c is None for c in hslots[:last]):
+            # 자리로 맞추는 갈래에도 물어보고, 사이즈를 더 많이 얻는 쪽을 쓴다(비기면 자리 쪽).
+            # 무조건 넘기면 mardi-mercredi 289벌·blayer 199벌처럼 잘 읽던 표가 죽고,
+            # 안 물어보면 siyazu 처럼 값이 한 칸씩 밀린다.
+            alt = parse_slots(lines[i:])
+            if alt and len(alt[1]) >= 2:
+                sc = (len(alt[0]), len(alt[1]))
+                if sc >= best_score:
+                    best, best_score = alt, sc
         labels = pick_labels(ln, labels, lines[i + 1:i + 6])
         names, cols = [], {c: [] for c in labels}
         pending: list[tuple[int, list, list]] = []
