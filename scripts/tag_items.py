@@ -152,6 +152,29 @@ _PRICE_RUN = re.compile(
 _SENT_END = re.compile(r"[.。!?\n|·•▪]|다\s|요\s")
 
 
+# 손님 후기와 문의 글. 매장이 상품 설명 칸에 그것을 함께 담아 온다 — siyazu 는 설명 666자가
+# 통째로 후기+Q&A+가격줄이라 상품 설명이 아예 없었다(783벌, 2026-09-06). 후기는 사이즈·핏·색을
+# 말하므로 그대로 두면 손님의 감상이 옷의 태그가 된다(「커서 스몰사이즈로 교환했는데도 크네요」).
+#
+#   Review 14 만족 [1] 네이버 페이 구매자 | 23.12.24 13 좀 긴듯한데 … [1] 네이버 페이 구매자 | 21.02.01
+#   Q&A write all 10 문의합니다. 장**** | 22.10.26 9 고객님 답변 드립니다. 시야쥬 | 22.10.26
+#
+# 한 줄은 <말> [번호] <이름> | <날짜> 꼴이라 그 앞의 말까지 함께 지운다.
+REVIEW_LINE = re.compile(
+    r"[^.!?\n]{0,80}\[\d+\]\s*(?:[가-힣]{2,4}|네이버\s*페이\s*구매자|[A-Za-z*]{2,12})\s*\|\s*\d\d\.\d\d\.\d\d\s*\d*")
+QNA_LINE = re.compile(
+    r"[^.!?\n]{0,40}(?:문의합니다|고객님 답변 드립니다)[^|]{0,30}\|\s*\d\d\.\d\d\.\d\d\s*\d*")
+REVIEW_HEAD = re.compile(r"(?:^|\s)(?:Review|리뷰)\s+\d+\s|(?:^|\s)Q&A\s+write\s+all\s+\d+\s", re.I)
+
+
+def strip_reviews(text: str) -> str:
+    """후기·문의 글을 걷어낸다. 상품 설명이 아니라 손님의 말이다."""
+    t = REVIEW_LINE.sub(" ", text or "")
+    t = QNA_LINE.sub(" ", t)
+    t = REVIEW_HEAD.sub(" ", t)
+    return t
+
+
 def strip_other_products(text: str, back: int = 60) -> str:
     """값이 나오는 자리 앞 60자를 문장 끝까지 되짚어 도려낸다 — 거기 남의 상품 이름이 있다.
 
@@ -241,7 +264,7 @@ class Tagger:
 
     def tag(self, category: str, name: str, body: str, color_text: str, quality: str,
             sleeve_cm: float | None = None) -> dict[str, list]:
-        text = f"{name}\n{strip_other_products(body)}".lower()
+        text = f"{name}\n{strip_other_products(strip_reviews(body))}".lower()
         for b in self.text_blocklist:  # '시어링'→시어, '레이어드 스타일링'→레이어드 같은 오탐을 먼저 지운다
             text = text.replace(b, " " * len(b))
         hits = self._scan(self.text_rules, text)
