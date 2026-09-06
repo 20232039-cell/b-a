@@ -1083,6 +1083,14 @@ NAME_UNISEX = re.compile(r"\bunisex\b|유니섹스|남녀\s?공용", re.I)
 NAME_WOMEN = re.compile(r"^\s*[\(\[]\s*(?:w|women)\s*[\)\]]|\bwomen'?s?\b|\bwmn\b|여성용?|우먼(?:즈)?", re.I)
 NAME_MEN = re.compile(r"\bmen'?s?\b|남성용?|맨즈", re.I)
 
+# 매장이 여성판·남성판을 이름 맨 앞의 한 글자로 가른다 — noice 는 같은 옷 24가지를
+# 「W …」와 「M …」 두 벌로 올려 두었고, insilence 는 유니섹스 티셔츠 옆에 「W 수피마
+# 코튼 …」을 따로 판다. 칸 이름보다 이쪽이 구체적이다: noice 의 「M WOOL FLARED PANTS」는
+# 매장이 「WOMEN'S NEW ARRIVALS」 칸에도 같이 걸어 두어서 여성복이 되어 있었다(2026-09-07).
+# 대소문자를 가린다 — 소문자 「w …」는 성별 표시가 아니다.
+NAME_W_HEAD = re.compile(r"^\s*(?:\[[^\]]*\]\s*)?W\s+(?=[A-Za-z가-힣])")
+NAME_M_HEAD = re.compile(r"^\s*(?:\[[^\]]*\]\s*)?M\s+(?=[A-Za-z가-힣])")
+
 
 def classify_gender(category_names: list[str], brand_default: str, name: str = "") -> str:
     """칸 이름 → 브랜드 기본값 순으로 성별을 정하되, 상품 이름이 말하면 그게 이긴다.
@@ -1104,6 +1112,10 @@ def classify_gender(category_names: list[str], brand_default: str, name: str = "
     if name:
         if NAME_UNISEX.search(name):
             return "UNISEX"
+        if NAME_W_HEAD.match(name):
+            return "WOMENSWEAR"
+        if NAME_M_HEAD.match(name):
+            return "MENSWEAR"
         w, m = NAME_WOMEN.search(name), NAME_MEN.search(name)
         if w and not m:
             return "WOMENSWEAR"
