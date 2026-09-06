@@ -1296,6 +1296,98 @@ def clean_names(out: dict) -> dict:
     return dict(n)
 
 
+# 원래 아주 짧은 옷 — 총장을 건드리지 않는다. 볼레로는 24cm 가 맞고 코르셋은 28cm 가 맞다.
+SHORT_BODY_NAME = re.compile(
+    r"크롭|crop|볼레로|bolero|코르셋|corset|뷔스티에|bustier|브라렛|bralette|튜브\s?탑|"
+    r"홀터\s?탑|비키니|bikini|파자마|pajama|잠옷|셋업|세트|\bset\b", re.I)
+
+SHORT_SLEEVE_NAME = re.compile(
+    r"반팔|숏\s?슬리브|short\s?sleeve|half\s?sleeve|하프\s?슬리브|캡\s?슬리브|cap\s?sleeve|"
+    r"슬리브리스|sleeveless|민소매|나시|베스트|vest|조끼|s/s\b", re.I)
+
+
+def drop_impossible(out: dict, rows_by_url: dict) -> int:
+    """품목을 놓고 봤을 때 있을 수 없는 값을 비운다.
+
+    라벨 전체 범위(size_labels.json 의 _ranges_cm)는 옷 종류를 안 가린다. 총장 24~160 이라
+    코트의 총장 27cm 도, 청바지의 총장 160cm 도 통과한다. 그런데 같은 라벨이라도 품목마다
+    사는 자리가 다르다. 그래서 창고가 스스로 말하게 한다 — 품목×라벨마다 지금 모인 값의
+    0.5~99.5 백분위를 구하고, 거기서 위아래로 25% 더 나가면 비운다.
+
+      frizmworks Nyco hooded oscar jacket   총장 27.5 (어깨 70 · 가슴 67 · 소매 65)
+      far-from-what FAR FLARE JEAN          총장 140·160
+      diafvine A-2 Flight Jacket            소매길이 8 (어깨 49 · 가슴 60.5 · 총장 66)
+      andersson-bell DENIM LACE HEM SKIRT   허리 60.1 인데 엉덩이 48.5 — 허리가 더 넓다
+      grove ELO MIDI SKIRT                  총장 126.5 (미디 스커트다)
+
+    두 가지를 지킨다.
+      · 그 줄의 다른 라벨이 둘 이상 제자리에 있을 때만 비운다. 표가 통째로 이상하면
+        한 칸만 고쳐서 될 일이 아니고, 우리가 판단할 근거도 없다.
+      · 이름이 반팔·민소매·베스트라고 말하면 소매길이는 건드리지 않는다.
+        badblood 「알파1 유틸리티 숏슬리브 자켓」의 소매길이 11cm 는 맞는 값이다.
+
+    값을 지어내지 않고 비우기만 한다 — 없는 치수보다 틀린 치수가 나쁘다.
+    """
+    pool: dict[tuple, list] = {}
+    for u, e in out.items():
+        cat = (rows_by_url.get(u) or {}).get("category")
+        if not cat:
+            continue
+        for lab, vs in (e.get("sizes") or {}).items():
+            for x in vs:
+                if isinstance(x, (int, float)) and x > 0:
+                    pool.setdefault((cat, lab), []).append(x)
+
+    def pct(v, q):
+        v = sorted(v)
+        return v[min(len(v) - 1, int(len(v) * q))]
+
+    lim = {k: (pct(v, 0.005) * 0.75, pct(v, 0.995) * 1.25)
+           for k, v in pool.items() if len(v) >= 150}
+    if not lim:
+        return 0
+    dropped = 0
+    for u, e in out.items():
+        r = rows_by_url.get(u) or {}
+        cat = r.get("category")
+        if not cat:
+            continue
+        sz = e.get("sizes") or {}
+        ok = bad = 0
+        for lab, vs in sz.items():
+            k = (cat, lab)
+            if k not in lim:
+                continue
+            lo, hi = lim[k]
+            for x in vs:
+                if isinstance(x, (int, float)) and x > 0:
+                    if lo <= x <= hi:
+                        ok += 1
+                    else:
+                        bad += 1
+        if bad == 0 or ok < 2:
+            continue
+        name = r.get("name") or ""
+        short = SHORT_SLEEVE_NAME.search(name)
+        cropped = SHORT_BODY_NAME.search(name)
+        for lab, vs in sz.items():
+            k = (cat, lab)
+            if k not in lim:
+                continue
+            if short and lab in ("소매길이", "화장", "소매단"):
+                continue
+            if cropped and lab in ("총장", "기장"):
+                continue
+            lo, hi = lim[k]
+            for i, x in enumerate(vs):
+                if isinstance(x, (int, float)) and x > 0 and not (lo <= x <= hi):
+                    vs[i] = None
+                    dropped += 1
+        e["sizes"] = {lab: vs for lab, vs in sz.items()
+                      if any(v is not None for v in vs)}
+    return dropped
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--report", action="store_true")
@@ -1452,6 +1544,9 @@ def main():
     if lent:
         print(f"색만 다른 형제에게서 물려받은 사이즈 {lent}벌")
 
+    gone = drop_impossible(out, {r["source_url"]: r for r in rows})
+    if gone:
+        print(f"품목에 견줘 있을 수 없는 값 {gone}칸을 비웠다")
     fixed = clean_names(out)
     if fixed:
         print("사이즈 이름 정리: " + " · ".join(f"{k} {v}" for k, v in sorted(fixed.items())))
