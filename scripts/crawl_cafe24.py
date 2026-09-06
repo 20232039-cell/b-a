@@ -832,6 +832,20 @@ def pick_color(name: str, description: str, spec: dict | None = None,
     return ""
 
 
+# 대분류 — category 위에 한 층 얹는다. 지금 category 는 층이 섞여 있다: Tops·Shirts·
+# Knitwear 가 나란히 있어 「상의 보기」를 누르면 7,532벌만 나오고 니트 2,700 과 셔츠
+# 2,017 이 빠진다(사람 지적 2026-09-06). category 는 이미 앱·태그·보고서가 다 쓰고
+# 있으므로 건드리지 않고 열을 하나 더한다.
+# 원피스는 상의로 묶는다(사람 결정) — 상·하의로 나뉘지 않는 한 벌 옷이라 하의에 둘 수 없고,
+# 따로 두면 큰 탭이 381벌짜리 하나 더 생긴다.
+GROUP_OF = {
+    "Tops": "상의", "Shirts": "상의", "Knitwear": "상의", "Dresses": "상의",
+    "Pants": "하의", "Denim": "하의", "Skirts": "하의",
+    "Outerwear": "아우터",
+    "Bags": "가방", "Shoes": "신발", "Headwear": "모자",
+    "Accessories": "액세서리", "Jewelry": "주얼리",
+}
+
 def classify_gender(category_names: list[str], brand_default: str) -> str:
     joined = " ".join(category_names).lower()
     for g, keys in GENDER_RULES:
@@ -1699,7 +1713,7 @@ def crawl_brand(http: PoliteSession, shop: Shop, refresh: bool, log, refetch_ids
 CSV_FIELDS = [
     "brand_slug", "category_code", "item_type", "name", "gender_target", "price",
     "representative_color", "season", "status", "image_url", "source_url", "crawled_at",
-    "category", "subtype", "sub_code",
+    "group", "category", "subtype", "sub_code",
     # 이하 추가 열 — 기존 파이프라인은 무시한다
     "product_no", "category_path", "gallery_count", "options",
     # 주간 갱신(weekly_update.py)이 채운다 — 매장이 내린 상품(연속 2주 목록에서 사라지고 상세 404). 지난 상품에 두되 링크가 죽었다는 표시
@@ -1935,6 +1949,7 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
                 # 회원 전용·리다이렉트로 홈 주소만 남은 건(badblood 208, haleine 14)은 cafe24 표준 상세 주소로 복원
                 "source_url": d["source_url"] if product_no_of(d["source_url"]) else f"{d['source_url'].rstrip('/')}/product/detail.html?product_no={d['product_no']}",
                 "crawled_at": d.get("crawled_at", ""),
+                "group": GROUP_OF.get(label, ""),
                 "category": label,
                 "subtype": item,
                 "sub_code": sub_code,
