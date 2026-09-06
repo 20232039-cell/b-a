@@ -49,7 +49,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from urllib.parse import urljoin, urlparse, parse_qs
+from urllib.parse import urljoin, urlparse, parse_qs, unquote
 from urllib.robotparser import RobotFileParser
 
 import requests
@@ -1140,6 +1140,13 @@ def load_categories(http: PoliteSession, shop: Shop, soup: BeautifulSoup, html_t
     # /product/kimmatin/list.html 을 같이 쓴다. 홈 링크에서 본 경로를 전부 후보로 둔다.
     for m in re.finditer(r'href="((?:https?://[^/"]+)?(/product/(?:[^/?"]+/)?list\w*\.html))\?[^"]*cate_no=', html_text):
         shop.list_paths.add(m.group(2))
+    # 메뉴가 「/category/clothes/45」 꼴인 매장 — cate_no= 도 안 붙고 사이트맵도 없다.
+    # 그런 곳은 이게 유일한 실마리라서 못 주우면 그 브랜드가 통째로 빈다. 실제로 셋이
+    # 그랬다(2026-09-06): numbering 0벌 · opus-0012 0벌 · pog-service 0벌.
+    # 셋 다 지금도 열리는 cafe24 매장이고 홈에 「/category/acc/47」·「/category/bottoms/46」이
+    # 걸려 있는데 우리가 안 봤다. 이름은 주소의 토막을 그대로 쓴다.
+    for m in re.finditer(r'href="[^"]*?/category/([A-Za-z0-9%\-_.]+)/(\d+)', html_text):
+        shop.categories.setdefault(int(m.group(2)), unquote(m.group(1)))
     # 내비에 없는 카테고리가 상품 링크의 /category/N/ 에 숨어 있다(9999archive 의 협업 카테고리 1).
     for m in re.finditer(r"/product/[^/\"]+/\d+/category/(\d+)/", html_text):
         shop.categories.setdefault(int(m.group(1)), f"cate_{m.group(1)}")
