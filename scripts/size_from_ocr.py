@@ -1217,6 +1217,18 @@ def _mergeable(vals: dict, a: int, b: int) -> bool:
     return True
 
 
+def _clash(vals: dict, a: int, b: int) -> list[str]:
+    """두 자리에서 값이 서로 다른 라벨 목록."""
+    out = []
+    for lab, v in vals.items():
+        if b >= len(v):
+            continue
+        x, y = v[a], v[b]
+        if x is not None and y is not None and x != y:
+            out.append(lab)
+    return out
+
+
 def clean_names(out: dict) -> dict:
     """사이즈 「이름」을 마지막에 한 번 훑는다. 값이 맞아도 이름이 「HEM」·「BLACK」이면 그 표는
     사이즈 표가 아니다 — 앱에서 사람이 그 글자를 그대로 본다(2026-09-05).
@@ -1280,7 +1292,23 @@ def clean_names(out: dict) -> dict:
         vals = e.get("sizes") or {}
         i = 1
         while i < len(new):
-            if new[i] and new[i] == new[i - 1] and _mergeable(vals, i - 1, i):
+            # 이름이 같은 두 줄인데 딱 한 라벨만 어긋나면, 어느 쪽이 맞는지 알 수 없다.
+            # 그 라벨만 비우고 접는다 — 어긋나는 값을 둘 다 이고 있느니 하나를 비우는 게 낫다.
+            # 다른 라벨 둘 이상이 같아야 같은 옷으로 본다(mardi 「FREE·FREE」의 총장 65·65 ·
+            # 어깨 46·46 · 가슴 54·54 인데 소매길이만 12·18 인 꼴, 2026-09-06 실측 24벌).
+            clash = _clash(vals, i - 1, i) if new[i] and new[i] == new[i - 1] else None
+            same = 0
+            if clash is not None:
+                same = sum(1 for lab, v in vals.items()
+                           if i < len(v) and v[i - 1] is not None and v[i - 1] == v[i])
+            if clash is not None and len(clash) == 1 and same >= 2:
+                # 두 자리를 다 비운다. 한쪽만 비우면 아래 접기가 다른 쪽 값으로 채워
+                # 결국 「둘 중 하나를 골라 준」 꼴이 된다 — 어느 쪽이 맞는지 우리는 모른다.
+                vals[clash[0]][i - 1] = None
+                vals[clash[0]][i] = None
+                n["어긋나는 한 라벨을 비우고 접음"] += 1
+                clash = []
+            if new[i] and new[i] == new[i - 1] and (clash == [] or _mergeable(vals, i - 1, i)):
                 for v in vals.values():
                     if i < len(v):
                         v[i - 1] = v[i - 1] if v[i - 1] is not None else v[i]
