@@ -360,7 +360,31 @@ NOT_PRODUCT = [
     ("팝업·프리뷰", re.compile(r"\bpop-?up\b|팝업|\bpreview\b", re.I), False),
     ("이름이번호뿐", re.compile(r"^\s*(?:no\.?|№)\s*\d+\s*$", re.I), False),
     ("연예인화보", re.compile(r"\bceleb\b|착용", re.I), True),   # 앞머리를 뗀 뒤에 본다
+    # noirer 는 칸 이름을 알아 올 수 없다(목록 페이지가 우리에게 안 열린다). 그래서 이름으로
+    # 잡는다 — 「2021 F/W Ready to wear "Preserved 天日花" Part.2」·「With 넬」·「With 나인」.
+    # 둘 다 정가 붙은 상품 38,341벌 가운데 0벌이다.
+    ("컬렉션발표", re.compile(r"ready\s*-?\s?to\s*-?\s?wear", re.I), False),
+    ("협업·출연", re.compile(r"^\s*with\s+\S+", re.I), True),
+    # 이름 자리에 점 하나만 있는 페이지 — koominseong 36건이 전부 「.」이다.
+    ("글자없는이름", re.compile(r"^[^0-9A-Za-z가-힣ㄱ-ㅎ]+$"), False),
+    # 시즌 표지 — 「EPISODE.4」·「EPISODE.1 - THEM MAGAZINE」. xlim 의 진짜 상품은
+    # 「EP.4 02 LEATHER JACKET」 꼴이라 이 무늬에 안 걸린다(정상 상품 0벌).
+    ("에피소드표지", re.compile(r"^\s*episode[\s.\-]*\d", re.I), False),
 ]
+
+# 이름이 시즌 표지뿐인 페이지 — 「SUMMER CAPSULE 23」·「FALL WINTER 25」·「2022 PRE-SPRING」.
+# 시즌 낱말 + 연도 + 품목 낱말 없음. 정가 붙은 상품 38,341벌에 대고 재면 세 벌이 걸리는데
+# divein 의 「25 SUMMER」·「25 FALL」·「25 FALL 2ND」로, 셋 다 값이 「2025」인 룩북 페이지다
+# (연도를 값으로 읽었다). 잘못 걸린 게 아니라 이미 섞여 있던 쓰레기를 찾아낸 것이다.
+SEASON_WORD = re.compile(
+    r"\b(?:spring|summer|fall|autumn|winter|resort|holiday|capsule|ss|fw|aw|s/s|f/w|a/w|"
+    r"pre-?\s?spring|pre-?\s?fall)\b|봄|여름|가을|겨울|간절기", re.I)
+YEARISH = re.compile(r"\b(?:19|20)\d\d\b|(?<![0-9])\d\d(?![0-9])")
+
+# 매체·매장 안내 — 「OSOI HONG KONG STORE」·「2023 MSCHF ONLY | PORTRAIT VIDEO」.
+# 품목 낱말이 없을 때만 본다(가게 이름이 든 진짜 상품을 지키려고). 정상 상품 0벌.
+MEDIA_PAGE = re.compile(r"\bvideo\b|\bfilm\b|\bshowroom\b|\bstore\b|\bpop-?up\b|스토어|쇼룸", re.I)
+
 
 
 def not_a_product(name: str, shop_titles: set[str] = frozenset()) -> str | None:
@@ -376,11 +400,16 @@ def not_a_product(name: str, shop_titles: set[str] = frozenset()) -> str | None:
     for why, rx, after_head in NOT_PRODUCT:
         if rx.search(tail if after_head else n):
             return why
+    # 아래 셋은 품목 낱말이 없을 때만 본다 — 그게 있으면 옷이다. the-museum-visitor 의
+    # 「THE MUSEUM VISTIOR COLLECTION 2023-2024 CORDUROY ECO BAG」은 진짜 가방이다.
+    if match_head(n, ITEM_TYPE_VOCAB) or match_acc(n):
+        return None
     if re.search(r"\bcollections?\b|(?<![가-힣])컬렉션", n, re.I) and SEASONISH.search(n):
-        # 다만 품목 낱말이 박혀 있으면 옷이다 — the-museum-visitor 의
-        # 「THE MUSEUM VISTIOR COLLECTION 2023-2024 CORDUROY ECO BAG」은 진짜 가방이다.
-        if not (match_head(n, ITEM_TYPE_VOCAB) or match_acc(n)):
-            return "시즌컬렉션"
+        return "시즌컬렉션"
+    if SEASON_WORD.search(tail) and YEARISH.search(tail):
+        return "시즌표지"
+    if MEDIA_PAGE.search(tail):
+        return "매체·매장안내"
     return None
 
 
@@ -2069,7 +2098,11 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
                 continue
             # 상품 이름을 한 개인결제·룩북 페이지 — lecyto 「박민희 실장님 팀」 217건(가격 있음),
             # insilence 「셀럽 테스트」, opus-0012 「2024 spring summer」. 이름만으로 갈린다.
-            if JUNK_NAME.search(d["name"]):
+            if JUNK_NAME.search(d["name"]) or not_a_product(d["name"]):
+                # not_a_product 는 값 없는 페이지를 가르려고 만든 것인데, 값이 있는 행에도
+                # 태워 둔다. 지금 38,341벌 가운데 셋만 걸리고 그 셋이 divein 의
+                # 「25 SUMMER」·「25 FALL」·「25 FALL 2ND」— 값이 「2025」인 룩북이다
+                # (연도를 값으로 읽었다). 앞으로 같은 게 새로 들어오면 여기서 막힌다.
                 dropped_junk += 1
                 continue
             img = d.get("image_url", "")
