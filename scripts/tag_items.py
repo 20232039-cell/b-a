@@ -57,6 +57,11 @@ AXES = ["neckline", "sleeve_length", "silhouette", "length", "pants_type", "mate
         "finish_wash", "design_element", "construction", "pattern", "hardware", "function", "color"]
 GARMENT_AXES = {"neckline", "sleeve_length", "silhouette", "length", "pants_type"}
 NON_GARMENT = {"Accessories", "Bags", "Shoes"}
+# 옷 전용 축(넥라인·소매·실루엣·기장·바지종류)을 지울 품목. NON_GARMENT 보다 넓다 —
+# 모자와 주얼리가 빠져 있어서 캡에 「레귤러핏」 59개, 발라클라바에 넥라인 「후드」 37개,
+# 브로치에 「슬리브리스」가 붙어 있었다(합계 243개, 2026-09-06 실측).
+# 보온성·통기성 갈래에는 NON_GARMENT 를 그대로 쓴다 — 기모 비니는 보온성이 맞다.
+NO_GARMENT_AXES = NON_GARMENT | {"Headwear", "Jewelry"}
 PANTS = {"Pants", "Denim", ""}
 BOTTOMS = {"Pants", "Denim", "Skirts"}
 # 품목 이름이 곧 소매를 말하는 옷 — 맨투맨·후디·자켓/코트는 사실상 전부 긴소매다.
@@ -266,7 +271,7 @@ class Tagger:
                 hits.pop("length", None)
         if category not in PANTS:
             hits.pop("pants_type", None)
-        if category in NON_GARMENT:
+        if category in NO_GARMENT_AXES:
             for ax in GARMENT_AXES:
                 hits.pop(ax, None)
         if category not in BOTTOMS | {""}:
