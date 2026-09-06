@@ -110,12 +110,22 @@ def _is_hangul(s: str) -> bool:
     return bool(s) and all("가" <= c <= "힣" for c in s)
 
 
+# 2자 한글 별칭 앞에 붙어도 뜻이 변하지 않는 색 낱말. 매장이 「그린카모」·「베이지체크」처럼
+# 색과 무늬를 붙여 적는다.
+COLOR_PREFIX = ("그린|블랙|화이트|블루|레드|네이비|그레이|베이지|브라운|카키|아이보리|핑크|"
+                "퍼플|옐로우|오렌지|민트|차콜|크림|와인|버건디|실버|골드|라이트|다크|딥")
+
+
 def compile_alias(alias: str) -> re.Pattern:
     a = re.escape(alias.lower())
     if _is_hangul(alias) and len(alias) == 1:
         return re.compile(rf"(?<![{HANGUL}]){a}(?![{HANGUL}])")
     if _is_hangul(alias) and len(alias) == 2:
-        return re.compile(rf"(?<![{HANGUL}]){a}")
+        # 앞이 한글이면 막는다 — 「측면」의 면, 「서울」의 울, 「올리브」의 리브를 걸러 온 규칙이다.
+        # 다만 색 이름이 앞에 붙는 것은 막으면 안 된다: 「그린카모」·「베이지체크」·「블랙진」은
+        # 색 + 그 낱말이라 뜻이 그대로다. 이름에 그렇게 적는 매장이 있어 22벌이 무늬를 잃고
+        # 있었다(그린카모 9 · 베이지체크 3 …, 2026-09-06). 색 낱말 뒤는 허용한다.
+        return re.compile(rf"(?<![{HANGUL}]){a}|(?:{COLOR_PREFIX}){a}")
     if re.fullmatch(r"[a-z0-9 /\-]+", alias.lower()):
         # 복수형 s 를 받는다 — 「Archive Long Sleeves」가 「long sleeve」에 안 걸려
         # 상품명에 sleeve 723 · long 616 이 미등록으로 남아 있었다(2026-09-05).
