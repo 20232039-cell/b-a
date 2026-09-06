@@ -42,6 +42,17 @@ BROWSER = CRAWL / "browser"
 VOCAB = DATA / "vocab_aliases.json"
 OUT = DATA / "product_tags_full.json"
 
+# 한 옷에 같이 붙을 수 없는 값. audit.py 의 CONTRADICT 와 같은 목록이다 — 감사기는 세고
+# 여기서는 이름을 보고 한쪽을 지운다. 한쪽을 고치면 다른 쪽도 같이 고쳐야 한다.
+CONTRADICT = [
+    ("sleeve_length", "반팔", "롱슬리브"), ("sleeve_length", "슬리브리스", "롱슬리브"),
+    ("sleeve_length", "슬리브리스", "반팔"),
+    ("length", "크롭", "맥시"), ("length", "크롭", "롱기장"), ("length", "쇼츠", "맥시"),
+    ("silhouette", "슬림핏", "오버핏"), ("silhouette", "슬림핏", "루즈핏"),
+    ("silhouette", "타이트", "오버핏"),
+    ("pattern", "단색", "스트라이프"), ("pattern", "단색", "체크"), ("pattern", "단색", "카모"),
+]
+
 AXES = ["neckline", "sleeve_length", "silhouette", "length", "pants_type", "material",
         "finish_wash", "design_element", "construction", "pattern", "hardware", "function", "color"]
 GARMENT_AXES = {"neckline", "sleeve_length", "silhouette", "length", "pants_type"}
@@ -281,7 +292,38 @@ class Tagger:
         if (not hits.get("sleeve_length") and category in SLEEVED
                 and LONG_SLEEVE_KIND.search(name) and not NOT_LONG_SLEEVE.search(name)):
             hits["sleeve_length"].add("롱슬리브")
+        self._name_wins(hits, name)
         return {ax: sorted(hits[ax]) for ax in AXES if hits.get(ax)}
+
+    def _name_wins(self, hits: dict, name: str) -> None:
+        """한 축에 서로 반대인 값이 둘 다 붙었는데 상품 이름이 한쪽만 말하면, 이름을 따른다.
+
+        본문에는 이 옷 얘기가 아닌 것이 섞인다. 가장 흔한 것이 사이즈 안내다 —
+        badblood 「PEACE NOT WAR 루즈핏 티」의 본문에 「S size - 슬림한 핏 / L size -
+        레귤러」가 있어서 루즈핏과 슬림핏이 둘 다 붙었다. 옷은 하나고 이름이 루즈핏이라 한다.
+
+        실측으로 넣는 소매는 이 규칙에 안 걸린다 — 그 갈래는 축이 비었을 때만 도는지라
+        모순이 생기지 않는다(위 두 블록의 `not hits.get("sleeve_length")`).
+
+        343건 가운데 92건이 이렇게 풀린다(2026-09-06 실측). 이름이 둘 다 말하거나
+        아무 말도 안 하면 손대지 않는다 — 지어내지 않는다.
+        """
+        low = (name or "").lower()
+        for ax, a, b in CONTRADICT:
+            got = hits.get(ax) or set()
+            if a not in got or b not in got:
+                continue
+            ina = any(x in low for x in self.alias_of(ax, a))
+            inb = any(x in low for x in self.alias_of(ax, b))
+            if ina and not inb:
+                got.discard(b)
+            elif inb and not ina:
+                got.discard(a)
+
+    def alias_of(self, axis: str, value: str) -> list[str]:
+        """어휘에 적힌 별칭 + 값 자신, 전부 소문자."""
+        al = (self.vocab.get(axis) or {}).get(value) or []
+        return [x.lower() for x in [value, *al]]
 
 
 _SLEEVE: dict[str, float] | None = None
