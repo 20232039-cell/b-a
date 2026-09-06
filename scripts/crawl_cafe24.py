@@ -349,7 +349,13 @@ CONTENT_CAT = re.compile(
 #   [차정원 착용] FEED KNIT PANTS                 ← grove 의 진짜 옷
 # 앞머리를 떼면 남는 쪽에 celeb·착용이 있는지로 둘이 갈린다.
 NOT_PRODUCT = [
-    ("개인결제창", re.compile(r"개인\s*결제|임직원", re.I), False),
+    # data/_uncollectable.jsonl 에 사람이 손으로 모아 둔 243건을 다시 태워 보고 채웠다
+    # (2026-09-06). 지금 규칙이 179건을 잡고, 아래 넷을 더하면 190건이 된다.
+    # 나머지 53건은 insilence 「스탭스냅」인데 그건 바로 아래 줄에서 잡는다.
+    ("개인결제창", re.compile(r"개인\s*결제|임직원|결제\s*창|실장님|원장님|이사님|대표님", re.I), False),
+    ("스탭스냅", re.compile(r"스탭\s?스냅|스태프\s?스냅|staff\s?snap", re.I), False),
+    ("샘플·테스트", re.compile(r"(?<![가-힣])샘플(?![가-힣])|테스트|test\s*product", re.I), False),
+    ("배송비·차액", re.compile(r"배송비|추가\s*금|차액\s*결제|차액\s*지불", re.I), False),
     ("룩북", re.compile(r"look\s?-?book|룩북", re.I), False),
     ("캠페인", re.compile(r"\bcampaign\b|캠페인", re.I), False),
     ("에디토리얼", re.compile(r"\beditorial\b|에디토리얼|화보", re.I), False),
