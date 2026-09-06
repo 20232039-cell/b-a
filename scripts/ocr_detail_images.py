@@ -683,7 +683,7 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
                 with wlock:
                     counters["img"] += 1
                 t = ocr_bytes(data)
-                imgs.append({"url": url, "chars": len(t)})
+                imgs.append({"url": url, "chars": len(t), "text": t})
                 if t:
                     texts.append(t)
                 # 사이즈 표를 이미 얻었으면 남은 그림은 읽지 않는다 — 표는 대개 한 장에 다 있는데,
@@ -693,6 +693,12 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
                         counters["early"] += 1
                     break
             ocr_text = _cap(texts)
+            # 상한에 걸려 잘린 기록만 그림별 글을 함께 남긴다 — 그래야 나중에 상한을
+            # 올리거나 자르는 자리를 바꿀 때 그림을 다시 내려받지 않아도 된다.
+            # 예전 6,000자 상한에 잘린 956벌이 딱 그래서 되살릴 길이 없었다(2026-09-06).
+            # 지금 상한(12,000자)에 걸리는 것은 19,407건 중 57건(0.3%)뿐이라 값이 싸다.
+            if len("\n".join(texts)) <= len(ocr_text):
+                imgs = [{k: v for k, v in im.items() if k != "text"} for im in imgs]
             with wlock:
                 counters["done"] += 1
                 if ocr_text:
