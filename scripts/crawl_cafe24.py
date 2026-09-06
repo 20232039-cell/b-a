@@ -2047,6 +2047,7 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
     dropped_kidpet = 0
     dropped_demo = 0
     dropped_gone = 0
+    gal_of: dict[tuple, set] = {}
     gone = load_dropped()
     manual_items = load_manual_items()
     for path in sorted(CRAWL_DIR.glob("*.jsonl")):
@@ -2182,13 +2183,52 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
                 "detail_empty": "1" if (not d.get("detail_images") and len(d.get("detail_text") or "") < 50
                                         and len(d.get("description") or "") < 50) else "",
             })
+            gal_of[(slug, str(d["product_no"]))] = {x for x in (d.get("gallery") or []) + [d.get("image_url")] if x}
             per_brand[slug] = per_brand.get(slug, 0) + 1
+    dropped_rerun = fold_reruns(rows, gal_of)
     fill_season_gaps(rows)
     with OUT_CSV.open("w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=CSV_FIELDS)
         w.writeheader()
         w.writerows(rows)
-    return len(rows), {"per_brand": per_brand, "dropped_dupe_image": dropped_dupe, "dropped_no_image": dropped_noimg, "dropped_junk_name": dropped_junk, "dropped_kids_pet": dropped_kidpet, "dropped_demo_shop": dropped_demo, "dropped_gone": dropped_gone}
+    return len(rows), {"per_brand": per_brand, "dropped_dupe_image": dropped_dupe, "dropped_no_image": dropped_noimg, "dropped_junk_name": dropped_junk, "dropped_kids_pet": dropped_kidpet, "dropped_demo_shop": dropped_demo, "dropped_gone": dropped_gone, "dropped_rerun": dropped_rerun}
+
+
+def fold_reruns(rows: list[dict], gal: dict) -> int:
+    """매장이 같은 옷을 두 번 올린 것을 접는다.
+
+    dunst 는 2022~23년 옷을 통째로 다시 등록해 두었다 — 이름·색·값이 같고 갤러리 열두 장이
+    그대로 겹치는데 상품 번호만 다르다(1846 대 1906). 옵션도 칸도 같다. 앱에서는 같은 옷이
+    두 번 뜬다. 607묶음 1,231행, 접으면 624행이 준다(그중 판매중 중복 430).
+
+      unisex cupid campus sweatshirt salt pink   no=1846 · no=1906   둘 다 69,000원
+      unisex suede half jacket camel             no=2807 · no=2809   둘 다 549,000원
+
+    잣대는 「브랜드·이름·색·값이 같고 사진을 나눠 쓴다」 넷을 다 만족할 때뿐이다. 색을 빼면
+    안 된다 — 재 보니 이름·값만으로는 395묶음이 걸리는데 그건 색만 다른 같은 옷이다
+    (wkndrs 「draggy work pants」가 여섯 색인데 갤러리를 공유한다). 그건 접으면 안 된다.
+
+    남길 쪽: 판매중을 품절보다, 그다음 번호가 큰 쪽(새로 올린 것)을 남긴다.
+    """
+    groups: dict[tuple, list[dict]] = {}
+    for r in rows:
+        k = (r["brand_slug"], (r["name"] or "").strip().casefold(),
+             (r["representative_color"] or "").strip().casefold(), r["price"])
+        groups.setdefault(k, []).append(r)
+    drop: set[int] = set()
+    for k, v in groups.items():
+        if len(v) < 2:
+            continue
+        sets = [gal.get((k[0], str(r["product_no"])), set()) for r in v]
+        if not any(sets[i] & sets[j] for i in range(len(v)) for j in range(i + 1, len(v))):
+            continue
+        keep = max(v, key=lambda r: (r["status"] == "ON_SALE", int(r["product_no"] or 0)))
+        for r in v:
+            if r is not keep:
+                drop.add(id(r))
+    if drop:
+        rows[:] = [r for r in rows if id(r) not in drop]
+    return len(drop)
 
 
 # ─── main ───

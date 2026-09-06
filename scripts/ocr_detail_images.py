@@ -66,6 +66,8 @@ def skip_image(url: str) -> bool:
         return False
     return len(stem) <= 24 and bool(_ASSET_WORD.search(stem))
 MAX_IMAGES = 5
+# 고른 그림에서 이만큼도 안 나오면 그림을 더 본다(글자 수).
+LOW_YIELD = 80
 SHORT_TEXT = 80
 
 _last: dict[str, float] = {}
@@ -675,8 +677,15 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
                     if u not in shared and not skip_image(u)]
             hinted = [u for u in cand if HINT_NAME.search(u)]
             rest = [u for u in cand if u not in hinted]
-            picked = hinted[:max_images] + rest[-(max_images - len(hinted[:max_images])):] if max_images > len(hinted[:max_images]) else hinted[:max_images]
-            for url in picked:
+            # 힌트가 붙은 그림을 먼저, 나머지는 뒤에서부터. 상한에 닿았는데 글자가 거의 안
+            # 나왔으면 상한을 두 배까지 늘려 더 본다 — 뒤 여덟 장이 전부 착용컷이고 표는
+            # 앞쪽에 있는 매장이 있다(espionage 는 그림 23장 중 뒤 8장만 읽고 42자를 건졌다,
+            # 2026-09-06). 잘 나오는 상품에는 아무 값도 더 안 든다.
+            order = hinted + rest[::-1]
+            budget, read = max_images, 0
+            for url in order:
+                if read >= budget:
+                    break
                 data = polite_get(url, delay, cdn_delay)
                 if not data or len(data) < MIN_BYTES:
                     continue
@@ -686,12 +695,17 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
                 imgs.append({"url": url, "chars": len(t), "text": t})
                 if t:
                     texts.append(t)
+                read += 1
                 # 사이즈 표를 이미 얻었으면 남은 그림은 읽지 않는다 — 표는 대개 한 장에 다 있는데,
                 # 12장을 끝까지 읽느라 시간의 절반을 버리고 있었다(2026-09-04).
                 if want_size and texts and _has_size_table("\n".join(texts)):
                     with wlock:
                         counters["early"] += 1
                     break
+                if read >= budget and budget < max_images * 2 and sum(map(len, texts)) < LOW_YIELD:
+                    budget = max_images * 2
+                    with wlock:
+                        counters["more"] = counters.get("more", 0) + 1
             ocr_text = _cap(texts)
             # 상한에 걸려 잘린 기록만 그림별 글을 함께 남긴다 — 그래야 나중에 상한을
             # 올리거나 자르는 자리를 바꿀 때 그림을 다시 내려받지 않아도 된다.
