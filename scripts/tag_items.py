@@ -136,6 +136,19 @@ _SENT_END = re.compile(r"[.。!?\n|·•▪]|다\s|요\s")
 
 
 def strip_other_products(text: str, back: int = 60) -> str:
+    """값이 나오는 자리 앞 60자를 문장 끝까지 되짚어 도려낸다 — 거기 남의 상품 이름이 있다.
+
+    이걸로 원문 글자의 6%가 잘린다. 남는 새는 것은 167벌뿐이다(감사기 「설명에 남의 상품이
+    섞였다」, 2026-09-06). 남는 것은 이런 꼴이다:
+        the-coldest-moment "Made In China Styled With TCM dot flower T (blue) ₩45,000"
+        lmood              "연관 상품 브룩 하이넥 니트 집업 ELECTRIC BLUE ₩128,000"
+
+    재 보고 되돌린 잣대: 「Styled With·연관 상품」 같은 표시를 만나면 그 뒤를 통째로 버리기.
+    새는 것은 167 → 0 이 되지만 태그 7,226개가 같이 사라진다. 그 표시가 글 한가운데
+    있기 때문이다 — 1,931벌에서 표시 위치 중앙값이 글의 27% 지점이고, 1,097벌은 30% 앞에
+    있다. 매장은 추천 상품 블록을 가운데 끼워 넣고 그 뒤에 다시 제 상품의 소재·관리법을
+    적는다. 167을 고치려고 7,226을 버릴 수는 없다.
+    """
     if not text or not _PRICE_RUN.search(text):
         return text
     out, last = [], 0
