@@ -248,10 +248,6 @@ class Tagger:
         if category not in BOTTOMS | {""}:
             for ax, val in self.bottoms_only:  # 하의 전용 값이 코디 문장으로 상의에 붙는 것 방지
                 hits.get(ax, set()).discard(val)
-        # 실측도 없고 글에도 없을 때 품목 이름으로 소매를 짐작한다(위 실측 갈래 다음이다).
-        if (not hits.get("sleeve_length") and category in SLEEVED
-                and LONG_SLEEVE_KIND.search(name) and not NOT_LONG_SLEEVE.search(name)):
-            hits["sleeve_length"].add("롱슬리브")
         if category in SKIRTY and MINI_NAME.search(name):
             hits["length"].add("미니")
         if category not in NON_GARMENT:
@@ -276,6 +272,12 @@ class Tagger:
                 hits["sleeve_length"].add("반팔")
             elif sleeve_cm >= 55:
                 hits["sleeve_length"].add("롱슬리브")
+        # 실측도 없고 글에도 없을 때만 품목 이름으로 짐작한다 — 반드시 실측 갈래 다음이다.
+        # 처음에 이 블록을 실측보다 앞에 두었더니 「아웃포켓 하프 블루종」(소매 실측 25.5cm)이
+        # 롱슬리브가 됐다. 실측이 이름보다 낫다(2026-09-06, 46벌).
+        if (not hits.get("sleeve_length") and category in SLEEVED
+                and LONG_SLEEVE_KIND.search(name) and not NOT_LONG_SLEEVE.search(name)):
+            hits["sleeve_length"].add("롱슬리브")
         return {ax: sorted(hits[ax]) for ax in AXES if hits.get(ax)}
 
 
