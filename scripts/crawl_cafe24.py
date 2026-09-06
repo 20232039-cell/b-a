@@ -2000,6 +2000,61 @@ def load_dropped() -> set[tuple[str, str]]:
 
 
 
+IMG_YM = re.compile(r"/(20[12]\d)(0[1-9]|1[0-2])/")
+
+
+def season_from_image_date(rows: list[dict]) -> int:
+    """대표 사진 주소에 박힌 업로드 연월로 시즌을 채운다 — 브랜드마다 먼저 맞혀 보고서.
+
+    cafe24 는 사진을 `/web/product/big/202408/…` 로 넣는다. 그 연월이 곧 등록 시점이다.
+    시즌을 아는 11,183벌에 대 보니 업로드 달이 뚜렷하게 갈렸다(2026-09-06 실측):
+      SS 는 2~5월이 68%, FW 는 8~10월이 71%. 7월은 둘 다 나와서 안 쓴다.
+
+    그런데 통째로 쓰면 78%밖에 안 맞는다. 옛 사진을 다시 쓰는 매장이 있기 때문이다
+    (kirsh 27.8% · margesherwood 29.6% · dnsr 41.9%). 시즌은 사람이 걸러 보는 값이라
+    다섯에 하나가 틀리면 안 쓰느니만 못하다.
+
+    그래서 브랜드마다 먼저 맞혀 본다. 이미 시즌을 아는 상품이 서른 벌 넘고 그 브랜드에서
+    95% 넘게 맞을 때만, 그 브랜드의 빈 시즌을 채운다. 지금 여섯 곳이 통과한다 —
+    grove 100% · easy-no-easy 100% · beslow 100% · sinoon 99.5% ·
+    the-coldest-moment 99.4% · rssc 99.0%. 1,549벌을 채운다.
+
+    스스로 재고 스스로 물러난다 — 어떤 매장이 옛 사진을 다시 쓰기 시작하면 그 브랜드는
+    다음 판에서 95% 아래로 떨어져 저절로 빠진다. 브랜드 이름을 코드에 적지 않는다.
+    """
+    def guess(url: str) -> str | None:
+        m = IMG_YM.search(url or "")
+        if not m:
+            return None
+        y, mo = int(m.group(1)), int(m.group(2))
+        if mo in (2, 3, 4, 5):
+            return f"{y % 100:02d}SS"
+        if mo in (8, 9, 10):
+            return f"{y % 100:02d}FW"
+        return None
+
+    score: dict[str, list[int]] = {}
+    for r in rows:
+        g = guess(r.get("image_url"))
+        if not g or not r.get("season"):
+            continue
+        sc = score.setdefault(r["brand_slug"], [0, 0])
+        sc[g == r["season"]] += 1
+    trusted = {b for b, (bad, ok) in score.items() if ok + bad >= 30 and ok / (ok + bad) >= 0.95}
+    filled = 0
+    for r in rows:
+        if r.get("season") or r["brand_slug"] not in trusted:
+            continue
+        g = guess(r.get("image_url"))
+        if g:
+            r["season"] = g
+            filled += 1
+    if trusted:
+        print("사진 날짜로 시즌을 채운 브랜드: "
+              + ", ".join(f"{b} {score[b][1]}/{sum(score[b])}" for b in sorted(trusted)), file=sys.stderr)
+    return filled
+
+
 def fill_season_gaps(rows: list[dict]) -> int:
     """번호 사이를 메운다 — 위아래 기둥의 시즌이 같을 때만.
 
@@ -2187,6 +2242,10 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
             per_brand[slug] = per_brand.get(slug, 0) + 1
     dropped_rerun = fold_reruns(rows, gal_of)
     fill_season_gaps(rows)
+    # 번호 보간으로도 안 채워진 것은 사진 날짜로 한 번 더 — 브랜드마다 먼저 맞혀 보고서만.
+    n_img = season_from_image_date(rows)
+    if n_img:
+        print(f"사진 날짜로 시즌 {n_img}벌을 더 채웠다", file=sys.stderr)
     with OUT_CSV.open("w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=CSV_FIELDS)
         w.writeheader()
