@@ -256,6 +256,49 @@ def sleeve_of(url: str) -> float | None:
     return _SLEEVE.get(url)
 
 
+_HAN_RUN = re.compile(r"[가-힣]{3,}")
+_HAS_PCT = re.compile(r"\d\s*%")
+_HAN_ANY = re.compile(r"[가-힣]+")
+_TOK_NUM = re.compile(r"^[0-9]+(?:[.,][0-9]+)?[.,)]?$")
+_TOK_ALPHA = re.compile(r"^[A-Za-z]{3,}$")
+_TOK_HAN = re.compile(r"^[가-힣]{2,}$")
+
+
+def _gibberish(line: str) -> bool:
+    """사진 위를 판독기가 훑어 만든 쓰레기 줄인가."""
+    if _HAN_RUN.search(line) or _HAS_PCT.search(line):
+        return False                      # 세 글자 이상 이어진 한글이나 「면 100%」는 진짜 글
+    junk = 0
+    for t in line.split():
+        t = t.strip("()[]{}「」『』\"'")
+        if not t or _TOK_HAN.match(t) or _TOK_ALPHA.match(t) or _TOK_NUM.match(t):
+            continue
+        junk += 1
+        if junk >= 2:
+            return True
+    return False
+
+
+def denoise_ocr(text: str) -> str:
+    """판독기 글에서 쓰레기 줄의 한글만 지운다.
+
+    상세 그림의 절반은 사진이라 판독기가 그 위에서 낱자를 주워 온다:
+      「fak oo eg 9 : perc : 「 s : a 077 였0 별 = ¥ 나시 ag 7 + i 00: ~) ee oa the」
+    여기 섞인 「나시」 때문에 카고 팬츠·파카·데님 캡이 슬리브리스가 됐다 —
+    슬리브리스가 붙은 1,340벌 가운데 137벌(10.2%)이 이 한 낱말만 근거였다(2026-09-06).
+    한글 별칭은 한두 글자짜리가 168개라 이런 줄에 늘 걸린다.
+
+    줄 단위로 본다. 세 글자 이상 이어진 한글이 있거나 「… 100%」가 있으면 진짜 글로 보고
+    그대로 둔다. 아니면서 알아볼 수 없는 토막이 둘 이상이면 그 줄의 한글만 지운다 —
+    영문과 숫자는 남긴다(사이즈 표의 「S 48 53」이 여기 걸리지만 치수는 다른 script 가
+    원문에서 읽으므로 영향이 없다). 「지퍼 포켓」·「1. 지퍼 여밈」처럼 깨끗한 짧은 줄은
+    토막이 없어 살아남는다.
+    """
+    if not text:
+        return text
+    return "\n".join(_HAN_ANY.sub(" ", l) if _gibberish(l) else l for l in text.split("\n"))
+
+
 def load_latest(path: Path) -> dict[str, dict]:
     latest: dict[str, dict] = {}
     if not path.exists():
@@ -336,7 +379,7 @@ def main():
             if dt and dt[:200] != desc[:200]:
                 desc = desc + "\n" + dt   # JSON-LD 요약과 본문 글이 다르면 둘 다 읽는다(2026-09-03)
             sbody, scolor = spec_texts(d.get("spec"))
-            otext = o.get("ocr_text") or ""
+            otext = denoise_ocr(o.get("ocr_text") or "")
             btext = brw.get(r["source_url"], "")
             if btext and btext[:200] != desc[:200]:
                 pass          # 브라우저 글은 따로 붙인다 — 원래 글과 겹치면 아래에서 무시된다
