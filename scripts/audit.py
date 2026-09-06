@@ -30,6 +30,9 @@ import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from tag_items import strip_other_products  # noqa: E402 — 태거와 같은 잣대로 도려낸다
+
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -72,6 +75,7 @@ CATEGORY_MISFIT = [
 ]
 
 PRICE_RX = re.compile(r"(?:krw|won)\s*\d{1,3},\d{3}|\d{1,3},\d{3}\s*(?:krw|won|원)", re.I)
+PRICE_VAL_RX = re.compile(r"(?:KRW|₩)\s?([\d,]{4,})|\b([\d,]{5,})\s?원")
 
 
 def rank(n: str):
@@ -185,8 +189,19 @@ def main() -> int:
             continue
         for d in load_latest(Path(f)).values():
             txt = (d.get("description") or "") + " " + (d.get("detail_text") or "")
-            if len(PRICE_RX.findall(txt)) >= 4:
-                flag("설명에 남의 상품이 섞였다", d.get("source_url", ""), f"가격 {len(PRICE_RX.findall(txt))}회")
+            # 태거가 이미 도려낸 뒤에 남는 것만 센다. 원문에 가격이 네 번 나오는 상품은
+            # 13,678벌인데 그중 10,305벌은 strip_other_products 가 지운다 — 그걸 세면
+            # 감사기 맨 윗줄이 늘 12,572 로 박혀 있어 진짜 문제가 그 밑에 묻힌다.
+            # 게다가 남는 3,373벌도 대부분 그 상품 자신의 값이 되풀이된 것이다
+            # (「판매가 ₩65,000 쿠폰적용가 ₩52,000 최종 할인가 ₩52,000」).
+            # 그래서 「서로 다른 값이 네 가지 이상」일 때만 든다 — 그건 남의 상품이다.
+            #   the-coldest-moment 「Styled With TCM dot flower T (blue) ₩45,000 …」
+            #   lmood 「연관 상품 브룩 하이넥 니트 집업 ELECTRIC BLUE ₩128,000 …」
+            # 13,678 → 167 (2026-09-06 실측).
+            left = strip_other_products(txt)
+            vals = {(a or b).replace(",", "") for a, b in PRICE_VAL_RX.findall(left)}
+            if len(vals) >= 4:
+                flag("설명에 남의 상품이 섞였다", d.get("source_url", ""), f"서로 다른 값 {len(vals)}가지")
 
     # ── 상품 목록
     seen = defaultdict(list)
