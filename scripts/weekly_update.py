@@ -29,6 +29,7 @@ import argparse
 import csv
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -77,7 +78,8 @@ def save_rows(path: Path, rows: dict[int, dict]) -> None:
     tmp.replace(path)
 
 
-def fetch_one(http: cc.PoliteSession, shop: cc.Shop, no: int, url: str) -> tuple[str, dict | None]:
+def fetch_one(http: cc.PoliteSession, shop: cc.Shop, no: int, url: str,
+              shop_titles: set[str] | None = None) -> tuple[str, dict | None]:
     """crawl_brand 와 같은 판정 — ok / 404 / members-only / no-price / http"""
     if not shop.allowed(url):
         return "robots", None
@@ -94,8 +96,24 @@ def fetch_one(http: cc.PoliteSession, shop: cc.Shop, no: int, url: str) -> tuple
     if len(r.text) < 2000 and "member/login" in r.text:
         return "members-only", None
     d = cc.parse_detail(r.text, url, shop)
-    if not d or not d.get("price"):
+    if not d:
         return "no-price", None
+    if not d.get("price"):
+        # crawl_brand 와 같은 판정 — 값이 없다고 상품이 아닌 게 아니다. 매장은 품절 상품의
+        # 값을 내려 버린다. 상품이 아닌 페이지(룩북·연예인·개인결제창)만 버리고 나머지는
+        # 값 없이 품절로 담는다(2026-09-06).
+        why = cc.not_a_product(d["name"], shop_titles or frozenset())
+        if not why:
+            cats = sorted(shop.membership.get(no, set())) or ([c] if (c := cc.cate_no_of(url)) else [])
+            verdicts = [cc.is_content_category(http, shop, c) for c in cats]
+            if verdicts and all(verdicts):
+                why = "룩북칸"
+        if not why and not (d.get("gallery") or d.get("image_url")):
+            why = "사진없음"
+        if why:
+            return "no-price", None
+        d["price_missing"] = True
+        d["soldout"] = True
     return "ok", d
 
 
@@ -115,7 +133,17 @@ def update_brand(http: cc.PoliteSession, shop: cc.Shop, log, first_week_of_month
         return rep
     final = urlparse(home.url)
     shop.base = f"{final.scheme}://{final.netloc}"
-    cc.load_categories(http, shop, BeautifulSoup(home.text, "lxml"), home.text)
+    home_soup = BeautifulSoup(home.text, "lxml")
+    # 매장 이름 모음 — parse_detail 이 이름을 못 찾으면 <title> 을 줍는다(dnsr 의 안내
+    # 페이지가 전부 이름 「DNSR」이었다). crawl_brand 와 같은 방식.
+    shop_titles = {shop.slug.replace("-", " ").casefold(), shop.slug.casefold()}
+    _og = home_soup.select_one('meta[property="og:title"]')
+    for raw in ((home_soup.title.get_text(strip=True) if home_soup.title else ""),
+                _og.get("content") if _og else ""):
+        for piece in re.split(r"\s*[-|｜]\s*", raw or ""):
+            if piece.strip():
+                shop_titles.add(piece.strip().casefold())
+    cc.load_categories(http, shop, home_soup, home.text)
     cc.enumerate_by_sitemap(http, shop)
     cc.crawl_category_lists(http, shop)
     listed = dict(shop.product_urls)
@@ -145,6 +173,14 @@ def update_brand(http: cc.PoliteSession, shop: cc.Shop, log, first_week_of_month
             for k in ("first_seen", "soldout_since", "missing_weeks"):
                 if k in prev:
                     d[k] = prev[k]
+            # 한 번 안 값은 다시 잃지 않는다(사람 지시 2026-09-06). 매장이 품절 상품의 값을
+            # 내려도 우리 값은 그대로 둔다 — 새 행이 옛 행을 통째로 갈아치우기 때문이다.
+            if not d.get("price") and prev.get("price"):
+                d["price"] = prev["price"]
+                d["price_kept"] = True
+                d["price_seen_at"] = prev.get("price_seen_at") or prev.get("crawled_at")
+            elif d.get("price"):
+                d["price_seen_at"] = d["crawled_at"]
             if prev.get("price") != d.get("price"):
                 rep["price_changed"] += 1
             if not prev.get("soldout") and d.get("soldout"):
@@ -155,12 +191,22 @@ def update_brand(http: cc.PoliteSession, shop: cc.Shop, log, first_week_of_month
             d["first_seen"] = now
             if d.get("soldout"):
                 d["soldout_since"] = now
+        # 값·재고가 바뀔 때만 자국을 남긴다 — 나중에 재입고·할인 알림의 바탕이다.
+        plog = list((prev or {}).get("price_log") or [])
+        if d.get("price") and (not plog or plog[-1][1] != d["price"]):
+            plog.append([now, d["price"]])
+        d["price_log"] = plog[-20:]
+        slog = list((prev or {}).get("stock_log") or [])
+        now_stock = "품절" if d.get("soldout") else "판매중"
+        if not slog or slog[-1][1] != now_stock:
+            slog.append([now, now_stock])
+        d["stock_log"] = slog[-20:]
         d["missing_weeks"] = 0
         d.pop("delisted", None)
         rows[no] = d
 
     def check(no: int, url: str):
-        status, d = fetch_one(http, shop, no, url)
+        status, d = fetch_one(http, shop, no, url, shop_titles)
         rep["reasons"][status] = rep["reasons"].get(status, 0) + 1
         return status, d
 
