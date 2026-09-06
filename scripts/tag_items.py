@@ -439,6 +439,49 @@ def quality_of(body: str) -> str:
     return "css_fragment" if CSS_RX.search(body) else "too_short"
 
 
+COLOR_TAIL = re.compile(
+    r"[\s_\-]+(?:black|white|ivory|beige|navy|grey|gray|brown|charcoal|khaki|olive|cream|"
+    r"blue|green|pink|red|burgundy|melange.*)$", re.I)
+
+
+def drop_boilerplate(brw: dict[str, str], items: list[dict]) -> int:
+    """브라우저가 설명글 대신 매장 껍데기를 담아 온 것을 버린다.
+
+    브라우저 수집은 탭을 눌러 설명을 펴는데, 안 펴진 채로 화면에 있던 글을 담는 수가 있다.
+    그러면 상품마다 똑같은 글이 붙는다.
+
+      insilence 31벌  「뒤로 메뉴 닫기 남성복 카테고리 … 긴팔티셔츠 반팔/슬리브리스 …」  (메뉴)
+      low-classic 14벌 「Details 주문 - 주문 후 품절 재고는 취소 처리될 수 있습니다 …」   (배송 안내)
+
+    메뉴가 붙은 탓에 「울 개버딘 스트럭쳐 팬츠」에 반팔·슬리브리스·롱슬리브가 다 붙었다.
+    insilence 는 남은 태그 모순 249건 가운데 45건을 혼자 이고 있었다(2026-09-06).
+
+    다만 「같은 글이 여러 벌에 붙었다」만으로는 못 가른다 — 색만 다른 같은 옷은 설명이
+    정말로 같다(213벌이 그렇다). 그래서 이름에서 색을 뗀 줄기나 품목이 여럿일 때만 버린다.
+    """
+    same: dict[str, list[str]] = {}
+    for u, t in brw.items():
+        if len(t) > 40:
+            same.setdefault(t, []).append(u)
+    info = {r["source_url"]: (COLOR_TAIL.sub("", (r["name"] or "").strip().lower()), r["category"])
+            for r in items}
+    n = 0
+    for t, us in same.items():
+        if len(us) < 3:
+            continue
+        # 목록에 남은 것만 본다 — 같은 글이 붙은 열넷 가운데 둘만 상품일 수 있다
+        # (low-classic 의 배송 안내가 그렇다: 카디건 하나와 키링 하나).
+        known = [info[u] for u in us if u in info]
+        if len(known) < 2:
+            continue
+        if len({k[0] for k in known}) == 1 and len({k[1] for k in known}) == 1:
+            continue          # 색만 다른 같은 옷 — 설명이 같은 게 맞다
+        for u in us:
+            brw.pop(u, None)
+            n += 1
+    return n
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--brands", nargs="*")
@@ -472,6 +515,7 @@ def main():
                     t = (b.get("description") or "").strip()
                     if b.get("source_url") and len(t) > len(brw.get(b["source_url"], "")):
                         brw[b["source_url"]] = t
+        drop_boilerplate(brw, items)
         for r in items:
             d = crawl.get(str(r["product_no"]), {})
             o = ocr.get(str(r["product_no"]), {})
