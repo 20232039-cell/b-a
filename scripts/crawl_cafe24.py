@@ -793,6 +793,50 @@ _TRAIL_PAREN = re.compile(
     r"\s*[\(\[]\s*(?:[^\)\]]{0,24})\s*[\)\]]\s*$")
 
 
+# 괄호 없이 「- DENIM」·「_ light denim」·「/ BLACK DENIM」처럼 색만 붙이는 매장도 있다.
+# 머리 낱말은 뒤에 온다는 규칙 때문에 그 색이 품목을 이겼다 — 데님은 색이면서 품목이라
+# 카디건·셔츠·집업·머플러·짐색·재킷 열세 벌이 청바지 칸에 들어가 있었다(2026-09-07).
+#   frizmworks  Heavy wool round cardigan _ denim
+#   rssc        STRIPE MIXED DENIM TRUCKER JACKET - DENIM
+#   moif        [AW22]UNIFORM SHIRT / BLACK DENIM
+# 꼬리가 전부 색 낱말일 때만, 그리고 떼고도 품목 낱말이 남을 때만 뗀다.
+_SHADE_WORDS = {
+    "denim", "데님", "light", "라이트", "dark", "다크", "deep", "딥", "pale",
+    "washed", "워시드", "워싱", "vintage", "빈티지", "melange", "멜란지", "mixed",
+    "faded", "dusty", "더스티", "aged", "soft", "solid", "basic", "color", "colors",
+}
+
+
+def _color_tail_words() -> set:
+    ws = set(_SHADE_WORDS)
+    for key, aliases in COLOR_VOCAB.items():
+        ws.add(key.lower())
+        for a in aliases:
+            ws.update(a.lower().split())
+    return ws
+
+
+_TRAIL_SEP = re.compile(r"[-–_/|]")
+
+
+def strip_trailing_color(name: str) -> str:
+    """이름 끝에 붙은 색 이름을 뗀다. 떼고도 품목 낱말이 남을 때만 뗀다."""
+    words = _color_tail_words()
+    s = (name or "").strip()
+    for _ in range(4):
+        hits = list(_TRAIL_SEP.finditer(s))
+        if not hits:
+            break
+        head, tail = s[:hits[-1].start()].strip(), s[hits[-1].end():].strip()
+        toks = [t for t in re.split(r"[\s/]+", tail.lower()) if t]
+        if not head or not toks or len(toks) > 3 or not all(t in words for t in toks):
+            break
+        if not (match_head(head, ITEM_TYPE_VOCAB) or match_head(head, ACC_TYPE_VOCAB)):
+            break          # 떼면 무슨 물건인지 알 수 없게 된다 — 그냥 둔다
+        s = head
+    return s
+
+
 def classify_category(name: str, category_names: list[str], description: str = "") -> str:
     if any(PET_CATEGORY.match(c or "") for c in category_names):
         return "pet"
@@ -803,7 +847,7 @@ def classify_category(name: str, category_names: list[str], description: str = "
         return "bottoms"
     # 이름 맨 뒤 괄호는 색·소재를 적는 자리다 — 머리 낱말로 세면 안 된다.
     # 「NEWSBOY CAP (DENIM)」이 데님이 뒤에 있다는 이유로 하의가 됐다(2026-09-05).
-    name = _TRAIL_PAREN.sub("", name)
+    name = strip_trailing_color(_TRAIL_PAREN.sub("", name))
     # 잡화 세분류가 먼저다 — 옷 어휘와 겹치는 낱말(니트 스카프·플리스 베레·데님 캡)이 있고,
     # 상품명은 「무엇인지」를 뒤에 적으므로 뒤에 걸린 쪽이 머리 낱말이다.
     if GARMENT_WORD.search(name):
@@ -2312,7 +2356,7 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
             # 여기서는 안 떼서 두 칸이 어긋났다. osoi 「SHOULDER BROCLE_SMALL [DENIM SKY]」는
             # category_code 가 bags 인데 category 라벨이 Denim 이었다 — 앱은 라벨로 거르므로
             # 가방이 청바지 칸에 떴다(23벌, 2026-09-06).
-            head_name = _TRAIL_PAREN.sub("", d["name"])
+            head_name = strip_trailing_color(_TRAIL_PAREN.sub("", d["name"]))
             acc = match_acc(head_name) if code in ACC_TO_CATEGORY.values() else ""
             item = acc or match_head(head_name, ITEM_TYPE_VOCAB)
             if fix and fix.get("품목"):
