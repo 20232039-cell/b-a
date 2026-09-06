@@ -743,6 +743,50 @@ def field_color(text: str) -> str:
     return _FIELD_COLOR.get(key, "")
 
 
+# ── 시즌 ────────────────────────────────────────────────────────────────
+# 매장은 시즌을 상품 데이터에 안 적지만, 상세 그림을 시즌 폴더에 올린다
+# (kirsh 「/26SSIMG/MELLOW/…」, siyazu 「SIYAZU_23FALL_topimage.jpg」).
+# 40,779벌 가운데 8,025벌에서 시즌이 나온다 — 그림 주소 7,020 · 상품명 1,005.
+# 여러 장이 갈리는 상품은 139벌(1.9%)뿐이고 대개 25FW+26SS(다시 올린 옷)다.
+# 그럴 때는 가장 많이 나온 시즌을, 동점이면 최신을 쓴다(2026-09-06).
+# 연도 앞에 글자가 붙어 있으면 시즌이 아니다. 이 빗장이 없으면 두 가지가 걸린다
+# (2026-09-06 실측):
+#   · URL 의 %20(빈칸)이 20 으로 남는다 — 「a20summer20line20knit」이 20SS 가 됐다(175벌).
+#   · 해시 파일 이름 — 「f65d7c39318c27fa08be…」의 27fa 가 27FW 가 됐다(kirsh 362벌).
+# 두 글자 약어 fa·su·sp·wi 도 뺀다. 매장은 SS·FW·AW 로 쓰고, 저 넷은 해시에 흔한 조각이다.
+_SEASON_RX = re.compile(
+    r"(?<![0-9a-z])(?:20)?(\d{2})\s*[-_/]?\s*(ss|fw|aw|spring|summer|fall|autumn|winter)(?![a-z0-9]*\d)"
+    r"|(?<![a-z0-9])(ss|fw|aw|spring|summer|fall|autumn|winter)\s*[-_/]?\s*(?:20)?(\d{2})(?![0-9])", re.I)
+_SEASON_HALF = {"ss": "SS", "spring": "SS", "summer": "SS",
+                "fw": "FW", "fall": "FW", "autumn": "FW", "aw": "FW", "winter": "FW"}
+
+
+def season_in(text: str) -> str:
+    """「24FW」·「SS25」·「23FALL」 꼴을 「24FW」로. 못 찾으면 빈 문자열."""
+    m = _SEASON_RX.search(text or "")
+    if not m:
+        return ""
+    yr, half = (m.group(1), m.group(2)) if m.group(1) else (m.group(4), m.group(3))
+    half = _SEASON_HALF.get((half or "").lower(), "")
+    if not half or not (yr or "").isdigit():
+        return ""
+    y = int(yr)
+    return f"{y:02d}{half}" if 18 <= y <= 27 else ""
+
+
+def season_of(name: str, detail_images: list | None) -> str:
+    """상품명이 먼저다 — 매장이 직접 적은 것이므로. 없으면 상세 그림 주소에서."""
+    got = season_in(name)
+    if got:
+        return got
+    found = [s for s in (season_in(u) for u in (detail_images or [])) if s]
+    if not found:
+        return ""
+    top = collections.Counter(found).most_common()
+    best = max(n for _, n in top)
+    return max(s for s, n in top if n == best)   # 동점이면 최신
+
+
 def pick_color(name: str, description: str, spec: dict | None = None,
                options: list | None = None) -> str:
     # 이름 끝 괄호에 색을 적어 두면 그게 매장이 말하는 그 옷 색이다 — 앞은 제품 라인 이름이다.
@@ -1725,6 +1769,45 @@ def load_dropped() -> set[tuple[str, str]]:
     return out
 
 
+
+
+def fill_season_gaps(rows: list[dict]) -> int:
+    """번호 사이를 메운다 — 위아래 기둥의 시즌이 같을 때만.
+
+    cafe24 는 상품을 등록 순서대로 번호 매긴다. 시즌을 아는 상품을 기둥 삼아 정렬해 보면
+    23개 브랜드 전부에서 번호가 커질수록 시즌이 최신이었다(뒤집힘 0~10.6%, 2026-09-06).
+    그래서 어떤 상품의 번호가 「24SS 기둥」과 「24SS 기둥」 사이에 있으면 그 사이에 등록된
+    것이므로 24SS 다. 위아래가 다른 시즌이면(경계) 비워 둔다.
+
+    홀드아웃(아는 것을 하나씩 빼고 맞히기): 맞음 8,564 · 틀림 168 = 98.1%.
+    틀린 것도 전부 이웃한 시즌이다(26SS→25FW 12 · 26FW→25FW 11). 2,519벌을 더 채운다.
+
+    매장이 적은 등록일은 우리가 안 받아 온다. crawled_at 은 우리가 긁은 날이라
+    (2026-09-02 25,903 · 09-05 12,423) 시즌으로 못 쓴다.
+    """
+    import bisect
+    by_brand: dict[str, list[dict]] = {}
+    for r in rows:
+        if str(r.get("product_no") or "").isdigit():
+            by_brand.setdefault(r["brand_slug"], []).append(r)
+    filled = 0
+    for rs in by_brand.values():
+        anchors = sorted((int(r["product_no"]), r["season"]) for r in rs if r.get("season"))
+        if len(anchors) < 10:
+            continue
+        for r in rs:
+            if r.get("season"):
+                continue
+            no = int(r["product_no"])
+            i = bisect.bisect_left(anchors, (no, ""))
+            lo = anchors[i - 1] if i > 0 else None
+            hi = anchors[i] if i < len(anchors) else None
+            if lo and hi and lo[1] == hi[1]:
+                r["season"] = lo[1]
+                filled += 1
+    return filled
+
+
 def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
     rows = []
     per_brand: dict[str, int] = {}
@@ -1846,7 +1929,7 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
                 "price": d["price"],
                 "representative_color": pick_color(d["name"], d.get("description", ""), d.get("spec"),
                                                    d.get("options")),
-                "season": "",
+                "season": season_of(d["name"], d.get("detail_images")),
                 "status": "SOLD_OUT" if (d.get("soldout") or d.get("delisted")) else "ON_SALE",
                 "image_url": d["image_url"],
                 # 회원 전용·리다이렉트로 홈 주소만 남은 건(badblood 208, haleine 14)은 cafe24 표준 상세 주소로 복원
@@ -1865,6 +1948,7 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
                                         and len(d.get("description") or "") < 50) else "",
             })
             per_brand[slug] = per_brand.get(slug, 0) + 1
+    fill_season_gaps(rows)
     with OUT_CSV.open("w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=CSV_FIELDS)
         w.writeheader()
