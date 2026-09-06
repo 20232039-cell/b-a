@@ -101,6 +101,13 @@ def canon_label(s: str) -> str | None:
 RANGE_RX = re.compile(r"^\s*(\d+(?:[.,]\d+)?)\s*[~\-–—]\s*(\d+(?:[.,]\d+)?)\s*$")
 
 
+# 표의 머리말이지 사이즈 이름이 아닌 말. 「52 SIZE 61 36.2」에서 앞의 52 를 놓치면
+# 「SIZE」가 사이즈 이름이 되어 앱 화면에 「SIZE」라는 사이즈가 섰다(2026-09-06).
+# SIZE_NAME 이 네 글자 영숫자를 받아 그냥 통과한다. 읽기 단계에서 줄을 버리면 멀쩡한
+# 치수까지 함께 날아가므로(frizmworks 총장 73·어깨 58…), 이름만 비운다.
+NOT_A_SIZE = re.compile(r"(?i)^(?:sizes?|사이즈|cm|inch|in|item|model|note)$")
+
+
 def _row_name_ok(nm: str) -> bool:
     """값 줄 머리의 사이즈 이름인가. 「M」·「00F」 같은 짧은 표기와, 세트 상품의 옷 이름
     (「Tube Top」·「Bolero」)을 함께 받는다."""
@@ -647,9 +654,22 @@ def _label_run_one(text: str) -> tuple[list[str], dict[str, list[float]]] | None
         # 값 줄 — 사이즈 이름 하나 + 값 k 개씩 끊는다
         names, out = [], {c: [] for c in cols if c}
         pos = i + k                            # 사이즈 이름 자리(머리줄 바로 뒤)
+        sticky = 0                             # 첫 줄에서 정해진 「이름 뒤 군더더기 칸」 수
         while pos + k < len(tok) + 1 and len(names) < 8:
             nm = tok[pos]
-            cells = tok[pos + 1:pos + 1 + k]
+            # 사이즈 이름이 두 토막인 표가 있다 — 「48 SIZE 103.5 39.4 …」(noirer 914벌 ·
+            # easy-no-easy 22 · blayer 21 · vunque 12). 「SIZE」를 값으로 읽으려다 줄이
+            # 통째로 깨져, 라벨을 못 알아본 칸(「어리단면」)과 겹치면 값이 한 칸씩 밀렸다.
+            # 총장 103.5 가 버려지고 허리 39.4 가 총장이 됐다(2026-09-06). 이름 다음 토막이
+            # 「SIZE」·「사이즈」면 이름의 일부로 보고 건너뛴다.
+            if pos + 1 < len(tok) and re.fullmatch(r"(?i)sizes?|사이즈", tok[pos + 1]):
+                skip = sticky = 1
+            else:
+                # 표는 네모나다 — 첫 줄이 「48 SIZE …」였으면 아랫줄도 같은 자리에 칸이 있다.
+                # 판독기가 그 칸을 늘 글자로 읽어 주지는 않는다: noirer 50번 줄은 「SIZE」가
+                # 「5126」으로 읽혀 51.3 이 총장이 됐다(2026-09-06). 첫 줄에서 본 대로 건너뛴다.
+                skip = sticky
+            cells = tok[pos + 1 + skip:pos + 1 + skip + k]
             if len(cells) < k or not all(re.fullmatch(NUMISH, c, re.I) for c in cells):
                 break
             if re.fullmatch(NUMISH, nm, re.I) and not _row_name_ok(nm):
@@ -658,7 +678,7 @@ def _label_run_one(text: str) -> tuple[list[str], dict[str, list[float]]] | None
             for c, raw in zip(cols, cells):
                 if c:
                     out[c].append(fix_value(c, re.sub(r"(?i)cm$", "", raw)))
-            pos += k + 1
+            pos += k + 1 + skip
         out = {c: v for c, v in out.items() if any(x is not None for x in v)}
         if names and len(out) >= 2 and (best is None or len(out) > len(best[1])):
             best = (names, out)
@@ -1156,7 +1176,7 @@ def clean_names(out: dict) -> dict:
                 y = z
             if y in _OCR_SIZE and alpha >= 1:
                 y = _OCR_SIZE[y]; n["8·5 를 S 로"] += 1
-            elif canon_label(y) or re.fullmatch(r"[가-힣]", y):
+            elif canon_label(y) or re.fullmatch(r"[가-힣]", y) or NOT_A_SIZE.match(y):
                 y = ""; n["이름이 아니라 지움"] += 1
             new.append(y)
         if not any(new):
