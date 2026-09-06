@@ -591,11 +591,13 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
         if sp.exists():
             sized_urls = set(json.loads(sp.read_text(encoding="utf-8")))
         read_n: dict[int, int] = {}
+        text_len: dict[int, int] = {}
         if main.exists():
             for l in main.read_text(encoding="utf-8").splitlines():
                 if l.strip():
                     o = json.loads(l)
                     read_n[o["product_no"]] = len(o.get("images") or [])
+                    text_len[o["product_no"]] = len(o.get("ocr_text") or "")
         for no, d in latest.items():
             if no not in done:
                 continue
@@ -612,6 +614,11 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
             if select in ("no-size", "ocr", "gaps") or (select == "all" and d.get("source_url") in ocr_sized):
                 done.discard(no)
                 continue
+            # 옛 6000자 상한에 잘린 기록은 어떤 갈래에서도 다시 읽는다. 사이즈 표는 상세
+            # 그림 맨 끝에 있어 앞에서 자르면 통째로 날아간다 — 그래서 「원문에 치수가 없다」로
+            # 세어졌다(2026-09-06: siyazu 389 등 956벌이 그대로 남아 있었다).
+            if 5995 <= text_len.get(no, 0) <= 6005:
+                done.discard(no)
             avail = len([u for u in (d.get("detail_images") or [])
                          if u not in shared and not skip_image(u)])
             if read_n.get(no, 0) < min(max_images, avail):
