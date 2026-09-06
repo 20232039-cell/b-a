@@ -208,13 +208,17 @@ ITEM_TYPE_VOCAB = {
     "트렌치": ["trench", "트렌치"],
     "점퍼": ["jumper", "점퍼"],
     "탑": ["top", "탑", "sleeveless", "슬리브리스", "민소매", "tank", "탱크", "뷔스티에", "bustier",
-           "캐미솔", "camisole", "브라렛", "bralette"],
+           "캐미솔", "camisole", "브라렛", "bralette", "브라탑", "bra top", " 브라 "],
     # 속옷·수영복도 실측 표가 있는 옷이다 — 매장이 ACC 카테고리에 넣어 두어 잡화로 갔다
     # 「브라」만 두면 「브라운」에 걸린다 — 뒤에 빈칸이 오는 것만 받는다.
+    # 브라는 하의가 아니다 — 브라·브라탑·브라렛은 위 「탑」으로 옮겼다(2026-09-07).
+    # 세트(「브라탑 & 드로즈」·「브라렛 & 팬티」)는 뒷말이 이겨 그대로 언더웨어로 남는다.
     "언더웨어": ["boxer brief", "boxer", "brief", "브리프", "드로즈", "팬티", "언더웨어",
-             "underwear", "bralette", "브라렛", "브라탑", "bra top", " 브라 "],
+             "underwear"],
     "수영복": ["비키니", "bikini", "수영복", "swimsuit", "swimwear", "래쉬가드", "rashguard"],
-    "수영복하의": ["bikini bottom", "swim bottom", "비키니 하의", "swim short", "보드숏", "board short"],
+    # 「비키니 BOTTOM」·「비키니 바텀」처럼 반만 영어로 적는 매장이 있다 — 안 받으면 하의가 상의가 된다
+    "수영복하의": ["bikini bottom", "비키니 bottom", "비키니 바텀", "swim bottom", "비키니 하의",
+              "swim short", "보드숏", "board short"],
     "롱슬리브": ["long sleeve", "long-sleeve", "longsleeve", "long sleeves",
              "롱슬리브", "롱 슬리브", "긴팔"],
     "쇼츠": ["shorts", "쇼츠"],
