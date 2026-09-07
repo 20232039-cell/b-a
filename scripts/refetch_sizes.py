@@ -130,6 +130,12 @@ def refetch(http: cc.PoliteSession, shop: cc.Shop, only_missing: bool, log, fiel
         if max_minutes and (time.time() - started) / 60 > max_minutes:
             log(f"[{shop.slug}] 시간 상한 {max_minutes:.0f}분 초과 — {i - 1}/{len(todo)} 에서 접는다(나머지는 다음 실행에)")
             break
+        # 진행 줄을 여기서 찍는다. 예전에는 이 print 가 고리 맨 끝에 있었는데, --fields 에 text 가
+        # 들면 상세를 새로 읽고 성공한 자리에서 곧바로 continue 하기 때문에 절대 닿지 못했다.
+        # 그래서 큰 매장(insilence 1,035 · xlim 689)을 두 시간 돌려도 로그가 한 줄도 안 나와
+        # 멈춘 것처럼 보였다 — 실은 잘 돌고 있었다(2026-09-07).
+        if i % 100 == 1 and i > 1:
+            log(f"[{shop.slug}] … {i - 1}/{len(todo)} · 표 {got}")
         d = rows[no]
         url = d.get("source_url", "")
         url = url if cc.product_no_of(url) else f"{shop.base}/product/detail.html?product_no={no}"
@@ -170,8 +176,6 @@ def refetch(http: cc.PoliteSession, shop: cc.Shop, only_missing: bool, log, fiel
             d["size_source"] = "html"
             touched.append(no)
             got += 1
-        if i % 100 == 0:
-            log(f"[{shop.slug}] … {i}/{len(todo)} · 표 {got}")
     if out_dir:
         out_dir.mkdir(parents=True, exist_ok=True)
         with (out_dir / f"{shop.slug}.{k}.jsonl").open("w", encoding="utf-8") as f:
