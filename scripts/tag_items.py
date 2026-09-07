@@ -175,6 +175,26 @@ def strip_reviews(text: str) -> str:
     return t
 
 
+# 상세 이미지에 「PRODUCT GUIDE」 눈금자를 넣는 매장이 있다. OCR 이 그 눈금의 이름을
+# 통째로 읽어 온다 — 이 옷의 핏이 아니라 자의 눈금 이름이다.
+#
+#   PRODUCT GUIDE
+#   핏     타이트  슬림  레귤러  세미 와이드  와이드      ← 이 옷은 이 중 하나인데 다 적힌다
+#   촉감   부드러움  보통  뻣뻣함
+#
+# 그래서 blr 「Waffle Mix Washed Sweat Pants」가 슬림핏이면서 오버핏이었다. 눈금자가 있는
+# 상품이 1,602벌이다(matin-kim 536 · badblood 462 · nick-nicole 449 · blr 121, 2026-09-07).
+# 한 줄에 핏 낱말이 셋 이상 잇달아 나오면 그건 옷 이야기가 아니라 자다. OCR 오독을 감안해
+# 낱말 사이에 잡스러운 글자 몇 개는 봐준다(「레글러」·「벗뱃함」처럼 눈금 이름도 깨져 온다).
+_FIT_WORD = (r"(?:타이트|슬림|레귤러|레글러|regular|세미\s*와이드|와이드|오버\s*핏|오버핏|루즈\s*핏|루즈핏|슬림\s*핏|슬림핏)")
+SCALE_BAR = re.compile(rf"{_FIT_WORD}(?:[^\n가-힣]{{0,8}}{_FIT_WORD}){{2,}}", re.I)
+
+
+def strip_scale_bar(text: str) -> str:
+    """상세 이미지의 핏 눈금자를 걷어낸다. 눈금 이름은 이 옷의 핏이 아니다."""
+    return SCALE_BAR.sub(" ", text or "")
+
+
 def strip_other_products(text: str, back: int = 60) -> str:
     """값이 나오는 자리 앞 60자를 문장 끝까지 되짚어 도려낸다 — 거기 남의 상품 이름이 있다.
 
@@ -264,7 +284,7 @@ class Tagger:
 
     def tag(self, category: str, name: str, body: str, color_text: str, quality: str,
             sleeve_cm: float | None = None) -> dict[str, list]:
-        text = f"{name}\n{strip_other_products(strip_reviews(body))}".lower()
+        text = f"{name}\n{strip_other_products(strip_scale_bar(strip_reviews(body)))}".lower()
         for b in self.text_blocklist:  # '시어링'→시어, '레이어드 스타일링'→레이어드 같은 오탐을 먼저 지운다
             text = text.replace(b, " " * len(b))
         hits = self._scan(self.text_rules, text)
