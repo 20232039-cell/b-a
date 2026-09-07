@@ -151,6 +151,12 @@ _PRICE_RUN = re.compile(
     r"(?:\s*(?:\(\s*\d+%\s*\))?\s*(?:krw|won)?\s*\d{1,3},\d{3}\s*(?:krw|won|원)?)*", re.I)
 _SENT_END = re.compile(r"[.。!?\n|·•▪]|다\s|요\s")
 
+# 통화 표시 없이 값만 적는 매장이 있다 — depound 「slim fit t-shirt - navy 58,000」,
+# mardi-mercredi·matin-kim·the-coldest-moment 의 「함께 보는 상품」 블록이 그렇다.
+# 낱개로 보면 값인지 아닌지 알 수 없어서(「1,000회 세탁」) 셋 이상 잇달아 있을 때만 값으로 본다.
+_PRICE_BARE = re.compile(r"(?<![\d,.])\d{1,3},\d{3}(?![\d,.])")
+_CUR_NEAR = re.compile(r"(?:krw|won|원)", re.I)
+
 
 # 손님 후기와 문의 글. 매장이 상품 설명 칸에 그것을 함께 담아 온다 — siyazu 는 설명 666자가
 # 통째로 후기+Q&A+가격줄이라 상품 설명이 아예 없었다(783벌, 2026-09-06). 후기는 사이즈·핏·색을
@@ -209,19 +215,31 @@ def strip_other_products(text: str, back: int = 60) -> str:
     있다. 매장은 추천 상품 블록을 가운데 끼워 넣고 그 뒤에 다시 제 상품의 소재·관리법을
     적는다. 167을 고치려고 7,226을 버릴 수는 없다.
     """
-    if not text or not _PRICE_RUN.search(text):
+    if not text:
+        return text
+    spans = [(m.start(), m.end()) for m in _PRICE_RUN.finditer(text)]
+    # 통화 표시 없는 값은 셋 이상 모여 있을 때만 값으로 본다(위 _PRICE_BARE 주석)
+    bare = [(m.start(), m.end()) for m in _PRICE_BARE.finditer(text)
+            if not _CUR_NEAR.search(text[m.end():m.end() + 6])
+            and not _CUR_NEAR.search(text[max(0, m.start() - 6):m.start()])]
+    if len(bare) >= 3:
+        spans = sorted(set(spans + bare))
+    if not spans:
         return text
     out, last = [], 0
-    for m in _PRICE_RUN.finditer(text):
-        win_from = max(last, m.start() - back)
-        win = text[win_from:m.start()]
+    for start, end in spans:
+        if start < last:
+            last = max(last, end)
+            continue
+        win_from = max(last, start - back)
+        win = text[win_from:start]
         k = 0
         for mm in _SENT_END.finditer(win):
             k = mm.end()
         cut = win_from + k
         if cut >= last:
             out.append(text[last:cut])
-        last = m.end()
+        last = end
     out.append(text[last:])
     return "".join(out)
 
