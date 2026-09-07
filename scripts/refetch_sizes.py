@@ -56,6 +56,27 @@ def _gap_urls() -> set:
     return _GAPS
 
 
+_NONAME: set | None = None
+
+
+def _noname_urls() -> set:
+    """사이즈 표는 두 칸 이상인데 이름이 없는 상품. 그 이름은 구매 옵션에만 있다.
+
+    수집기가 `<select>` 만 보던 탓에 옵션이 아예 안 걷힌 상품이 3,685벌이다(2026-09-07,
+    커밋 e01917d). 단추 목록을 읽도록 고쳤지만 채우기 한 바퀴가 훑는 것은 「빈 축이 있는
+    상품」이라 이 옷들에는 좀처럼 닿지 않는다 — run #16 에서 옵션이 새로 붙은 것이 25벌뿐이었다.
+    그래서 이 옷들만 골라 한 번 다시 열 갈래를 둔다.
+    """
+    global _NONAME
+    if _NONAME is None:
+        sp = cc.CRAWL_DIR.parent / "product_sizes.json"
+        out = json.loads(sp.read_text(encoding="utf-8")) if sp.exists() else {}
+        _NONAME = {u for u, e in out.items()
+                   if not (e or {}).get("size_names")
+                   and max((len(v) for v in ((e or {}).get("sizes") or {}).values()), default=0) > 1}
+    return _NONAME
+
+
 def wants(d: dict, select: str, cat: str) -> bool:
     if select == "all":
         return True
@@ -71,6 +92,9 @@ def wants(d: dict, select: str, cat: str) -> bool:
         return cat in GARMENT_CATS          # 옷 전부(액세서리·가방·신발 제외) — 파서를 고친 뒤 한 번 다시 받을 때
     if select == "no-size":
         return not d.get("size_table")
+    if select == "no-size-name":
+        # 표는 있는데 이름이 없는 옷 — 구매 옵션을 다시 받아 이름을 채운다
+        return d.get("source_url") in _noname_urls()
     if select == "no-detail-images":
         # 상세 그림을 한 장도 못 건진 상품 — 수집기가 그림을 버렸던 자리다
         # (2026-09-05: 이름에 「logo」가 든 옷 611벌이 그랬다)
@@ -165,7 +189,7 @@ def main():
     ap.add_argument("--only-missing", action="store_true")
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--fields", default="size", help="size 또는 size,text")
-    ap.add_argument("--select", default="no-size", choices=["no-size", "short-desc-or-no-size", "no-detail-images", "garments", "gaps", "all"])
+    ap.add_argument("--select", default="no-size", choices=["no-size", "no-size-name", "short-desc-or-no-size", "no-detail-images", "garments", "gaps", "all"])
     ap.add_argument("--shard", default="1/1", help="k/n (Actions 샤딩)")
     ap.add_argument("--out-dir", help="갱신 행만 조각 파일로 (collect 가 합침)")
     ap.add_argument("--max-minutes", type=float, default=0, help="브랜드 하나에 쓸 시간 상한(분) — 넘으면 그 브랜드만 접는다")

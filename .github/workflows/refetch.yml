@@ -30,7 +30,7 @@ on:
         required: false
         default: "size,text"
       select:
-        description: "no-size | short-desc-or-no-size | no-detail-images | garments | gaps | all"
+        description: "no-size | no-size-name | short-desc-or-no-size | no-detail-images | garments | gaps | all"
         required: false
         default: "no-size"
       per_shard:
