@@ -77,6 +77,30 @@ def _noname_urls() -> set:
     return _NONAME
 
 
+_DUPS: set | None = None
+
+
+def _dup_urls() -> set:
+    """브랜드·이름·색·값이 같은데 접히지 않고 남은 상품. 구매 옵션이 갈라 준다.
+
+    coor 「머드 다잉 패디드 데님 자켓 (워시드인디고)」 288,000원 두 벌을 실제로 열어 보니
+    no=2453 은 사이즈가 S·M·L·XL 이고 no=2610 은 「WOMEN FREE」였다. 같은 옷의 남성 사이즈와
+    여성 프리 사이즈를 따로 올린 것이다 — 접으면 한쪽을 잃는다(어깨 54.0 대 50.0 이 그래서다).
+    그런데 이 옷들은 사이즈 표가 한 칸이라 no-size-name 갈래에 안 걸려 옵션을 못 받았다.
+    옵션을 받아 두면 접을지 말지가 짐작이 아니라 근거로 갈린다(2026-09-07).
+    """
+    global _DUPS
+    if _DUPS is None:
+        import collections
+        g = collections.defaultdict(list)
+        with (cc.DATA / "products_full.csv").open(encoding="utf-8-sig") as f:
+            for r in csv.DictReader(f):
+                g[(r["brand_slug"], (r["name"] or "").strip().casefold(),
+                   (r.get("representative_color") or "").strip().casefold(), r["price"])].append(r["source_url"])
+        _DUPS = {u for v in g.values() if len(v) > 1 for u in v}
+    return _DUPS
+
+
 def wants(d: dict, select: str, cat: str) -> bool:
     if select == "all":
         return True
@@ -92,6 +116,9 @@ def wants(d: dict, select: str, cat: str) -> bool:
         return cat in GARMENT_CATS          # 옷 전부(액세서리·가방·신발 제외) — 파서를 고친 뒤 한 번 다시 받을 때
     if select == "no-size":
         return not d.get("size_table")
+    if select == "dups":
+        # 같은 이름·색·값으로 여러 벌 남은 상품 — 옵션을 받아 접을지 말지를 가린다
+        return d.get("source_url") in _dup_urls()
     if select == "no-size-name":
         # 표는 있는데 이름이 없는 옷 — 구매 옵션을 다시 받아 이름을 채운다
         return d.get("source_url") in _noname_urls()
@@ -193,7 +220,7 @@ def main():
     ap.add_argument("--only-missing", action="store_true")
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--fields", default="size", help="size 또는 size,text")
-    ap.add_argument("--select", default="no-size", choices=["no-size", "no-size-name", "short-desc-or-no-size", "no-detail-images", "garments", "gaps", "all"])
+    ap.add_argument("--select", default="no-size", choices=["no-size", "no-size-name", "dups", "short-desc-or-no-size", "no-detail-images", "garments", "gaps", "all"])
     ap.add_argument("--shard", default="1/1", help="k/n (Actions 샤딩)")
     ap.add_argument("--out-dir", help="갱신 행만 조각 파일로 (collect 가 합침)")
     ap.add_argument("--max-minutes", type=float, default=0, help="브랜드 하나에 쓸 시간 상한(분) — 넘으면 그 브랜드만 접는다")

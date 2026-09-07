@@ -2471,7 +2471,9 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
             tbl_of[(slug, str(d["product_no"]))] = json.dumps(d.get("size_table"), ensure_ascii=False, sort_keys=True) if d.get("size_table") else ""
             per_brand[slug] = per_brand.get(slug, 0) + 1
     url_of = {(r["brand_slug"], str(r["product_no"])): _url_stem(r.get("source_url") or "") for r in rows}
-    dropped_rerun = fold_reruns(rows, gal_of, tbl_of, url_of)
+    opt_of = {(r["brand_slug"], str(r["product_no"])): tuple(o.strip() for o in (r.get("options") or "").split("|") if o.strip())
+              for r in rows}
+    dropped_rerun = fold_reruns(rows, gal_of, tbl_of, url_of, opt_of)
     fill_season_gaps(rows)
     # 번호 보간으로도 안 채워진 것은 사진 날짜로 한 번 더 — 브랜드마다 먼저 맞혀 보고서만.
     n_img = season_from_image_date(rows)
@@ -2485,6 +2487,31 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
 
 
 _URL_STEM = re.compile(r"^https?://[^/]+(/.*?)/?(\d+)/?$")
+
+
+_OPT_STOCK_TAIL = re.compile(r"\s*[\[\(]?\s*(?:품절|sold\s?out|out\s*of\s*stock|일시\s?품절|재입고\s?예정|"
+                            r"only\s*\d+\s*left|low\s*stock|품절\s*임박|재고\s*\d+\s*개?|\d+\s*개?\s*남음)"
+                            r"\s*[\]\)]?\s*$", re.I)
+
+
+def _size_option_set(opts) -> frozenset:
+    """구매 옵션 목록을 견줄 수 있는 꼴로 만든다 — 안내 문구를 버리고 재고 표시를 뗀다.
+
+    같은 옷인데 목록이 달라 보이는 까닭이 셋 있었고 셋 다 상품이 다른 것과 무관하다(2026-09-07):
+      · 재고 표시     「XXS [Sold out]」 대 「XXS」   — 크롤 시점의 재고 상태
+      · 안내 문구     「- [필수] Choose your size -」가 한쪽에만 남는다
+      · 품절 사이즈   매장이 다 팔린 치수를 목록에서 내린다
+    이걸 안 씻고 견주면 같은 티셔츠 두 줄이 「다른 상품」으로 갈려 62묶음이 잘못 남았다.
+    """
+    out = set()
+    for o in opts or ():
+        o = str(o).strip()
+        if not o or OPTION_PROMPT.match(o):
+            continue
+        o = _OPT_STOCK_TAIL.sub("", o).strip()
+        if o:
+            out.add(o.upper())
+    return frozenset(out)
 
 
 def _tables_conflict(tables: list[str], tol: float = 1.0) -> bool:
@@ -2529,7 +2556,8 @@ def _url_stem(u: str) -> str:
     return stem
 
 
-def fold_reruns(rows: list[dict], gal: dict, tbl: dict | None = None, url: dict | None = None) -> int:
+def fold_reruns(rows: list[dict], gal: dict, tbl: dict | None = None, url: dict | None = None,
+                opt: dict | None = None) -> int:
     """매장이 같은 옷을 두 번 올린 것을 접는다.
 
     dunst 는 2022~23년 옷을 통째로 다시 등록해 두었다 — 이름·색·값이 같고 갤러리 열두 장이
@@ -2563,6 +2591,30 @@ def fold_reruns(rows: list[dict], gal: dict, tbl: dict | None = None, url: dict 
         # 4cm 차이는 재는 사람의 손떨림이 아니라 다른 치수다. 접으면 한 벌을 잃는다.
         ts = [(tbl or {}).get((k[0], str(r["product_no"])), "") for r in v]
         same_table = len(set(ts)) == 1 and ts[0] != ""
+        # 구매 옵션은 매장이 스스로 하는 말이라 어떤 짐작보다 세다.
+        # coor 「머드 다잉 패디드 데님 자켓 (워시드인디고)」 288,000원 두 벌을 열어 보니
+        #   no=2453 → S · M · L · XL      no=2610 → WOMEN FREE
+        # 이름·색·값이 같은 남성 사이즈와 여성 프리 사이즈였다. 접었으면 여성용을 잃는다.
+        # 반대로 옵션이 글자까지 같으면 같은 사이즈를 파는 같은 옷이다 — 실측이 1~2cm
+        # 달라도 매장이 다시 잰 것이다(coor 「페이크 레더 카 코트 (블랙)」 총장 81.5 대 80.0,
+        # 둘 다 WOMEN FREE). 2026-09-07 실측: 남은 100묶음이 72(다름) 대 28(같음)로 갈렸다.
+        os_ = [_size_option_set((opt or {}).get((k[0], str(r["product_no"])), ())) for r in v]
+        have_opt = [o for o in os_ if o]
+        if len(have_opt) >= 2:
+            # 사이즈 갈래가 아예 안 겹치면 다른 옷이다 — 가장 센 증거다.
+            #   같은 자켓 두 줄: {S,M,L,XL} 과 {WOMEN FREE} (남성 사이즈와 여성 프리 사이즈)
+            if any(not (a & b) for a in have_opt for b in have_opt):
+                continue
+            # 글자까지 같으면 같은 사이즈를 파는 같은 옷이다 — 실측 차이는 매장이 다시 잰 것이다.
+            if len(set(have_opt)) == 1:
+                keep = max(v, key=lambda r: (r["status"] == "ON_SALE", int(r["product_no"] or 0)))
+                for r in v:
+                    if r is not keep:
+                        drop.add(id(r))
+                continue
+            # 겹치기는 하는데 같지는 않다 — 재고가 빠지고 들어오며 목록이 흔들린 것일 수도,
+            #   {S,M,L,XL,XXL} 대 {XXS,XS,S,M,L} 처럼 사이즈 갈래가 다른 것일 수도 있다.
+            # 옵션만으로는 못 가린다. 아래의 사진·주소·실측 증거에 맡긴다(실측이 다르면 안 접는다).
         # 주소 조각이 같으면 같은 옷이다 — 매장이 이름으로 주소를 만드는 곳에서만 선다.
         us = {(url or {}).get((k[0], str(r["product_no"])), "") for r in v}
         same_url = len(us) == 1 and "" not in us
