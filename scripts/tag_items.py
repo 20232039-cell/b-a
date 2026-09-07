@@ -300,14 +300,25 @@ def strip_scale_bar(text: str) -> str:
 # 그래서 반팔 니트가 슬리브리스이고 후드 아노락이 민소매였다.
 # 문장을 통째로 버리지 않는다 — 그 안에 이 옷 이야기(홑겹·비침·기장)도 함께 있다.
 # 「무엇이나」·「무엇, 무엇 등」으로 남을 부르는 자리의 그 낱말만 지운다(2026-09-07).
-_WEAR_WORD = r"(?:슬리브리스|민소매|나시티|나시|반팔|긴팔|롱슬리브)"
-STYLE_OR = re.compile(rf"{_WEAR_WORD}(?=(?:나|이나)\s)")
+_WEAR_WORD = r"(?:슬리브리스|sleeveless|민소매|나시티|나시|반팔|긴팔|롱슬리브)"
+STYLE_OR = re.compile(rf"{_WEAR_WORD}(?=(?:나|이나)\s)", re.I)
 STYLE_LIST = re.compile(rf"{_WEAR_WORD}(?=\s*[,·]\s*[^.\n]{{0,24}}?등[\s으로])")
+# 매장이 「짝이 되는 다른 상품과 세트로 입으세요」를 적는다. 그 짝은 이 옷이 아니다(2026-09-07).
+#   grove 「julian sleeveless와 세트로 착용할 수 있습니다」   → 반팔 티셔츠가 슬리브리스가 됐다
+#   grove 「leaf sleeveless 세트 착용 가능」                 → 긴팔 가디건이 슬리브리스가 됐다
+#   grove 「rina sleeveless 와 세트 착용 가능」
+STYLE_SET = re.compile(rf"{_WEAR_WORD}(?=\s*(?:와|과)?\s*세트)", re.I)
+# 「무엇과 레이어드해」도 같다 — 겹쳐 입을 남의 옷 이름이다.
+#   haiq 「간절기에는 긴팔 이너와 레이어드해 포인트를 더할 수도 있습니다」 → 반팔 티가 롱슬리브가 됐다
+STYLE_LAYER = re.compile(rf"{_WEAR_WORD}(?=\s*(?:이너|아우터|셔츠|니트|가디건|티셔츠)?\s*(?:와|과)\s*레이어[드딩])", re.I)
 
 
 def strip_styling_suggestion(text: str) -> str:
     """「~와 같이 입으세요」에서 남의 옷 이름을 지운다."""
-    return STYLE_LIST.sub(" ", STYLE_OR.sub(" ", text or ""))
+    t = text or ""
+    for rx in (STYLE_OR, STYLE_LIST, STYLE_SET, STYLE_LAYER):
+        t = rx.sub(" ", t)
+    return t
 
 
 # 매장은 「무엇이 아니다」도 적는다. 그 낱말은 이 옷에 있는 것이 아니라 없는 것이다.
