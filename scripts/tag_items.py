@@ -200,13 +200,22 @@ def strip_reviews(text: str) -> str:
 # 상품이 1,602벌이다(matin-kim 536 · badblood 462 · nick-nicole 449 · blr 121, 2026-09-07).
 # 한 줄에 핏 낱말이 셋 이상 잇달아 나오면 그건 옷 이야기가 아니라 자다. OCR 오독을 감안해
 # 낱말 사이에 잡스러운 글자 몇 개는 봐준다(「레글러」·「벗뱃함」처럼 눈금 이름도 깨져 온다).
-_FIT_WORD = (r"(?:타이트|슬림|레귤러|레글러|regular|세미\s*와이드|와이드|오버\s*핏|오버핏|루즈\s*핏|루즈핏|슬림\s*핏|슬림핏)")
-# 눈금이 둘뿐인 자도 있다 — diafvine 「착용감  슬림핏 ——— 루즈핏」. 그때는 눈금 이름 앞의
-# 잣대 이름(착용감·촉감·두께)을 함께 봐야 자인 줄 안다.
+# 자의 눈금 이름은 두 갈래로 온다.
+#  · 한글 눈금은 그림에서 읽어 오느라 낱말 사이에 OCR 쓰레기가 낀다
+#    (「타이트 슬림 alee] 세미 와이드 와이드」 — 레귤러가 alee] 로 깨졌다).
+#  · 영문 눈금은 글자로 깔끔하게 온다(frizmworks 「SLIM | CROP REGULAR TAPERED | ANKLE WIDE」).
+# 그래서 한글 쪽만 낱말 사이 잡글자를 봐주고, 영문 쪽은 구분기호만 허락한다. 영문에 글자를
+# 허락하면 진짜 설명글이 잘린다 — 「Relaxed fit with a wide leg and a slim taper」.
+# 자에는 「오버핏」이 아니라 「오버」로만 적히기도 한다(blr 「타이트 슬림 레글러 세미 오버 오버」).
+_FIT_KO = (r"(?:타이트|슬림\s*핏|슬림핏|슬림|레귤러|레글러|세미\s*와이드|세미|와이드|"
+           r"오버\s*핏|오버핏|오버|루즈\s*핏|루즈핏|루즈)")
+_FIT_EN = (r"(?:regular|slim|tapered|straight|relaxed|loose|oversized?|wide|skinny|baggy|"
+           r"crop(?:ped)?|ankle|semi|tight)")
 SCALE_BAR = re.compile(
-    rf"{_FIT_WORD}(?:[^\n가-힣]{{0,8}}{_FIT_WORD}){{2,}}"
-    rf"|(?:착용감|촉감|두께감?|비침|신축성)\s*[^\n가-힣]{{0,10}}{_FIT_WORD}"
-    rf"(?:[^\n가-힣]{{0,8}}{_FIT_WORD})+", re.I)
+    rf"{_FIT_KO}(?:[^\n가-힣]{{0,12}}{_FIT_KO}){{2,}}"
+    rf"|{_FIT_EN}(?:[^\n가-힣A-Za-z0-9]{{1,8}}{_FIT_EN}){{2,}}"
+    rf"|(?:착용감|촉감|두께감?|비침|신축성)\s*[^\n가-힣]{{0,10}}{_FIT_KO}"
+    rf"(?:[^\n가-힣]{{0,8}}{_FIT_KO})+", re.I)
 
 # 「슬림해 보이는」은 이 옷의 핏이 아니라 입은 사람이 어떻게 보이는지다. 오히려 넉넉한 옷에
 # 자주 적힌다 — haiq 「타이트 하지 않고 넉넉한 폭으로 … 다리 라인이 슬림해 보이도록」,
@@ -214,10 +223,19 @@ SCALE_BAR = re.compile(
 # 그 낱말만 지운다(141벌, 2026-09-07).
 SLIM_LOOK = re.compile(r"슬림(?=(?:해|하게)\s*보이)")
 
+# 자는 늘 양 끝을 다 적는다 — 좁은 쪽과 넓은 쪽이 한 줄에 같이 있어야 자다.
+# 이 조건이 없으면 진짜 설명글이 잘린다: 「a slim, tapered, straight silhouette」은
+# 핏 낱말이 셋 잇달아 나오지만 한 옷을 말하는 것이고, 좁은 쪽만 있다(2026-09-07).
+_NARROW = re.compile(r"타이트|슬림|tight|slim|skinny", re.I)
+_WIDE = re.compile(r"와이드|오버|루즈|wide|oversized?|loose|baggy|relaxed", re.I)
+
 
 def strip_scale_bar(text: str) -> str:
     """상세 이미지의 핏 눈금자와 「슬림해 보이는」을 걷어낸다. 둘 다 이 옷의 핏이 아니다."""
-    return SLIM_LOOK.sub(" ", SCALE_BAR.sub(" ", text or ""))
+    def cut(m):
+        g = m.group(0)
+        return " " if (_NARROW.search(g) and _WIDE.search(g)) else g
+    return SLIM_LOOK.sub(" ", SCALE_BAR.sub(cut, text or ""))
 
 
 # 매장이 「이 옷에 무엇을 같이 입으면 좋다」를 적는다. 거기 적힌 옷은 이 상품이 아니다.
