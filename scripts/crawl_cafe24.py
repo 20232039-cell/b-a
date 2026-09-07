@@ -2464,10 +2464,14 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
                 "detail_empty": "1" if (not d.get("detail_images") and len(d.get("detail_text") or "") < 50
                                         and len(d.get("description") or "") < 50) else "",
             })
-            gal_of[(slug, str(d["product_no"]))] = {x for x in (d.get("gallery") or []) + [d.get("image_url")] if x}
+            # 상세 그림도 증거에 넣는다 — 매장이 갤러리는 다시 찍어 올리고 상세 그림은
+            # 그대로 쓰는 경우가 있다(2026-09-07: 중복 175묶음 중 51묶음이 그랬다).
+            gal_of[(slug, str(d["product_no"]))] = {
+                x for x in (d.get("gallery") or []) + (d.get("detail_images") or []) + [d.get("image_url")] if x}
             tbl_of[(slug, str(d["product_no"]))] = json.dumps(d.get("size_table"), ensure_ascii=False, sort_keys=True) if d.get("size_table") else ""
             per_brand[slug] = per_brand.get(slug, 0) + 1
-    dropped_rerun = fold_reruns(rows, gal_of, tbl_of)
+    url_of = {(r["brand_slug"], str(r["product_no"])): _url_stem(r.get("source_url") or "") for r in rows}
+    dropped_rerun = fold_reruns(rows, gal_of, tbl_of, url_of)
     fill_season_gaps(rows)
     # 번호 보간으로도 안 채워진 것은 사진 날짜로 한 번 더 — 브랜드마다 먼저 맞혀 보고서만.
     n_img = season_from_image_date(rows)
@@ -2480,7 +2484,52 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
     return len(rows), {"per_brand": per_brand, "dropped_dupe_image": dropped_dupe, "dropped_no_image": dropped_noimg, "dropped_junk_name": dropped_junk, "dropped_kids_pet": dropped_kidpet, "dropped_demo_shop": dropped_demo, "dropped_gone": dropped_gone, "dropped_rerun": dropped_rerun}
 
 
-def fold_reruns(rows: list[dict], gal: dict, tbl: dict | None = None) -> int:
+_URL_STEM = re.compile(r"^https?://[^/]+(/.*?)/?(\d+)/?$")
+
+
+def _tables_conflict(tables: list[str], tol: float = 1.0) -> bool:
+    """실측표 둘 이상이 tol 넘게 다른가. 한 칸짜리 표만 숫자로 견주고, 그 밖에는 글자로 견준다."""
+    if len(tables) < 2:
+        return False
+    if len({*tables}) == 1:
+        return False
+    try:
+        ds = [json.loads(t) for t in tables]
+    except Exception:
+        return True
+    if not all(isinstance(d, dict) and d and all(isinstance(v, list) and len(v) == 1 for v in d.values())
+               for d in ds):
+        return True                       # 칸 수가 여럿이거나 모양이 다르면 다른 옷으로 본다
+    labs = set(ds[0])
+    if any(set(d) != labs for d in ds):
+        return True
+    for lab in labs:
+        vals = [d[lab][0] for d in ds if isinstance(d[lab][0], (int, float))]
+        if len(vals) >= 2 and max(vals) - min(vals) > tol:
+            return True
+    return False
+
+
+def _url_stem(u: str) -> str:
+    """주소에서 상품 번호를 뗀 조각. 매장이 상품 이름으로 주소를 만들면 같은 옷은 같은 조각이다.
+
+      .../product/f-zip-up-sweater-french-navy-cream/3782/   → /product/f-zip-up-sweater-…
+      .../product/f-zip-up-sweater-french-navy-cream/3994/   → 같은 조각
+
+    「detail.html?product_no=」 꼴은 조각이 모든 상품에 같으므로 증거가 못 된다. 짧은 조각도
+    버린다(/product/detail 같은 것). 그래서 andersson-bell 처럼 번호로만 주소를 쓰는 매장에서는
+    이 증거가 아예 서지 않는다 — 그 매장은 사진 겹침으로 가린다.
+    """
+    m = _URL_STEM.match(u or "")
+    if not m:
+        return ""
+    stem = m.group(1)
+    if "detail.html" in stem or len(stem) < 14:
+        return ""
+    return stem
+
+
+def fold_reruns(rows: list[dict], gal: dict, tbl: dict | None = None, url: dict | None = None) -> int:
     """매장이 같은 옷을 두 번 올린 것을 접는다.
 
     dunst 는 2022~23년 옷을 통째로 다시 등록해 두었다 — 이름·색·값이 같고 갤러리 열두 장이
@@ -2514,7 +2563,19 @@ def fold_reruns(rows: list[dict], gal: dict, tbl: dict | None = None) -> int:
         # 4cm 차이는 재는 사람의 손떨림이 아니라 다른 치수다. 접으면 한 벌을 잃는다.
         ts = [(tbl or {}).get((k[0], str(r["product_no"])), "") for r in v]
         same_table = len(set(ts)) == 1 and ts[0] != ""
-        if not shared and not same_table:
+        # 주소 조각이 같으면 같은 옷이다 — 매장이 이름으로 주소를 만드는 곳에서만 선다.
+        us = {(url or {}).get((k[0], str(r["product_no"])), "") for r in v}
+        same_url = len(us) == 1 and "" not in us
+        if not shared and not same_table and not same_url:
+            continue
+        # 거부권: 표가 둘 이상 있고 서로 1cm 넘게 다르면 접지 않는다. 사진이 겹쳐도 마찬가지다.
+        # 예전에는 사진만 겹치면 접었는데, 같은 이름·색·값으로 사이즈를 따로 올린 매장이 있다:
+        #   coor 「머드 다잉 패디드 데님 자켓 (워시드인디고)」 어깨 54.0 대 50.0 · 총장 65.5 대 64.0
+        #   coor 「버진 울 크롭 점퍼 (다크네이비)」            최대차 4.5cm
+        # 접으면 한 벌의 치수를 잃는다. 1cm 이하는 매장이 다시 잰 것으로 보고 접는다
+        # (dunst 「essential cashmere turtleneck sweater」 네 묶음이 그렇다).
+        # 2026-09-07 실측: 값이 같은 중복 175묶음 중 접을 수 있는 것 82 · 거부 93.
+        if _tables_conflict([t for t in ts if t]):
             continue
         keep = max(v, key=lambda r: (r["status"] == "ON_SALE", int(r["product_no"] or 0)))
         for r in v:
