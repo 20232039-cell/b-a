@@ -209,6 +209,24 @@ def strip_scale_bar(text: str) -> str:
     return SCALE_BAR.sub(" ", text or "")
 
 
+# 매장이 「이 옷에 무엇을 같이 입으면 좋다」를 적는다. 거기 적힌 옷은 이 상품이 아니다.
+#   haiq  「쌀쌀한 저녁에는 슬리브리스나 티셔츠와 레이어드해 가디건처럼 연출할 수 있습니다」
+#   haiq  「간절기에는 나시나 얇은 긴팔들과 레이어링하고」
+#   grove 「비침이 있어 슬리브리스, 티셔츠 등 다양한 아이템과 매칭 시 매력적인 아이템입니다」
+#   kirsh 「나시티, 긴팔 등으로 여러 스타일링 가능」
+# 그래서 반팔 니트가 슬리브리스이고 후드 아노락이 민소매였다.
+# 문장을 통째로 버리지 않는다 — 그 안에 이 옷 이야기(홑겹·비침·기장)도 함께 있다.
+# 「무엇이나」·「무엇, 무엇 등」으로 남을 부르는 자리의 그 낱말만 지운다(2026-09-07).
+_WEAR_WORD = r"(?:슬리브리스|민소매|나시티|나시|반팔|긴팔|롱슬리브)"
+STYLE_OR = re.compile(rf"{_WEAR_WORD}(?=(?:나|이나)\s)")
+STYLE_LIST = re.compile(rf"{_WEAR_WORD}(?=\s*[,·]\s*[^.\n]{{0,24}}?등[\s으로])")
+
+
+def strip_styling_suggestion(text: str) -> str:
+    """「~와 같이 입으세요」에서 남의 옷 이름을 지운다."""
+    return STYLE_LIST.sub(" ", STYLE_OR.sub(" ", text or ""))
+
+
 def strip_other_products(text: str, back: int = 60) -> str:
     """값이 나오는 자리 앞 60자를 문장 끝까지 되짚어 도려낸다 — 거기 남의 상품 이름이 있다.
 
@@ -310,7 +328,7 @@ class Tagger:
 
     def tag(self, category: str, name: str, body: str, color_text: str, quality: str,
             sleeve_cm: float | None = None) -> dict[str, list]:
-        text = f"{name}\n{strip_other_products(strip_scale_bar(strip_reviews(body)))}".lower()
+        text = f"{name}\n{strip_other_products(strip_scale_bar(strip_styling_suggestion(strip_reviews(body))))}".lower()
         for b in self.text_blocklist:  # '시어링'→시어, '레이어드 스타일링'→레이어드 같은 오탐을 먼저 지운다
             text = text.replace(b, " " * len(b))
         hits = self._scan(self.text_rules, text)
