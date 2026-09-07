@@ -34,7 +34,7 @@ on:
         required: false
         default: ""
       select:
-        description: "short(설명 짧은 것) | no-size(사이즈 표 없는 옷) | gaps(사이즈·소재·색·디테일 중 하나라도 빈 옷) | ocr(그림에서 읽은 옷 다시) | all"
+        description: "short(설명 짧은 것) | no-size(사이즈 표 없는 옷) | gaps(사이즈·소재·색·디테일 중 하나라도 빈 옷) | ocr(그림에서 읽은 옷 다시) | bad-size(사이즈가 커지는데 값이 작아지는 표만) | all"
         required: false
         default: "short"
       redo:

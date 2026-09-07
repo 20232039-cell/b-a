@@ -580,12 +580,42 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
     done: set[int] = set()
     if main.exists():
         done = {json.loads(l)["product_no"] for l in main.read_text(encoding="utf-8").splitlines() if l.strip()}
-    cats = load_categories() if select in ("no-size", "ocr", "gaps") else {}
+    cats = load_categories() if select in ("no-size", "ocr", "gaps", "bad-size") else {}
     # select=ocr: 사이즈를 「그림에서」 읽어 둔 옷을 다시 읽는다. 머리줄을 낱말 단위로
     # 읽게 바꾼 뒤 kirsh 10440 은 라벨이 한 칸씩 밀려 있던 것이 바로잡혔다(밑위 49cm·
     # 허벅지 25.5cm → 밑위 25.5·허벅지 33.8, 2026-09-05). 빠진 것뿐 아니라 틀린 것도 있다.
     # select=gaps: 사이즈뿐 아니라 소재·색·디테일이 빈 옷도 함께 읽는다(사람 결정 2026-09-05).
     # 토글을 열어도 글이 없는 매장이 많고, 그 내용이 상세 그림 안에 적혀 있다.
+    # select=bad-size: 사이즈 표가 「사이즈가 커지는데 값이 작아지는」 옷만 다시 읽는다.
+    # 감사기가 55벌을 들고 있는데 그 가운데 46벌이 그림에서 읽은 것이다 — 숫자만 보고는
+    # 어느 칸이 틀렸는지 못 가리지만(총장 66·78·70), 그림을 다시 읽으면 원본이 나온다.
+    # 사람 지적(2026-09-07): 「70 78 이건 OCR 오류 아니야?」 — 출처를 세어 보니 그랬다.
+    bad_urls: set[str] = set()
+    if select == "bad-size":
+        sp4 = CRAWL_DIR.parent / "product_sizes.json"
+        if sp4.exists():
+            _ORDER = ["XXS", "XS", "S", "M", "L", "XL", "XXL", "2XL", "3XL"]
+
+            def _rank(x: str):
+                x = (x or "").upper().strip()
+                if x in _ORDER:
+                    return _ORDER.index(x)
+                m = re.fullmatch(r"0*(\d{1,3})", x)
+                return 100 + int(m.group(1)) if m else None
+
+            for u, e in json.loads(sp4.read_text(encoding="utf-8")).items():
+                names = [str(x).strip() for x in (e.get("size_names") or [])]
+                if len(names) < 2:
+                    continue
+                rs = [_rank(x) for x in names]
+                if any(r is None for r in rs) or rs != sorted(rs) or len(set(rs)) != len(rs):
+                    continue
+                for vals in (e.get("sizes") or {}).values():
+                    v = [x for x in vals if x is not None]
+                    if len(v) == len(names) and any(b < a - 1.0 for a, b in zip(v, v[1:])):
+                        bad_urls.add(u)
+                        break
+
     gap_urls: set[str] = set()
     if select == "gaps":
         root = CRAWL_DIR.parent
@@ -635,7 +665,7 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
             if 5995 <= text_len.get(no, 0) <= 6005:
                 done.discard(no)
                 continue
-            if select != "ocr" and d.get("source_url") in sized_urls:
+            if select not in ("ocr", "bad-size") and d.get("source_url") in sized_urls:
                 # select=all 에서도 「그림에서 읽은」 사이즈는 다시 읽는다 — 판독기가 바뀌면
                 # 같은 그림에서 다른 값이 나온다. HTML 로 얻은 사이즈는 건드릴 까닭이 없다
                 # (2026-09-05: 되찾은 그림 읽기와 판독기 재판독을 한 판에 돌리려고).
@@ -645,7 +675,7 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
                 continue
             # 사이즈 없는 옷만 고르는 판(no-size)에서는 장 수를 따지지 않는다 — 읽는 방법이
             # 바뀌면(2026-09-05 머리줄 낱말 단위 판독) 같은 그림에서 새 글이 나온다.
-            if select in ("no-size", "ocr", "gaps") or (select == "all" and d.get("source_url") in ocr_sized):
+            if select in ("no-size", "ocr", "gaps", "bad-size") or (select == "all" and d.get("source_url") in ocr_sized):
                 done.discard(no)
                 continue
             avail = len([u for u in images_of(d)
@@ -680,11 +710,15 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
             # 사이즈·소재·색·디테일 가운데 하나라도 빈 옷. 그림 안에 적혀 있는 경우가 많다.
             if d.get("source_url") not in gap_urls or cats.get((slug, int(no)), "") not in GARMENTS:
                 continue
+        elif select == "bad-size":
+            # 사이즈가 커지는데 값이 작아지는 표 — 그림을 다시 읽어 원본 숫자를 본다
+            if d.get("source_url") not in bad_urls:
+                continue
         elif only_short and len(d.get("description", "")) >= SHORT_TEXT:
             continue
         todo.append(d)
     todo = todo[k::n]
-    want_size = select in ("no-size", "ocr", "gaps")
+    want_size = select in ("no-size", "ocr", "gaps", "bad-size")
     log(f"[{slug}] OCR 대상 {len(todo)} (이미 {len(done)}, 조각 {k + 1}/{n})")
     n_img = n_txt = 0
     counters = {"img": 0, "txt": 0, "done": 0, "early": 0}
@@ -764,7 +798,7 @@ def main():
     ap.add_argument("--cdn-delay", type=float, default=0.25, help="공용 이미지 CDN(cafe24img) 에만 쓰는 대기")
     ap.add_argument("--shard", default="1/1", help="k/n — 대상을 n등분해 k번째(1부터)만 (Actions 샤딩)")
     ap.add_argument("--out-dir", help="조각 파일을 쓸 폴더 (crawl/ocr/<slug>.jsonl 대신 <slug>.<k>.jsonl)")
-    ap.add_argument("--select", default="short", choices=["short", "all", "no-size", "ocr", "gaps"], help="short=설명 짧은 것(기본) · all=전부 · no-size=사이즈 표 없는 옷 · ocr=사이즈를 그림에서 읽은 옷 다시 · gaps=사이즈·소재·색·디테일 중 하나라도 빈 옷")
+    ap.add_argument("--select", default="short", choices=["short", "all", "no-size", "ocr", "gaps", "bad-size"], help="short=설명 짧은 것(기본) · all=전부 · no-size=사이즈 표 없는 옷 · ocr=사이즈를 그림에서 읽은 옷 다시 · gaps=사이즈·소재·색·디테일 중 하나라도 빈 옷 · bad-size=사이즈가 커지는데 값이 작아지는 표만 다시")
     args = ap.parse_args()
     OCR_DIR.mkdir(parents=True, exist_ok=True)
     k, n = (int(x) for x in args.shard.split("/"))
