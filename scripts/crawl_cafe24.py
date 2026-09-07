@@ -2360,6 +2360,11 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
                 continue
             else:
                 seen_images.add(img)
+            # 옛 창고 줄에는 이름에 태그가 남아 있다 — 이름 파서에 _strip_tags 가 붙기 전에
+            # 받은 것이고, 상세 보정은 설명·사이즈만 갱신하고 이름은 손대지 않는다
+            # (lmood 「<span>화란 세미오버 가디건</span> <span>BLACK</span>」, 2026-09-07).
+            # 갈래를 정하기 전에 한 번 더 턴다 — 앱에 태그가 그대로 뜨고 있었다.
+            d["name"] = _strip_tags(d["name"])
             code = classify_category(d["name"], d.get("category_names", []), d.get("description", ""))
             fix = manual_items.get((slug, str(d["product_no"])))
             if fix and fix.get("분류"):
