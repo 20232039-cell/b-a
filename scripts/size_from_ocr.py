@@ -1229,6 +1229,58 @@ def _clash(vals: dict, a: int, b: int) -> list[str]:
     return out
 
 
+# 사이즈 이름이 없는 표가 많다 — 실측이 있는 30,889벌 가운데 이름이 있는 것은 40.5% 뿐이다.
+# 그림에서 읽은 표는 머리글 줄이 흐려 이름이 통째로 날아간다. 그런데 매장은 같은 이름을
+# 구매 옵션에 적어 둔다(「S | M | L」). 칸 수가 딱 맞으면 그걸 가져다 쓴다.
+#
+# 함부로 쓰면 안 된다 — 이름을 잘못 붙이면 없느니만 못하다. 그래서 셋을 다 만족할 때만 쓴다.
+#   ① 옵션이 사이즈처럼 생겼고 개수가 표의 칸 수와 정확히 같다
+#   ② 옵션이 작은 것부터 큰 것 차례로 적혀 있다(XS<S<M<L<XL, 숫자는 오름차순)
+#   ③ 실측이 사이즈 따라 커진다 — 값이 다 있는 라벨 하나라도 단조증가이고, 줄어드는 라벨은 없다
+# ③ 이 노이러 니트 두 벌을 걸렀다(소매길이 62.6 → 54.0 — 표가 거꾸로거나 잘못 읽혔다).
+_SIZE_OPT = re.compile(r"^(?:XXS|XS|S|M|L|XL|XXL|2XL|3XL|FREE|F|ONE ?SIZE|\d{1,2}|0\d)$", re.I)
+_SIZE_RANK = {"XXS": 0, "XS": 1, "S": 2, "M": 3, "L": 4, "XL": 5, "XXL": 6, "2XL": 6, "3XL": 7}
+
+
+def _opt_rank(o: str):
+    u = o.upper().replace(" ", "")
+    if u in _SIZE_RANK:
+        return _SIZE_RANK[u]
+    return 100 + int(u) if u.isdigit() else None
+
+
+def names_from_options(out: dict, rows_by_url: dict) -> int:
+    """이름 없는 표에 매장 구매 옵션의 사이즈 이름을 붙인다(위 세 조건을 다 만족할 때만)."""
+    n = 0
+    for u, e in out.items():
+        if e.get("size_names") or not e.get("sizes"):
+            continue
+        r = rows_by_url.get(u)
+        if not r:
+            continue
+        opts = [o.strip() for o in (r.get("options") or "").split("|") if o.strip()]
+        names = [o for o in opts if _SIZE_OPT.match(o)]
+        cols = max((len(v) for v in e["sizes"].values()), default=0)
+        if len(names) < 2 or len(names) != cols:
+            continue
+        rk = [_opt_rank(o) for o in names]
+        if any(x is None for x in rk) or rk != sorted(rk) or len(set(rk)) != len(rk):
+            continue
+        up = down = False
+        for v in e["sizes"].values():
+            vv = v[:cols]
+            if len(vv) == cols and all(isinstance(x, (int, float)) for x in vv):
+                if all(vv[i] <= vv[i + 1] for i in range(cols - 1)):
+                    up = True
+                if all(vv[i] >= vv[i + 1] for i in range(cols - 1)) and vv[0] != vv[-1]:
+                    down = True
+        if up and not down:
+            # 매장이 소문자로 적어 두기도 한다(grove 「s | m」) — 글자 사이즈는 대문자로 맞춘다
+            e["size_names"] = [o.upper() if o.upper() in _SIZE_RANK else o for o in names]
+            n += 1
+    return n
+
+
 def clean_names(out: dict) -> dict:
     """사이즈 「이름」을 마지막에 한 번 훑는다. 값이 맞아도 이름이 「HEM」·「BLACK」이면 그 표는
     사이즈 표가 아니다 — 앱에서 사람이 그 글자를 그대로 본다(2026-09-05).
@@ -1576,6 +1628,9 @@ def main():
     if gone:
         print(f"품목에 견줘 있을 수 없는 값 {gone}칸을 비웠다")
     fixed = clean_names(out)
+    named = names_from_options(out, {r["source_url"]: r for r in rows.values()})
+    if named:
+        print(f"매장 옵션에서 사이즈 이름을 채운 상품 {named}벌")
     if fixed:
         print("사이즈 이름 정리: " + " · ".join(f"{k} {v}" for k, v in sorted(fixed.items())))
     OUT.write_text(json.dumps(out, ensure_ascii=False, indent=0), encoding="utf-8")
