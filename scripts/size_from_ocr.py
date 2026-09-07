@@ -1249,6 +1249,40 @@ def _opt_rank(o: str):
     return 100 + int(u) if u.isdigit() else None
 
 
+# 숫자로 된 사이즈 이름은 한 갈래 안에 있어야 한다 — 매장 자체 번호(0~9) ·
+# 유럽·미국 데님 허리(20~52) · 가슴둘레(80~125). 갈래가 섞이면 OCR 이 자리를 흘린 것이다:
+#   noirer  ['48', '5', '52']  ← 50 의 0 을 흘렸다        · ['48', '500']  ← 0 을 하나 더 붙였다
+#   loeuvre ['015', '02']      ← 01 에 5 가 붙었다
+#   easy-no-easy ['191', '2']  ← 191 은 사이즈가 아니라 모델 키다
+# 틀린 이름은 없는 이름보다 나쁘다(앱에 그대로 칩으로 뜬다). 많은 쪽 갈래에 안 드는 이름을
+# 비운다. 어느 쪽이 많은지 가릴 수 없으면(갈래마다 하나씩) 전부 비운다 — 짐작하지 않는다.
+# 숫자를 고쳐 주지는 않는다. 「5 는 50 이겠지」는 우리가 지어내는 말이다(2026-09-07, 78벌).
+def _num_band(x: int) -> int:
+    if x <= 9:
+        return 0
+    if 20 <= x <= 52:          # 유럽(34~48) · 미국 데님 허리(24~36)가 여기 든다
+        return 1
+    if 80 <= x <= 125:
+        return 2
+    return 3          # 사이즈 숫자가 사는 자리가 아니다
+
+
+def blank_stray_numbers(names: list[str]) -> list[str]:
+    nums = [(i, int(x)) for i, x in enumerate(names) if re.fullmatch(r"\d{1,3}", x or "")]
+    if len(nums) < 2 or len(nums) != len([x for x in names if x]):
+        return names
+    bands = Counter(_num_band(v) for _, v in nums if _num_band(v) != 3)
+    if len(set(_num_band(v) for _, v in nums)) == 1 and 3 not in {_num_band(v) for _, v in nums}:
+        return names                      # 다 한 갈래다 — 손대지 않는다
+    top = bands.most_common()
+    keep = top[0][0] if top and (len(top) == 1 or top[0][1] > top[1][1]) else None
+    out = list(names)
+    for i, v in nums:
+        if keep is None or _num_band(v) != keep:
+            out[i] = ""
+    return out
+
+
 def names_from_options(out: dict, rows_by_url: dict) -> int:
     """이름 없는 표에 매장 구매 옵션의 사이즈 이름을 붙인다(위 세 조건을 다 만족할 때만)."""
     n = 0
@@ -1272,7 +1306,11 @@ def names_from_options(out: dict, rows_by_url: dict) -> int:
             if len(vv) == cols and all(isinstance(x, (int, float)) for x in vv):
                 if all(vv[i] <= vv[i + 1] for i in range(cols - 1)):
                     up = True
-                if all(vv[i] >= vv[i + 1] for i in range(cols - 1)) and vv[0] != vv[-1]:
+                # 한 칸이라도 1cm 넘게 줄면 그 표는 이 차례가 아니다. 감사기의 「사이즈가
+                # 커지는데 값이 작아진다」와 같은 잣대를 쓴다 — 이름을 붙이면 감사기가
+                # 그 표를 검사할 수 있게 되므로, 잣대가 다르면 내가 붙인 이름이 곧바로
+                # 모순으로 잡힌다(andersson-bell 엉덩이 51.5·58.5·55.5, 2026-09-07).
+                if any(vv[i + 1] < vv[i] - 1.0 for i in range(cols - 1)):
                     down = True
         if up and not down:
             # 매장이 소문자로 적어 두기도 한다(grove 「s | m」) — 글자 사이즈는 대문자로 맞춘다
@@ -1330,6 +1368,7 @@ def clean_names(out: dict) -> dict:
             elif canon_label(y) or re.fullmatch(r"[가-힣]", y) or NOT_A_SIZE.match(y):
                 y = ""; n["이름이 아니라 지움"] += 1
             new.append(y)
+        new = blank_stray_numbers(new)
         # ① 이름도 값도 없는 자리는 통째로 뺀다 — 표 밑에 붙은 「MODEL 179cm/68kg」 줄이
         #    사이즈 한 칸으로 잡혀 앱에 값 없는 「?」 사이즈가 섰다(frizmworks).
         vals = e.get("sizes") or {}
