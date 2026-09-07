@@ -636,6 +636,13 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
             for u, e in json.loads(sp2.read_text(encoding="utf-8")).items():
                 if str((e or {}).get("source", "")).startswith("ocr"):
                     ocr_sized.add(u)
+    # bad-size 는 「이미 읽은」 상품만 고른다 — 값이 거꾸로인 표는 애초에 우리가 그림에서
+    # 읽어 넣은 것이니 전부 done 안에 있다. 그래서 --redo 없이 돌리면 대상이 58 → 5 로
+    # 주저앉는다(2026-09-07 실측: noirer 20 · easy-no-easy 9 · frizmworks 7 이 전부 0 이 됐다).
+    # 이 갈래는 다시 읽기가 목적이므로 redo 를 켜고 시작한다.
+    if select == "bad-size":
+        redo = True
+
     # --redo: 예전에 「앞 3~5장만」 읽고 끝난 상품은 done 에 들어 있어 12장짜리 재시도에서 아예 빠진다.
     # 사이즈가 아직 없고 읽은 그림이 읽을 수 있는 그림보다 적으면 done 에서 빼 다시 읽는다
     # (2026-09-04: 사이즈 없는 옷 875벌 중 617벌이 이 경우였다 — far-from-what 은 11장 중 2장만 읽었다).
