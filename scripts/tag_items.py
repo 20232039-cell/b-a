@@ -333,6 +333,12 @@ class Tagger:
             mp = SPAN_PCT.search(body)
             if mp and float(mp.group(1)) >= 3:
                 hits["function"].add("신축성")
+        # 단색은 글에서 찾지 않고 없음으로 안다. 글에 적힌 「단색」·「솔리드」·「무지」는
+        # 이 옷의 무늬가 아니라 견주는 말이거나 라인 전체를 말하는 문장이었다:
+        #   espionage 「멀리서 보면 단색 같지만 가까이서 볼 때 입체감 있는」 → 실은 그리드 체크
+        #   dunst    「솔리드 컬러 및 스트라이프 컬러로 제작되어」        → 이 벌은 스트라이프
+        # 그래서 33벌이 단색이면서 스트라이프·체크였다(2026-09-07).
+        hits.get("pattern", set()).discard("단색")
         if quality == "ok" and not hits.get("pattern"):
             hits["pattern"].add("단색")
         # 소매 길이는 매장이 글로 안 적는다 — 소매가 빈 상의 12,248벌 중 12,170벌(99.4%)이
