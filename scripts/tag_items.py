@@ -91,6 +91,14 @@ SPAN_PCT = re.compile(r"(?:스판덱스|스판|폴리우레탄|elastane|spandex)
 LONG_SLEEVE_KIND = re.compile(
     r"sweat\s?shirts?|맨투맨|스웨트셔츠|hoodie|hoody|후디|jackets?|자켓|재킷|"
     r"coats?|코트|blouson|블루종|parka|파카|점퍼", re.I)
+# 매장이 소매를 이름에서 「L/S」·「S/S」로만 밝히는 일이 있다. 본문에는 딴 소매가 적혀
+# 있어서(매장이 다른 상품 설명을 복사해 둔다) 롱슬리브이면서 반팔인 옷이 생겼다 —
+# frizmworks 「OG Vintage dyeing l/s tee」 본문에 「반팔 티셔츠입니다」, espionage
+# 「Jungle Fatigue S/S Outer Shirt」 본문에 롱슬리브. 이름이 이긴다.
+# 계절 표시와 헷갈리면 안 된다 — 「S/S 26 COLLECTION」의 S/S 는 봄여름이라 뒤에 숫자가
+# 오면 안 본다.
+NAME_LS = re.compile(r"(?<![a-z0-9])l\s*/\s*s(?![a-z0-9])", re.I)
+NAME_SS = re.compile(r"(?<![a-z0-9])s\s*/\s*s(?!\s*\d)(?![a-z0-9])", re.I)
 NOT_LONG_SLEEVE = re.compile(
     r"vest|베스트|조끼|sleeveless|슬리브리스|민소매|나시|반팔|half\s?sleeve|"
     r"short\s?sleeve|숏슬리브|s/s|캡슬리브", re.I)
@@ -385,6 +393,13 @@ class Tagger:
         # 양 끝만 쓴다 — 글에 아무 말도 없을 때만. 글로 아는 2,709벌에 대 보니 반팔↔롱슬리브
         # 혼동은 46건(98.1%)이고, 나머지 틀림은 슬리브리스·퍼프소매인데 그것들은 글에 적혀 있어
         # 애초에 여기까지 오지 않는다.
+        if category in SLEEVED:
+            if NAME_LS.search(name):
+                hits["sleeve_length"] -= {"반팔", "슬리브리스", "칠부소매"}
+                hits["sleeve_length"].add("롱슬리브")
+            elif NAME_SS.search(name):
+                hits["sleeve_length"] -= {"롱슬리브", "슬리브리스", "칠부소매"}
+                hits["sleeve_length"].add("반팔")
         if sleeve_cm is not None and not hits.get("sleeve_length") and category in SLEEVED:
             if sleeve_cm <= 26:
                 hits["sleeve_length"].add("반팔")
