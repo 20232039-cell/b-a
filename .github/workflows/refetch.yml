@@ -185,10 +185,15 @@ jobs:
           print(f"합계 갱신 {tot}")
           PY
       - name: CSV · 사이즈 · 태그 재생성
+        # head 로 파이프하지 않는다 — 기본 셸에 pipefail 이 없어 파이썬이 죽어도 넘어간다.
+        # size_from_ocr.py 가 그렇게 열 시간을 조용히 죽어 있었다(2026-09-07).
         run: |
-          python scripts/crawl_cafe24.py --build-csv | head -1
-          python scripts/size_from_ocr.py | head -2
-          python scripts/tag_items.py | head -16
+          python scripts/crawl_cafe24.py --build-csv > /tmp/csv.log
+          head -1 /tmp/csv.log
+          python scripts/size_from_ocr.py > /tmp/size.log
+          head -2 /tmp/size.log
+          python scripts/tag_items.py > /tmp/tag.log
+          head -16 /tmp/tag.log
           {
             echo "## 데이터 감사"
             echo '```'

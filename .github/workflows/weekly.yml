@@ -57,7 +57,10 @@ jobs:
       - name: 신상 OCR (설명 짧은 것만, 이미 한 상품은 건너뜀)
         run: python scripts/ocr_detail_images.py --max-images 3 --procs 2
       - name: 태그 재생성
-        run: python scripts/tag_items.py | head -20
+        # head 로 파이프하면 파이썬이 죽어도 워크플로가 넘어간다(pipefail 없음)
+        run: |
+          python scripts/tag_items.py > /tmp/tag.log
+          head -20 /tmp/tag.log
       - name: commit & push (rebase 후, 3회 재시도)
         shell: bash
         run: |

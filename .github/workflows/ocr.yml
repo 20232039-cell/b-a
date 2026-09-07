@@ -243,9 +243,15 @@ jobs:
           python-version: "3.11"
       - run: pip install -q requests beautifulsoup4 lxml
       - name: 사이즈 · 태그 재생성
+        # 파이프로 head 에 물리면 안 된다 — 기본 셸에 pipefail 이 없어서 파이프라인의 끝인
+        # head 의 성공만 보고, 파이썬이 죽어도 워크플로가 그냥 넘어간다. 실제로 그 탓에
+        # size_from_ocr.py 가 2026-09-06 14:31 부터 열 시간 동안 조용히 죽어 있었고
+        # data/product_sizes.json 이 07:12 판에 멈춰 있었다(2026-09-07).
         run: |
-          python scripts/size_from_ocr.py | head -2
-          python scripts/tag_items.py | head -16
+          python scripts/size_from_ocr.py > /tmp/size.log
+          head -2 /tmp/size.log
+          python scripts/tag_items.py > /tmp/tag.log
+          head -16 /tmp/tag.log
           python scripts/size_gap_report.py || true
           python scripts/missing_report.py || true
       - name: 데이터 감사 — 지난 판과 견준다

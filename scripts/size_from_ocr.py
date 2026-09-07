@@ -1572,7 +1572,7 @@ def main():
     if lent:
         print(f"색만 다른 형제에게서 물려받은 사이즈 {lent}벌")
 
-    gone = drop_impossible(out, {r["source_url"]: r for r in rows})
+    gone = drop_impossible(out, {r["source_url"]: r for r in rows.values()})
     if gone:
         print(f"품목에 견줘 있을 수 없는 값 {gone}칸을 비웠다")
     fixed = clean_names(out)
