@@ -74,6 +74,16 @@ METAL_PART = re.compile(r"(?:메탈|metal|스틸|steel)\s*(?:위빙\s*)?체인|�
                         r"chain\s*(?:strap|handle)|불렛\s*체인|bullet\s*chain", re.I)
 LEATHER_NAME = re.compile(r"가죽|leather|스웨이드|suede|누벅|레더", re.I)
 
+# 청바지에 달린 가죽 라벨 조각이 「소재 = 가죽」이 되던 것 48벌.
+#   afterpray 「코티드 와이드 데님 진」 … 「리벳 장식과 벨트 후면부 소가죽 라벨 탭」
+# 붙여쓰기 예외(GLUE_PREFIX)로 「소가죽」을 읽게 되면서 함께 들어온 오탐이다. 이 옷들은
+# 원문 어디에도 다른 가죽 이야기가 없다 — 증거가 라벨 조각 하나뿐이다. 가죽으로 걸러
+# 청바지가 나오면 안 된다(메탈 체인 부속을 뺀 것과 같은 종류다, b90f427).
+# 낱말 하나만 지운다 — 「라벨」은 부자재로 남아야 한다. 겉감이 가죽인 가방·지갑·구두
+# (matin-kim 「겉감 - 소가죽 100%」 등 164벌)와 가죽을 배색으로 쓴 옷(frizmworks 「어깨
+# 부분에는 천연 양가죽으로 배색하여」)은 그대로다.
+LEATHER_TRIM = re.compile(r"(?:소|양|합성|인조|에코|재생|송아지|천연)?가죽\s*(?:라벨|탭|패치|파이핑|트리밍|와펜)")
+
 NECKLESS = {"Pants", "Denim", "Skirts"}
 # 품목 이름이 곧 소매를 말하는 옷 — 맨투맨·후디·자켓/코트는 사실상 전부 긴소매다.
 # 글로 소매를 아는 2,588벌에 대 보니 97.53% 가 롱슬리브였다(틀림 64: 반팔 46 · 퍼프소매 8 ·
@@ -135,6 +145,38 @@ COLOR_PREFIX = ("그린|블랙|화이트|블루|레드|네이비|그레이|베�
                 "퍼플|옐로우|오렌지|민트|차콜|크림|와인|버건디|실버|골드|라이트|다크|딥")
 
 
+# 앞말에 붙여 쓰는 옷 부위 낱말. 색 예외와 같은 자리인데, 이쪽은 낱말마다 따로 적는다 —
+# 두 글자 한글은 남의 낱말 꼬리에 너무 쉽게 걸린다.
+#
+# 왜 필요한가: 매장은 「아웃포켓」·「허리밴드」·「자개단추」·「소가죽」처럼 붙여 쓴다. 앞이
+# 한글이면 막는 방벽 때문에 이런 진짜 디테일이 통째로 안 읽혔다 — 이 꼴로만 적힌 상품이
+# 8,092벌이다(2026-09-07 실측).
+#
+# 왜 방벽을 그냥 못 걷어내는가: 같은 셈에서 걸린 것 가운데 대부분이 남의 낱말이었다.
+#   슬리브·롱슬리브·숏슬리브 → 「리브」 1,820  ·  「~하시어」 → 「시어」 312
+#   케어라벨 → 「라벨」 2,739  ·  브레이슬릿 → 「슬릿」 27  ·  꽈배기 → 「배기」 25
+#   버튼다운·아름다운 → 「다운」 60  ·  올리브 → 「리브」 72  ·  아트워크 → 「워크」 248
+# 그래서 「무엇 뒤에 오면 뜻이 그대로인가」를 실제로 나온 앞말에서만 골라 적는다.
+# 틀린 태그는 없는 태그보다 나쁘다 — 앱 상세 표에 사람이 그대로 본다.
+GLUE_PREFIX = {
+    "포켓": "아웃|인|빅|사이드|히든|웰트|카고|앞|뒤|가슴|배색|플랩|지퍼|패치|슬랜트",
+    "밴드": "허리|고무|밑단|소매|목",
+    "단추": "자개|소뿔|조개|앞|뒤|금속|나무",
+    "여밈": "앞|뒤|옆|지퍼|단추",
+    "트임": "옆|뒤|앞|밑|목|소매",
+    "자수": "로고|직|가슴|앞|뒤|기계|손",
+    "가죽": "소|양|합성|인조|에코|재생|송아지",
+    "카라": "오픈|셔츠|피터팬|윙|스탠드|테일러드",
+    "체인": "키|메탈|볼",
+    "조절": "길이|허리|끈|어깨",
+    "크롭": "세미",
+    # 「슬리브」·「올리브」의 리브를 막으면서 「소매리브」는 받는다 — 앞말이 두 글자 이상이라
+    # 갈라진다. 「워싱」은 「덤블워싱」·「텀블워싱」(세탁 안내 159벌)을 일부러 뺀다.
+    "리브": "소매|밑단|목|넥|허리",
+    "워싱": "가먼트|스톤|빈티지|인디고|피그먼트|워터|아이스|블리치|오버다이",
+}
+
+
 def compile_alias(alias: str) -> re.Pattern:
     a = re.escape(alias.lower())
     if _is_hangul(alias) and len(alias) == 1:
@@ -144,7 +186,10 @@ def compile_alias(alias: str) -> re.Pattern:
         # 다만 색 이름이 앞에 붙는 것은 막으면 안 된다: 「그린카모」·「베이지체크」·「블랙진」은
         # 색 + 그 낱말이라 뜻이 그대로다. 이름에 그렇게 적는 매장이 있어 22벌이 무늬를 잃고
         # 있었다(그린카모 9 · 베이지체크 3 …, 2026-09-06). 색 낱말 뒤는 허용한다.
-        return re.compile(rf"(?<![{HANGUL}]){a}|(?:{COLOR_PREFIX}){a}")
+        pre = COLOR_PREFIX
+        if alias in GLUE_PREFIX:                 # 옷 부위 낱말 뒤도 허용한다(위 GLUE_PREFIX 주석)
+            pre = f"{pre}|{GLUE_PREFIX[alias]}"
+        return re.compile(rf"(?<![{HANGUL}]){a}|(?:{pre}){a}")
     if re.fullmatch(r"[a-z0-9 /\-]+", alias.lower()):
         # 복수형 s 를 받는다 — 「Archive Long Sleeves」가 「long sleeve」에 안 걸려
         # 상품명에 sleeve 723 · long 616 이 미등록으로 남아 있었다(2026-09-05).
@@ -265,6 +310,24 @@ def strip_styling_suggestion(text: str) -> str:
     return STYLE_LIST.sub(" ", STYLE_OR.sub(" ", text or ""))
 
 
+# 매장은 「무엇이 아니다」도 적는다. 그 낱말은 이 옷에 있는 것이 아니라 없는 것이다.
+#   frizmworks 「레귤러핏 기반으로 제작되었으며, 루즈하지 않고 깔끔하게 떨어지는 기장감으로」
+#   → 루즈핏 이 붙었다. 매장은 루즈하지 *않다*고 적었는데 루즈핏 이 된 것이다.
+#   흔한 꼴: 「안감 없는 홑겹」·「신축성이 없는 원단」·「절개 없이 통으로」·「비치지 않는 두께」
+# 부정문 안에 태그 낱말이 있는 상품이 1,616벌이다(2026-09-07 셈).
+# 문장을 통째로 버리지 않는다 — 부정 앞의 그 낱말만 지운다. 뒤에 이 옷 이야기가 이어진다.
+NEGATED = re.compile(r"([가-힣]{2,7})(?:하지|지|하게)\s*않"
+                     r"|([가-힣]{2,7})\s*없(?:이|는|어|고|음|다)")
+
+
+def strip_negated(text: str) -> str:
+    """「~하지 않」·「~ 없」 바로 앞의 낱말을 지운다. 그건 이 옷에 없는 것이다."""
+    def cut(m):
+        g = m.group(1) or m.group(2)
+        return m.group(0).replace(g, " " * len(g), 1)
+    return NEGATED.sub(cut, text or "")
+
+
 def strip_other_products(text: str, back: int = 60) -> str:
     """값이 나오는 자리 앞 60자를 문장 끝까지 되짚어 도려낸다 — 거기 남의 상품 이름이 있다.
 
@@ -366,9 +429,10 @@ class Tagger:
 
     def tag(self, category: str, name: str, body: str, color_text: str, quality: str,
             sleeve_cm: float | None = None) -> dict[str, list]:
-        text = f"{name}\n{strip_other_products(strip_scale_bar(strip_styling_suggestion(strip_reviews(body))))}".lower()
+        text = f"{name}\n{strip_negated(strip_other_products(strip_scale_bar(strip_styling_suggestion(strip_reviews(body)))))}".lower()
         for b in self.text_blocklist:  # '시어링'→시어, '레이어드 스타일링'→레이어드 같은 오탐을 먼저 지운다
             text = text.replace(b, " " * len(b))
+        text = LEATHER_TRIM.sub(lambda m: m.group(0).replace("가죽", "  "), text)
         hits = self._scan(self.text_rules, text)
 
         # n부 — 소매면 칠부소매, 팬츠면 버뮤다(명시어 우선)
