@@ -27,9 +27,16 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
+import size_from_ocr
 import tag_items
 
 WITH_DESC = False
+# 같은 옷의 다른 색을 한 묶음으로 묶는 번호. 매장은 색마다 상품을 따로 올린다 —
+# badblood 「Everyday Scoop Neck Long Sleeve T-Shirt」는 여덟 색이 여덟 상품이다.
+# 앱 상세 화면의 「색상 · N」 칩 줄이 이 번호로 형제를 찾는다.
+# 열쇠는 size_from_ocr.color_base 를 그대로 쓴다 — 형제에게 사이즈를 물려줄 때 쓰는 것과
+# 같은 잣대여야 앱이 보여 주는 형제와 우리가 치수를 물려준 형제가 어긋나지 않는다.
+COLOR_GROUP: dict[str, int] = {}
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
@@ -51,6 +58,7 @@ def thin(r: dict, tags: dict) -> dict:
         "co": (t.get("color") or [None])[0],
         "m": (t.get("material") or [None])[0],
         "se": r.get("season") or "",
+        "cg": COLOR_GROUP.get(r["source_url"], 0),   # 색만 다른 형제 묶음 번호(0 이면 단독)
     }
 
 
@@ -117,6 +125,21 @@ def main() -> int:
                 continue
             if d.get("source_url"):
                 crawl[d["source_url"]] = d
+
+    # 색만 다른 형제 묶기 — 둘 이상 모인 묶음에만 번호를 준다(단독은 0)
+    fam: dict[tuple, list[str]] = defaultdict(list)
+    for r in rows:
+        base = size_from_ocr.color_base(r["name"])
+        if base:
+            fam[(r["brand_slug"], base)].append(r["source_url"])
+    gid = 0
+    for k, urls in sorted(fam.items()):
+        if len(urls) < 2:
+            continue
+        gid += 1
+        for u in urls:
+            COLOR_GROUP[u] = gid
+    print(f"색만 다른 형제 묶음 {gid}개 · 묶인 상품 {len(COLOR_GROUP)}벌")
 
     idx = [thin(r, tags) for r in rows]
     n = write(out / "products_index.json", idx, args.dry)
