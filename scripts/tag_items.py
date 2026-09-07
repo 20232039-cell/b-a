@@ -65,6 +65,15 @@ NO_GARMENT_AXES = NON_GARMENT | {"Headwear", "Jewelry"}
 PANTS = {"Pants", "Denim", ""}
 BOTTOMS = {"Pants", "Denim", "Skirts"}
 # 목선·소매가 없는 품목. 하의와 잡화가 여기 든다(잡화는 NO_GARMENT_AXES 로도 지워진다).
+# 가죽 잡화 매장의 공용 A/S 안내문이 금속 부속에까지 소재를 물려주고 있었다.
+# vunque 「Metal Chain Handle Strap」 본문에서 「가죽」이 나오는 자리는 전부 그 안내문이고
+# (「가죽 본연의 특성 …」·「가죽 손상의 경우 A/S 불가」), 상품 이름은 메탈 체인이라고 말한다.
+# 안내문 자체는 못 지운다 — vunque 559벌 가운데 500여 벌은 그 문장이 유일한 가죽 근거이고
+# 실제로 가죽 가방이다(2026-09-07 확인). 이름이 금속 부속이라고 말하는 것만 뺀다.
+METAL_PART = re.compile(r"(?:메탈|metal|스틸|steel)\s*(?:위빙\s*)?체인|체인\s*(?:스트랩|핸들|strap|handle)|"
+                        r"chain\s*(?:strap|handle)|불렛\s*체인|bullet\s*chain", re.I)
+LEATHER_NAME = re.compile(r"가죽|leather|스웨이드|suede|누벅|레더", re.I)
+
 NECKLESS = {"Pants", "Denim", "Skirts"}
 # 품목 이름이 곧 소매를 말하는 옷 — 맨투맨·후디·자켓/코트는 사실상 전부 긴소매다.
 # 글로 소매를 아는 2,588벌에 대 보니 97.53% 가 롱슬리브였다(틀림 64: 반팔 46 · 퍼프소매 8 ·
@@ -406,6 +415,8 @@ class Tagger:
         # 다른 말에서 왔다 — 「더블니 스웨트 팬츠」에 후드(9999archive 의 협업 이름 「후디진호」),
         # 「belted tuck pants」에 슬리브리스, 「BRUSHED STRAIGHT JEANS」에 카라(2026-09-06).
         # 원피스·셋업은 상의 쪽에 둔다 — 목선과 소매가 있다.
+        if METAL_PART.search(name) and not LEATHER_NAME.search(name):
+            hits.get("material", set()).difference_update({"가죽", "천연가죽"})
         if category in NECKLESS:
             hits.pop("neckline", None)
             hits.pop("sleeve_length", None)
