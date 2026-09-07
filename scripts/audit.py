@@ -83,6 +83,11 @@ CONCENTRATION_TIMES = 4      # 그 브랜드 몫의 이 배를 넘으면
 #
 # 이름 맨 앞 대괄호 상품코드는 어느 줄에서든 떼고 본다.
 MISFIT_HEAD = re.compile(r"^\s*(?:\[[^\]]*\]|【[^】]*】)\s*")
+
+# 겹쳐 만든 옷·분리되는 옷 — 소매나 기장이 둘인 게 맞다.
+LAYERED_NAME = re.compile(
+    r"레이어드|layered|세트|셋업|set[-\s]?up|\bset\b|투피스|2\s*piece|"
+    r"리버서블|reversible|투웨이|2\s*way|2\s*in\s*1", re.I)
 CATEGORY_MISFIT = [
     (r"(?<![a-z])(?:t-?shirts?|tees?)(?![a-z])|티셔츠", "neckline", {"스프레드카라", "오픈카라", "스탠드카라"}),
 ]
@@ -178,12 +183,24 @@ def main() -> int:
                         break
 
     # ── 태그
+    # 상품 이름이 스스로 「겹쳐 만든 옷」이라고 말하면 소매·기장이 둘인 게 맞다.
+    # andersson-bell 「니트 베스트와 반팔+롱슬리브를 결합한 레이어드 니트스웨터」,
+    # 「반팔과 긴팔이 분리 가능한 2 IN 1 티셔츠」,
+    # 「홀터넥 슬리브리스와 반팔 티셔츠 레이어드 디자인 — 분리 가능한 투웨이 구성」.
+    # 이런 옷에 두 값이 붙은 것은 잘못이 아니라 사실이다(2026-09-07, 소매 모순 80건 중 38건).
+    # 실루엣·무늬는 빼지 않는다 — 거기에 걸린 세트 상품은 하나도 없었다.
+    name_of = {r["source_url"]: (r["name"] or "")
+               for r in csv.DictReader((DATA / "products_full.csv").open(encoding="utf-8-sig"))}
+    LAYERED_AXES = {"sleeve_length", "length"}
     axes = [a for a in vocab if not a.startswith("_")]
     known = {ax: set(vocab[ax]) for ax in axes}
     for u, p in tags.items():
         t = p.get("tags") or {}
+        layered = bool(LAYERED_NAME.search(name_of.get(u, "")))
         for ax, v1, v2 in CONTRADICT:
             got = t.get(ax) or []
+            if layered and ax in LAYERED_AXES:
+                continue
             if v1 in got and v2 in got:
                 flag(f"서로 반대인 태그 — {v1}+{v2}", u, ax)
         for ax, vals in t.items():
