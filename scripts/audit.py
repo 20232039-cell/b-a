@@ -68,9 +68,22 @@ CONCENTRATION_MIN = 200      # 이만큼 붙은 태그만 본다
 CONCENTRATION_SHARE = 0.20   # 한 브랜드가 이만큼 넘게 가져가고
 CONCENTRATION_TIMES = 4      # 그 브랜드 몫의 이 배를 넘으면
 
-# 품목과 어긋나는 태그. 맨투맨에 카라가 달릴 리 없다 — 이것도 위 카라 사고를 바로 짚는다.
+# 품목과 어긋나는 태그.
+#
+# 「맨투맨에 카라가 달릴 리 없다」는 줄을 뺐다. 2026-09-07 에 걸린 33건을 전수로 열어 보니
+# 한 건도 잘못이 아니었다.
+#   badblood 「[w-sweatshirt24-013] 클래식 체크 럭비 셔츠」  — 이름 앞 대괄호는 매장 상품코드다
+#   insilence 「믹스드 스냅 스웨트셔츠」  설명 「하이넥 카라, 스냅 클로저」
+#   sinoon 「Authentic Logo Sweatshirt」  설명 「체커보드 패턴의 카라와 소매단이 돋보이는」
+#   andersson-bell                       설명 「Rib with collar, cuff and hem」
+#   tonywack 「ZIP UP SWEATSHIRT」        설명 「Spread collar Half-zip closure」
+# 카라 달린 맨투맨은 흔하다 — 럭비 셔츠·하프집업·스냅 카라. 전제가 틀린 검사였다.
+# 한 번도 맞힌 적 없는 검사는 소리만 낸다. 브랜드가 태그를 독차지하는 사고(frizmworks
+# 「측정 (카라/립 제외)」 1,017벌)는 위의 「한 브랜드가 태그를 독차지한다」가 이미 잡는다.
+#
+# 이름 맨 앞 대괄호 상품코드는 어느 줄에서든 떼고 본다.
+MISFIT_HEAD = re.compile(r"^\s*(?:\[[^\]]*\]|【[^】]*】)\s*")
 CATEGORY_MISFIT = [
-    (r"sweat\s?shirts?|맨투맨|스웨트셔츠", "neckline", {"카라", "스프레드카라", "오픈카라", "스탠드카라", "숄카라"}),
     (r"(?<![a-z])(?:t-?shirts?|tees?)(?![a-z])|티셔츠", "neckline", {"스프레드카라", "오픈카라", "스탠드카라"}),
 ]
 
@@ -245,7 +258,8 @@ def main() -> int:
     for pat, ax, bad in CATEGORY_MISFIT:
         rx = re.compile(pat, re.I)
         for r in prod:
-            if not rx.search(r["name"] or ""):
+            nm = MISFIT_HEAD.sub("", r["name"] or "")
+            if not rx.search(nm):
                 continue
             got = set(((tags.get(r["source_url"]) or {}).get("tags") or {}).get(ax) or [])
             hit = got & bad
