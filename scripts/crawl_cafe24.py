@@ -1630,6 +1630,7 @@ OPTION_PROMPT = re.compile(
 # 「S [품절]」처럼 재고 딱지가 이름에 붙어 온다. 이름에서 떼고 어느 사이즈가 품절인지는
 # 따로 적어 둔다 — 앱에 「S [품절]」이 사이즈 이름으로 서면 안 된다(1,879벌).
 OPTION_SOLDOUT = re.compile(r"\s*[\[\(]?\s*(?:품절|sold\s?out|일시\s?품절|재입고\s?예정)\s*[\]\)]?\s*$", re.I)
+OPTION_SIZE_TITLE = re.compile(r"size|사이즈|사이스|치수", re.I)
 
 
 def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
@@ -1885,6 +1886,41 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
             soldout_options.append(v)
         if v:
             options.append(v)
+
+    # cafe24 새 스킨은 사이즈를 드롭다운이 아니라 단추 목록으로 놓는다:
+    #   <ul option_title="SIZE" option_style="button"><li option_value="XS" title="XS">…
+    # 위의 select 만 보다가 이 꼴을 통째로 놓쳤다 — 판매중 상품 27,289벌 가운데 옵션이
+    # 아예 없는 것이 16,385벌(60%)이고, 그 때문에 사이즈 표에 이름을 붙일 수 없는 옷이
+    # 3,685벌이다(2026-09-07 실측). xlim 「ep7-01 shorts」는 XS·S·M·L·XL 이 HTML 안에
+    # 그대로 있는데 우리는 빈손이었다.
+    # option_value 는 매장에 따라 상품코드(insilence 「P0000CEB000A」)라서 title 을 읽는다.
+    # 「SIZE」 칸이 있으면 그 칸만 쓴다 — 「COLOR」 칸의 IVORY 가 사이즈 이름이 될 수는 없다.
+    if not options:
+        groups: list[tuple[str, list[tuple[str, bool]]]] = []
+        for ul in soup.select("ul[option_title]"):
+            vals = []
+            for li in ul.select("li[option_value]"):
+                lab = (li.get("title") or li.get_text(" ", strip=True) or "").strip()
+                if not lab or len(lab) >= 60 or OPTION_PROMPT.match(lab):
+                    continue
+                vals.append((lab, "ec-product-disabled" in (li.get("class") or [])))
+            if vals:
+                groups.append(((ul.get("option_title") or "").strip(), vals))
+        # 사이즈 칸을 앞에 세우고 색 칸도 함께 받는다 — 옵션은 사이즈 이름의 출처이면서
+        # pick_color 가 색을 읽는 자리이기도 하다(fabrega 「실버-FREE」). 둘 다 쓴다.
+        # 사이즈 이름을 붙일 때는 _SIZE_OPT 로 걸러 내므로 색 이름이 섞여도 되지만,
+        # 「옵션 수 = 표 칸 수」 조건이 있어 섞이면 이름을 안 붙이고 넘어간다(틀리지는 않는다).
+        groups.sort(key=lambda g: 0 if OPTION_SIZE_TITLE.search(g[0]) else 1)
+        for _title, vals in groups:
+            for lab, dead in vals:
+                m = OPTION_SOLDOUT.search(lab)
+                if m:
+                    lab = lab[:m.start()].strip()
+                if not lab or lab in options:
+                    continue
+                if dead or m:
+                    soldout_options.append(lab)
+                options.append(lab)
 
     return {
         "product_no": no,

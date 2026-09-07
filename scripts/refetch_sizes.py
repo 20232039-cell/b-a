@@ -123,7 +123,10 @@ def refetch(http: cc.PoliteSession, shop: cc.Shop, only_missing: bool, log, fiel
             # 진짜 상품이라, 이름은 읽히는데 값만 없으면 매장이 품절 상품의 값을 내린 것이다.
             if nd and (nd.get("price") or nd.get("name")):
                 prev = dict(d)          # 덮어쓰기 전 옛 줄 — carry_over 가 이걸 본다
-                for key in ("description", "description_source", "detail_text", "spec", "detail_images", "size_table", "soldout", "price"):
+                # options 도 받아 적는다 — 사이즈 표에 이름을 붙이는 유일한 출처인데
+                # 이 목록에 없어서, 수집기를 고쳐도 창고에는 영원히 안 들어왔다(2026-09-07).
+                for key in ("description", "description_source", "detail_text", "spec", "detail_images",
+                            "size_table", "soldout", "price", "options", "soldout_options"):
                     if nd.get(key) not in (None, "", [], {}):
                         d[key] = nd[key]
                 if not nd.get("price"):

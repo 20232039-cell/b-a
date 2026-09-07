@@ -1238,8 +1238,47 @@ def _clash(vals: dict, a: int, b: int) -> list[str]:
 #   ② 옵션이 작은 것부터 큰 것 차례로 적혀 있다(XS<S<M<L<XL, 숫자는 오름차순)
 #   ③ 실측이 사이즈 따라 커진다 — 값이 다 있는 라벨 하나라도 단조증가이고, 줄어드는 라벨은 없다
 # ③ 이 노이러 니트 두 벌을 걸렀다(소매길이 62.6 → 54.0 — 표가 거꾸로거나 잘못 읽혔다).
+_OPT_SOLDOUT = re.compile(r"\s*[\[\(]?\s*(?:품절|sold\s?out|out\s*of\s*stock|일시\s?품절|재입고\s?예정)\s*[\]\)]?\s*$", re.I)
 _SIZE_OPT = re.compile(r"^(?:XXS|XS|S|M|L|XL|XXL|2XL|3XL|FREE|F|ONE ?SIZE|\d{1,2}|0\d)$", re.I)
 _SIZE_RANK = {"XXS": 0, "XS": 1, "S": 2, "M": 3, "L": 4, "XL": 5, "XXL": 6, "2XL": 6, "3XL": 7}
+# 매장은 옵션 이름 뒤에 재고 사정을 덧붙인다(hatching-room 「1(XS) Only 1 Left」·「4(L) Low Stock」).
+_OPT_STOCK = re.compile(r"\s*[\[\(]?\s*(?:only\s*\d+\s*left|low\s*stock|품절\s*임박|재고\s*\d+\s*개?|"
+                        r"\d+\s*개?\s*남음)\s*[\]\)]?\s*$", re.I)
+# 사이즈 뒤에 변형을 붙여 파는 매장(diafvine 「M 실버지퍼」·「L엔틱지퍼 (+KRW 50,000)」).
+# 맨 앞 낱말만 사이즈로 본다 — 뒤에 구분자나 한글이 와야 한다. 「MELANGE GRAY」는 안 걸린다.
+_SIZE_HEAD = re.compile(r"^(XXS|XS|3XL|2XL|XXL|XL|S|M|L|\d{1,2})(?=[\s(\[（]|[가-힣])", re.I)
+
+
+def _size_option_names(opts: list[str]) -> list[str]:
+    """구매 옵션 목록에서 사이즈 이름만 앞에서부터 끊어 낸다.
+
+    한 목록에 사이즈 칸과 색 칸이 함께 들어온다(수집기가 두 칸을 이어 붙이는데 사이즈 칸을
+    앞에 세운다). 사이즈는 오름차순으로 놓이므로, 순서가 끊기는 자리에서 멈추면 색 칸이
+    섞이지 않는다: hatching-room 「1(XS) · 2(S) · 3(M) · 4(L) · M · L」에서 앞 넷만 가져온다.
+    """
+    names: list[str] = []
+    for o in opts:
+        o = _OPT_STOCK.sub("", _OPT_SOLDOUT.sub("", o)).strip()
+        if not o:
+            continue
+        if _SIZE_OPT.match(o):
+            cand = o
+        else:
+            m = _SIZE_HEAD.match(o)
+            if not m:
+                if names:
+                    break               # 사이즈 줄이 끝났다
+                continue                # 아직 「- [필수] 사이즈 선택 -」 같은 안내 구간이다
+            cand = m.group(1)
+        r = _opt_rank(cand)
+        if r is None:
+            if names:
+                break
+            continue
+        if names and (_opt_rank(names[-1]) or -1) >= r:
+            break                       # 오름차순이 끊겼다 — 다른 칸이 시작된 것이다
+        names.append(cand)
+    return names
 
 
 def _opt_rank(o: str):
@@ -1292,8 +1331,11 @@ def names_from_options(out: dict, rows_by_url: dict) -> int:
         r = rows_by_url.get(u)
         if not r:
             continue
+        # 옛 창고 줄에는 「2 [품절]」처럼 품절 표시가 붙어 있다(그 표시를 떼는 코드가
+        # 수집기에 들어오기 전에 담긴 줄이다). 표시만 떼면 327벌에 이름이 붙는다 —
+        # 다시 수집할 때까지 기다릴 까닭이 없다(2026-09-07).
         opts = [o.strip() for o in (r.get("options") or "").split("|") if o.strip()]
-        names = [o for o in opts if _SIZE_OPT.match(o)]
+        names = _size_option_names(opts)
         cols = max((len(v) for v in e["sizes"].values()), default=0)
         if len(names) < 2 or len(names) != cols:
             continue
