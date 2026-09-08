@@ -217,7 +217,9 @@ ITEM_TYPE_VOCAB = {
     "집업": ["zip-up", "zipup", "zip up", "집업", "half zip", "하프집업", "full zip", "풀집업", "quarter zip", "쿼터 집", "쿼터집"],
     # 스웻은 별도 품목이 아니다(사람 결정 2026-09-02): 스웻셔츠=맨투맨, 스웻팬츠=스웨트팬츠. 품목 단어 없는 「스웻」은 build_csv 가 상의일 때만 맨투맨
     "맨투맨": ["sweatshirt", "sweat shirt", "맨투맨", "crewneck", "crew neck", "스웻셔츠", "스웨트셔츠", "스웨트 셔츠", "스웻 셔츠", "스웻 크루넥", "sweat crew", "mtm", "엠티엠", "sweat", "스웻", "스웨트"],
-    "티셔츠": ["t-shirt", "tshirt", "tee", "티셔츠", "t"],
+    "티셔츠": ["t-shirt", "tshirt", "tee", "티셔츠", "t",
+             # 「WAFFLE HENLEY NECK」처럼 henley 가 머리 낱말인 이름 15벌 — 헨리넥은 넥라인이고 옷은 티셔츠다.
+             "henley"],
     "셔츠": ["shirt", "blouse", "셔츠", "블라우스", "셔켓", "shacket", "shirket", "셔킷", "overshirt", "오버셔츠"],
     "니트": ["knit", "sweater", "니트", "스웨터", "cardigan", "카디건", "pullover", "풀오버",
             "turtle neck", "turtleneck", "터틀넥", "mock neck", "모크넥", "하이넥", "high neck"],
@@ -232,8 +234,12 @@ ITEM_TYPE_VOCAB = {
     "데님": ["jeans", "denim", "데님", "청바지", "jean", "진스", "쟌", "데님팬츠",
             "셀비지", "selvedge", " 진 "],
     "팬츠": ["pants", "trousers", "trouser", "팬츠", "슬랙스", "slacks", "트라우저",
-            "치노", "chino", "판타롱", "pantalon"],
-    "스커트": ["skirt", "스커트"],
+            "치노", "chino", "판타롱", "pantalon",
+             # 「트라우져」 표기 5벌 — 「조거 트라우저」가 팬츠로 가듯 「조거 트라우져」도 팬츠로 간다(표기만 다른 13벌이 같은 답을 받는다).
+             "트라우져"],
+    "스커트": ["skirt", "스커트",
+             # skort(스커트+팬츠) 19벌 — 매장은 하의 칸에 두지만 옷은 스커트다.
+             "skort"],
     "원피스": ["dress", "원피스", "드레스", "one-piece", "onepiece", "one piece"],
     "파자마": ["파자마", "pajama", "pyjama", "잠옷", "홈웨어", "라운지웨어", "loungewear"],
     "베스트": ["vest", "베스트"],
@@ -246,11 +252,16 @@ ITEM_TYPE_VOCAB = {
     "트렌치": ["trench", "트렌치"],
     "점퍼": ["jumper", "점퍼"],
     "탑": ["top", "탑", "sleeveless", "슬리브리스", "민소매", "tank", "탱크", "뷔스티에", "bustier",
-           "캐미솔", "camisole", "브라렛", "bralette", "브라탑", "bra top", " 브라 "],
+           "캐미솔", "camisole", "브라렛", "bralette", "브라탑", "bra top", " 브라 ",
+             # 캐미솔은 있는데 cami·camisole 이 없어 10벌, bra 는 한글 「 브라 」만 있어 7벌, halter 7벌이 품목 빈칸이었다(2026-09-08).
+             "cami", "camisole", "bra", "halter"],
     # 속옷·수영복도 실측 표가 있는 옷이다 — 매장이 ACC 카테고리에 넣어 두어 잡화로 갔다
     # 「브라」만 두면 「브라운」에 걸린다 — 뒤에 빈칸이 오는 것만 받는다.
     # 브라는 하의가 아니다 — 브라·브라탑·브라렛은 위 「탑」으로 옮겼다(2026-09-07).
     # 세트(「브라탑 & 드로즈」·「브라렛 & 팬티」)는 뒷말이 이겨 그대로 언더웨어로 남는다.
+    # 바디수트는 어느 키에도 없어서 13벌이 품목 빈칸이었다. 「Tank Bodysuit」·「Jersey … Bodysuit」처럼
+    # 탑·저지가 앞에 붙어도 뒤 낱말인 bodysuit 이 이긴다(2026-09-08).
+    "바디수트": ["bodysuit", "body suit", "바디수트", "바디슈트"],
     "언더웨어": ["boxer brief", "boxer", "brief", "브리프", "드로즈", "팬티", "언더웨어",
              "underwear"],
     "수영복": ["비키니", "bikini", "수영복", "swimsuit", "swimwear", "래쉬가드", "rashguard"],
@@ -292,6 +303,7 @@ ITEM_TO_CATEGORY = {
     "저지": "tops", "반팔": "tops", "피케": "tops", "후드집업": "tops",
     "버뮤다": "bottoms", "레깅스": "bottoms", "조거팬츠": "bottoms",
     "언더웨어": "bottoms", "수영복": "tops", "수영복하의": "bottoms",
+    "바디수트": "tops",
     "파카": "outer", "MA-1/봄버": "outer", "플리스": "outer",
     "스니커즈": "shoes", "부츠": "shoes", "샌들": "shoes", "구두": "shoes",
 }
