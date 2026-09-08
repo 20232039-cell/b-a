@@ -85,7 +85,26 @@ def is_cdn(host: str) -> bool:
     return host in CDN_HOSTS or host.endswith(CDN_SUFFIX)
 
 
-def polite_get(url: str, delay: float, cdn_delay: float | None = None) -> bytes | None:
+# 카페24는 사진 한 장을 tiny·small·medium·big 네 칸에 나눠 두는데, 매장에 따라 큰 칸이
+# 아예 없다. 크롤이 목록에서 받은 주소를 무조건 `/big/` 으로 올려 적어 왔기 때문에
+# (crawl_cafe24._big), 그런 매장은 상세 그림이 통째로 404 였다 — 판독기가 한 장도 못 받는다.
+#   xlim      /big/ 404 → /small/  851x1000
+#   matin-kim /big/ 404 → /medium/ 1200x1800
+#   stu       /big/ 404 → /small/  1280x1920
+# 작은 칸이라고 작은 그림이 아니다. 매장이 원본을 넣어 둔 칸이 어디냐의 문제라서, 내려가도
+# 판독에 쓸 만한 크기가 나온다(표본 70장 전부 되살아났다, 2026-09-08).
+# 받아 보고 실패했을 때만 한 칸씩 내려 본다 — 되는 길에는 요청이 늘지 않는다.
+_BIG_SLOT = re.compile(r"/web/product/(extra/)?big/")
+
+
+def size_fallbacks(url: str) -> list[str]:
+    if not _BIG_SLOT.search(url):
+        return []
+    return [_BIG_SLOT.sub(lambda m: f"/web/product/{m.group(1) or ''}{slot}/", url)
+            for slot in ("medium", "small", "tiny")]
+
+
+def _get_once(url: str, delay: float, cdn_delay: float | None) -> bytes | None:
     host = urlparse(url).netloc
     if cdn_delay is not None and is_cdn(host):
         delay = cdn_delay
@@ -100,6 +119,17 @@ def polite_get(url: str, delay: float, cdn_delay: float | None = None) -> bytes 
             return r.content
     except requests.RequestException:
         return None
+    return None
+
+
+def polite_get(url: str, delay: float, cdn_delay: float | None = None) -> bytes | None:
+    data = _get_once(url, delay, cdn_delay)
+    if data is not None:
+        return data
+    for alt in size_fallbacks(url):
+        data = _get_once(alt, delay, cdn_delay)
+        if data is not None:
+            return data
     return None
 
 

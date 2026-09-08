@@ -64,6 +64,44 @@ OUT_CSV = DATA / "products_full.csv"
 SUMMARY_JSON = CRAWL_DIR / "_summary.json"
 
 UA = "Mozilla/5.0 (compatible; LayerCatalog/0.2; +https://github.com/20232039-cell/layer-brand-agent)"
+
+# 카페24는 사진을 tiny·small·medium·big 네 칸에 나눠 두는데, 큰 칸을 안 만드는 매장이 있다.
+# 목록에서 받은 주소를 무조건 `/big/` 으로 올려 적었더니 그런 매장은 저장된 그림 주소가
+# 전부 404 였다 — 판독기도 앱도 한 장을 못 받는다(xlim 1,626벌 · matin-kim 1,211 ·
+# tonywack 1,297 · low-classic 956 …, 2026-09-08 확인). 매장마다 한 번만 재 보고 기억한다.
+# 못 재면 올리지 않는다 — 페이지가 준 주소는 적어도 열리기 때문에, 틀린 큰 주소보다 낫다.
+_BIG_OK: dict[str, bool] = {}
+_BIG_LOCK = threading.Lock()
+
+
+def _big_slot_ok(u: str) -> bool:
+    """이 매장에 `/web/product/big/` 칸이 있나 — 호스트마다 한 번만 물어본다."""
+    up = re.sub(r"/web/product/(extra/)?(small|medium|tiny)/",
+                lambda mm: f"/web/product/{mm.group(1) or ''}big/", u)
+    if up == u:
+        return True                                  # 이미 big 이거나 다른 모양
+    host = urlparse(u).netloc
+    with _BIG_LOCK:
+        if host in _BIG_OK:
+            return _BIG_OK[host]
+    def alive(v: str) -> bool:
+        try:
+            r = requests.get(v, headers={"User-Agent": UA}, timeout=20, stream=True)
+            good = r.status_code == 200 and "image" in r.headers.get("Content-Type", "image")
+            r.close()
+            return good
+        except requests.RequestException:
+            return False
+
+    if alive(up):
+        ok = True
+    elif alive(u):
+        ok = False              # 페이지가 준 칸은 열리는데 big 만 없다 — 이 매장엔 big 이 없다
+    else:
+        return True             # 이 사진 자체가 없다. 한 장으로 매장을 판정하지 않는다.
+    with _BIG_LOCK:
+        _BIG_OK.setdefault(host, ok)
+        return _BIG_OK[host]
 TIMEOUT = 25
 KST = timezone(timedelta(hours=9))
 
@@ -1704,6 +1742,8 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
         image = ogs[0] if ogs else ""
 
     def _big(u: str) -> str:
+        if not _big_slot_ok(u):
+            return u
         return re.sub(r"/web/product/(extra/)?(small|medium|tiny)/",
                       lambda mm: f"/web/product/{mm.group(1) or ''}big/", u)
 
