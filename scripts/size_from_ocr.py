@@ -574,8 +574,11 @@ def parse_matrix(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] |
                     break
                 continue
             nm = nm.upper()
-            if re.fullmatch(r"[0O]{2}[0-9OM]", nm):
-                nm = nm.replace("O", "0").replace("M", "2")   # 「OOM」= 002 (kirsh 표기)
+            if re.fullmatch(r"[0O]{2}[0-9OMSFL]", nm):
+                # 「OOM」= 00M, 「OOF」= 00F — 앞의 00 만 되돌린다. 이 매장은 001·002·003 과 00S·00M·00L·00F
+                # 두 체계를 함께 쓴다(값줄 머리 OOF 251 · OOM 213 · 005 228 · 001 254 · OOL 11). 예전엔 M 을
+                # 2 로 바꿔 00M 옷 200여 벌이 002 라는 딴 체계 이름을 달았다(2026-09-08).
+                nm = nm[:2].replace("O", "0") + nm[2:]
             names.append(nm)
             for c, raw in zip(labels, nums):
                 cols[c].append(None if raw in ("-", "–", "—") else fix_value(c, raw))
@@ -1203,6 +1206,10 @@ def load_manual() -> dict[str, dict]:
 # OCR 이 알파벳 사이즈를 숫자로 흘려 쓴다 — S 가 8·5 로 온다(dnsr 「8 M L」 637벌).
 # 옆 칸이 알파벳 사이즈일 때만 되돌린다. 「1 2 3」처럼 처음부터 숫자로 매기는 표는 안 건드린다.
 _OCR_SIZE = {"8": "S", "5": "S", "$": "S"}
+# 판독기 표에서 글자로만 된 이름 가운데 사이즈로 인정하는 것. 「S/P」·「Short」 같은 매장식 이름은 HTML 표에만
+# 있어 여기 안 걸린다(이 목록은 ocr·sibling 표에만 쓴다).
+_OCR_NAME_OK = {"XXS", "XS", "S", "M", "L", "XL", "XXL", "XXXL", "2XL", "3XL", "4XL",
+                "F", "FREE", "ONE", "OS", "ONESIZE", "SS"}
 _UNIT_TAIL = re.compile(r"\s*[\[(]\s*c?m\s*[\])]\s*$", re.I)
 
 
@@ -1443,8 +1450,13 @@ def clean_names(out: dict) -> dict:
             y = _UNIT_TAIL.sub("", x).strip()
             if y != x:
                 n["뒤의 (cm) 뗌"] += 1
-            if re.fullmatch(r"[0O]{1,2}[0-9OMF]", y, re.I):
-                z = y.upper().replace("O", "0").replace("M", "2")
+            # 「OOF」·「OOM」·「OO1」— 앞의 00 을 O 로 읽은 것. 앞자리만 0 으로 되돌리고 끝 글자는 그대로
+            # 둔다. 예전엔 M 도 2 로 바꿔 「OOM」이 「002」가 됐다 — 한 매장은 001·002·003 과 00S·00M·00L
+            # 두 체계를 함께 쓰는데(HTML 표 145벌이 001·002, 판독기 값줄 머리 OOM 213·005 228), 그 바람에
+            # 00M 옷 213벌이 002 라는 딴 체계의 이름을 달았다(2026-09-08).
+            # 「OS」(one size)는 건드리지 않는다 — 앞자리가 둘이거나, 하나면 뒤가 숫자일 때만.
+            if re.fullmatch(r"[0O]{2}[0-9OMSFL]|[0O][0-9]", y, re.I):
+                z = y[:-1].upper().replace("O", "0") + y[-1].upper().replace("O", "0")
                 if z != y.upper():
                     n["O 를 0 으로"] += 1
                 y = z
@@ -1457,6 +1469,35 @@ def clean_names(out: dict) -> dict:
         if "SS" in new and "S" not in new and "M" in new:
             new = ["S" if x == "SS" else x for x in new]
             n["SS 를 S 로"] += 1
+        # 같은 표에 00M·00L·00F 가 있으면 「005」는 00S 다(S 를 5 로 읽음). 005 혼자면 그대로 — 짐작하지 않는다.
+        if "005" in new and any(re.fullmatch(r"00[SMLF]", x) for x in new):
+            new = ["00S" if x == "005" else x for x in new]
+            n["005 를 00S 로"] += 1
+        # 같은 표에 00S·00L 이 있고 00M 이 없으면 「002」는 00M 이다(M 을 2 로 읽음). 숫자 체계(001·002)는 글자
+        # 체계와 한 표에 섞이지 않는다.
+        if "002" in new and "00M" not in new and any(x in ("00S", "00L") for x in new):
+            new = ["00M" if x == "002" else x for x in new]
+            n["002 를 00M 으로"] += 1
+        # 판독기 표에서 사이즈로 읽히지 않는 글자(「EPEE」·「S728」·「WIDTH」·「K」)와 네 자리 넘는 숫자
+        # (「1915」·「7002」— 모델 번호·연도)는 이름이 아니다. 비운다(이름이 그것뿐이면 표는 이름 없는
+        # 표가 되고, 값 있는 자리는 「?」로 남는다). 매장 옵션이 있으면 뒤에서 names_from_options 가 채운다.
+        # 「L.」은 L 이다. 숫자 사이에 낀 「O」 하나는 0 이다. 틀린 이름은 없는 이름보다 나쁘다(2026-09-08, 128벌).
+        if e.get("source") in ("ocr", "sibling"):
+            digits_else = all(re.fullmatch(r"\d{1,3}", x) for x in new if x and x != "O")
+            for i, y in enumerate(new):
+                if not y:
+                    continue
+                yy = y.upper().rstrip(".")
+                if y == "O" and digits_else and len(new) > 1:
+                    new[i] = "0"; n["O 를 0 으로"] += 1
+                elif re.fullmatch(r"[A-Za-z][A-Za-z0-9.]*", y):
+                    if yy in _OCR_NAME_OK:
+                        if yy != y:
+                            new[i] = yy; n["끝의 점 뗌"] += 1
+                    else:
+                        new[i] = ""; n["사이즈로 읽히지 않는 글자 비움"] += 1
+                elif re.fullmatch(r"\d{4,}", y):
+                    new[i] = ""; n["네 자리 넘는 숫자 비움"] += 1
         new = blank_stray_numbers(new)
         # ① 이름도 값도 없는 자리는 통째로 뺀다 — 표 밑에 붙은 「MODEL 179cm/68kg」 줄이
         #    사이즈 한 칸으로 잡혀 앱에 값 없는 「?」 사이즈가 섰다(frizmworks).
