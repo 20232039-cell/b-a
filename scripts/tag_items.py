@@ -862,6 +862,75 @@ COLOR_TAIL = re.compile(
     r"blue|green|pink|red|burgundy|melange.*)$", re.I)
 
 
+_SHELL_W = 8      # 낱말 몇 개 묶음으로 「같은 글」을 셀지
+_JS_CSS = re.compile(r"\bvar\s+\w+\s*=|\{\s*margin\s*:|font-family\s*:", re.I)
+
+
+def strip_shell(brw: dict[str, str], items: list[dict]) -> tuple[int, int]:
+    """브라우저 글에서 매장 껍데기를 낱말 묶음 단위로 걷어낸다.
+
+    drop_boilerplate 는 글 전체가 같을 때만 버린다. 그런데 브라우저 글은 상품 글 앞뒤로 메뉴
+    (「긴팔티셔츠 반팔/슬리브리스 데님팬츠」)·장바구니 단추·꼬리말·「함께 보면 좋은 상품」 목록이
+    붙어 와서 글마다 조금씩 다르다. 브랜드마다 브라우저 글의 25~93% 가 이런 껍데기였고(2026-09-08,
+    20개 매장 실측), 한 매장의 후디에 반팔·슬리브리스·니트·데님·가죽이 메뉴에서 붙었다.
+
+    같은 8낱말 묶음이 그 브랜드 상품 max(5, 10%) 벌 이상에 나오고, 그 상품들의 이름 줄기(색 뗀 것)가
+    둘 이상이면 껍데기 후보다 — 색만 다른 같은 옷의 설명은 줄기가 하나라 남는다.
+
+    **가장자리만 뺀다.** 껍데기는 글의 앞(메뉴)과 뒤(장바구니·꼬리말·「함께 보면 좋은 상품」·케어 안내)에
+    붙고, 상품 글은 가운데 있다. 가운데에서 반복되는 글은 브랜드가 시리즈마다 같이 쓰는 진짜 사양이다 —
+    처음 판이 전부를 뺐더니 한 가방 브랜드 80벌의 로고·버클·코튼, 한 신발 브랜드의 소가죽·안감, 한 매장의
+    YKK 30벌이 사라졌다(after6 측정). 가장자리만 빼면 그 셋은 0 이 사라지고 메뉴 198 낱말은 그대로 빠진다.
+    자바스크립트·CSS 를 담아 온 기록(「var sAuthSSLDomain = …」)은 통째로 버린다.
+    돌려주는 것: (덮어서 뺀 낱말 수, 통째로 버린 기록 수).
+    """
+    dropped = 0
+    for u in [u for u, t in brw.items() if _JS_CSS.search(t[:600])]:
+        brw.pop(u, None)
+        dropped += 1
+    if len(brw) < 5:
+        return 0, dropped
+    stem = {r["source_url"]: COLOR_TAIL.sub("", (r["name"] or "").strip().lower()) for r in items}
+    toks_of = {u: t.split() for u, t in brw.items()}
+    seen: dict[str, set] = {}
+    for u, toks in toks_of.items():
+        for i in range(max(0, len(toks) - _SHELL_W + 1)):
+            seen.setdefault(" ".join(toks[i:i + _SHELL_W]), set()).add(u)
+    need = max(5, int(0.1 * len(brw)))
+    shell = set()
+    for w, us in seen.items():
+        if len(us) < need:
+            continue
+        if len({stem.get(x, x) for x in us}) < 2:
+            continue      # 색만 다른 같은 옷 — 설명이 같은 게 맞다
+        shell.add(w)
+    if not shell:
+        return 0, dropped
+    removed = 0
+    for u, toks in toks_of.items():
+        mark = [False] * len(toks)
+        for i in range(max(0, len(toks) - _SHELL_W + 1)):
+            if " ".join(toks[i:i + _SHELL_W]) in shell:
+                for j in range(i, i + _SHELL_W):
+                    mark[j] = True
+        # 앞에서 이어진 표시 구간과 뒤에서 이어진 표시 구간만 뺀다
+        a = 0
+        while a < len(mark) and mark[a]:
+            a += 1
+        b = len(mark)
+        while b > a and mark[b - 1]:
+            b -= 1
+        mark = [i < a or i >= b for i in range(len(toks))]
+        if any(mark):
+            removed += sum(mark)
+            kept = " ".join(t for t, m in zip(toks, mark) if not m)
+            if kept.strip():
+                brw[u] = kept
+            else:
+                brw.pop(u, None)
+    return removed, dropped
+
+
 def drop_boilerplate(brw: dict[str, str], items: list[dict]) -> int:
     """브라우저가 설명글 대신 매장 껍데기를 담아 온 것을 버린다.
 
@@ -935,6 +1004,10 @@ def main():
                     t = (b.get("description") or "").strip()
                     if b.get("source_url") and len(t) > len(brw.get(b["source_url"], "")):
                         brw[b["source_url"]] = t
+        # strip_shell 을 먼저 — 껍데기 빈도는 메뉴만 담긴 기록까지 세어야 문턱(10%)을 넘는다. 그 기록들은
+        # drop_boilerplate 가 버릴 것들인데, 먼저 버리면 메뉴가 섞인 나머지 기록이 문턱 아래로 떨어져
+        # 후디의 메뉴가 그대로 남았다(after6b 에서 확인, 2026-09-08).
+        strip_shell(brw, items)
         drop_boilerplate(brw, items)
         for r in items:
             d = crawl.get(str(r["product_no"]), {})
