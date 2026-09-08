@@ -1246,7 +1246,9 @@ _OPT_STOCK = re.compile(r"\s*[\[\(]?\s*(?:only\s*\d+\s*left|low\s*stock|품절\s
                         r"\d+\s*개?\s*남음)\s*[\]\)]?\s*$", re.I)
 # 사이즈 뒤에 변형을 붙여 파는 매장(diafvine 「M 실버지퍼」·「L엔틱지퍼 (+KRW 50,000)」).
 # 맨 앞 낱말만 사이즈로 본다 — 뒤에 구분자나 한글이 와야 한다. 「MELANGE GRAY」는 안 걸린다.
-_SIZE_HEAD = re.compile(r"^(XXS|XS|3XL|2XL|XXL|XL|S|M|L|\d{1,2})(?=[\s(\[（]|[가-힣])", re.I)
+# 「01_S」·「02_M」처럼 번호와 글자 사이즈를 밑줄로 이어 쓰는 매장이 있다(한 매장 214벌). 밑줄이 없으면
+# 사이즈 이름이 하나도 안 나와 두 칸 표 64벌이 이름 없이 남았다(2026-09-08).
+_SIZE_HEAD = re.compile(r"^(XXS|XS|3XL|2XL|XXL|XL|S|M|L|\d{1,2})(?=[\s(\[（_]|[가-힣])", re.I)
 
 
 def _size_option_names(opts: list[str]) -> list[str]:
