@@ -569,6 +569,12 @@ class Tagger:
         if category in GARMENT_CATEGORIES and self.not_garment_material:
             for val in self.not_garment_material:
                 hits.get("material", set()).discard(val)
+        # 폴로카라·스프레드카라·오픈카라·스탠드카라·차이나카라·숄카라는 다 카라다. 세부 카라만 있고
+        # 「카라」가 없는 옷이 578벌(2026-09-08: 스프레드 207 · 오픈 163 · 폴로 133 · 스탠드 73 · 차이나 11
+        # · 숄 8) — 「카라」로 걸러 보면 이들이 빠진다. 세부 값이 맞으면 카라는 확실하니 함께 붙인다.
+        nk = hits.get("neckline")
+        if nk and any(v != "카라" and v.endswith("카라") for v in nk):
+            nk.add("카라")
         # 데님 칸에 든 바지는 청바지다 — 이름에 「데님」이라고 안 적은 223벌이 있다.
         if category == "Denim":
             hits["pants_type"].add("진")
