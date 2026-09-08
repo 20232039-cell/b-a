@@ -127,6 +127,17 @@ def main() -> int:
     vocab = json.loads((DATA / "vocab_aliases.json").read_text(encoding="utf-8"))
     labels = json.loads((DATA / "size_labels.json").read_text(encoding="utf-8"))
     ranges = labels["_ranges_cm"]
+    # 「밑단」은 품목마다 다른 것을 잰다 — 바지는 밑단 통(작다), 상의·치마·아우터는 밑단 폭(크다).
+    # 한 범위로 재면 둘 다 틀린다. 2026-09-08 실측(값 개수 · 중앙 · 95%):
+    #   바지 12,693 · 27.0 · 36.0        상의 6,439 · 42.0 · 57.5
+    #   치마  1,170 · 51.0 · 59.0        아우터 1,024 · 49.5 · 58.5
+    # 지금 범위 8~60 은 바지 쪽 잣대여서, 오버핏 셔츠의 밑단 62·64.5cm 를 「범위 밖」으로 든다.
+    # 품목을 아는 감사기에서는 갈라 본다(수집 쪽 범위는 그대로 둔다 — 넓히면 틀린 값이 들어온다).
+    # 품목별로 가르는 것도 재 봤는데 더 나빴다 — 바지 8~45 로 좁히니 135개가 걸렸고,
+    # 열어 보니 「WORK SKIRT」·「MINI SKORT」·「스커트 팬츠」·「OPS」처럼 하의 칸에 든
+    # 치마붙이였다. 그것들의 밑단 53~60cm 는 폭이라 맞는 값이다. 품목 칸이 그만큼
+    # 섞여 있어서 품목으로는 못 가른다. 그래서 한 범위로 두되 위를 상의에 맞춰 넓힌다.
+    HEM_RANGE = (8, 80)
     rollup = vocab.get("_color_rollup", {})
     try:
         import crawl_cafe24 as cc
@@ -170,6 +181,8 @@ def main() -> int:
         # 사람이 사진을 보고 적어 준 값(manual_sizes.csv)은 범위보다 우선이다 — 여기서 안 센다.
         for lab, vals in ({} if e.get("source") == "manual" else s).items():
             lo, hi = ranges.get(lab, (0, 1e9))[:2] if isinstance(ranges.get(lab), (list, tuple)) else (0, 1e9)
+            if lab == "밑단":
+                lo, hi = HEM_RANGE
             for x in vals:
                 if x is not None and not (lo <= x <= hi):
                     flag("값이 라벨 범위 밖", u, f"{lab}={x} (범위 {lo}~{hi})")
