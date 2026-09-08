@@ -179,8 +179,21 @@ GLUE_PREFIX = {
 }
 
 
+# 뒤에 이 글자가 붙으면 뜻이 뒤집히는 낱말. 「코튼 롱 슬리브리스 티셔츠」는 민소매인데
+# 「롱 슬리브」가 앞부분에 그대로 들어 있어서 롱슬리브·슬리브리스 둘 다 붙었다(3벌,
+# 2026-09-08). 영어 쪽은 이미 `(?![a-z0-9])` 로 막혀 있어 'long sleeveless' 가 안 걸린다 —
+# 세 글자 넘는 한글 별칭에만 경계가 없었다. 한글은 조사가 붙어 다녀서(「롱슬리브를」)
+# 뒤를 통째로 막을 수는 없고, 뜻이 뒤집히는 글자만 짚어 막는다.
+BLOCK_SUFFIX = {
+    "롱슬리브": "리스",
+    "롱 슬리브": "리스",
+}
+
+
 def compile_alias(alias: str) -> re.Pattern:
     a = re.escape(alias.lower())
+    if alias in BLOCK_SUFFIX:
+        return re.compile(rf"{a}(?!{BLOCK_SUFFIX[alias]})")
     if _is_hangul(alias) and len(alias) == 1:
         return re.compile(rf"(?<![{HANGUL}]){a}(?![{HANGUL}])")
     if _is_hangul(alias) and len(alias) == 2:
