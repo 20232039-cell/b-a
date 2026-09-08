@@ -82,6 +82,27 @@ LEATHER_NAME = re.compile(r"가죽|leather|스웨이드|suede|누벅|레더", re
 # 낱말 하나만 지운다 — 「라벨」은 부자재로 남아야 한다. 겉감이 가죽인 가방·지갑·구두
 # (matin-kim 「겉감 - 소가죽 100%」 등 164벌)와 가죽을 배색으로 쓴 옷(frizmworks 「어깨
 # 부분에는 천연 양가죽으로 배색하여」)은 그대로다.
+# 판독기가 「가슴단면」을 「가 슴 단 면」으로 띄워 놓으면 마지막 「면」이 소재 면(코튼)이 된다 —
+# 2자 별칭 규칙이 앞 글자가 한글이 아니면(공백) 통과시키기 때문이다. 「단면」은 치수를 재는
+# 자리(단면 = 한쪽 폭)이지 원단이 아니다. 판매중 옷에서 181벌이 이 한 글자로 코튼이 됐다
+# (2026-09-08, 근거 스캔). 「단」과 「면」 사이에 공백이 있는 꼴은 실제 글에 없다 — 그 「면」만 지운다.
+# 「버튼다운」·「히든 다운 버튼」의 다운은 카라 모양(button-down)이지 충전재 다운이 아니다. 그런데
+# 셔츠·스웨터 52벌이 그 낱말 하나로 material/다운(오리털)이 됐다 — 52벌 다 구스·덕·충전재 같은
+# 진짜 근거는 없었다(2026-09-08). 「버튼」은 남긴다 — 버튼다운 셔츠에 단추는 실제로 있다.
+BUTTON_DOWN = re.compile(r"(버튼\s*)(다운)|(다운)(\s*버튼)|(button[\s-]*)(down)", re.I)
+
+
+def _mask_button_down(m: re.Match) -> str:
+    g = m.groups()
+    if g[0] is not None:   # 버튼 다운
+        return g[0] + " " * len(g[1])
+    if g[2] is not None:   # 다운 버튼
+        return " " * len(g[2]) + g[3]
+    return g[4] + " " * len(g[5])  # button down
+
+
+OCR_SPLIT_DANMYEON = re.compile(r"단\s+면(?![가-힣])")
+
 LEATHER_TRIM = re.compile(r"(?:소|양|합성|인조|에코|재생|송아지|천연)?가죽\s*(?:라벨|탭|패치|파이핑|트리밍|와펜)")
 
 NECKLESS = {"Pants", "Denim", "Skirts"}
@@ -480,6 +501,8 @@ class Tagger:
         for b in self.text_blocklist:  # '시어링'→시어, '레이어드 스타일링'→레이어드 같은 오탐을 먼저 지운다
             text = text.replace(b, " " * len(b))
         text = LEATHER_TRIM.sub(lambda m: m.group(0).replace("가죽", "  "), text)
+        text = OCR_SPLIT_DANMYEON.sub(lambda m: m.group(0).replace("면", " "), text)
+        text = BUTTON_DOWN.sub(_mask_button_down, text)
         hits = self._scan(self.text_rules, text)
 
         # n부 — 소매면 칠부소매, 팬츠면 버뮤다(명시어 우선)
@@ -676,6 +699,7 @@ def denoise_ocr(text: str) -> str:
     if not text:
         return text
     return "\n".join(_HAN_ANY.sub(" ", l) if _gibberish(l) else l for l in text.split("\n"))
+
 
 
 def load_latest(path: Path) -> dict[str, dict]:
