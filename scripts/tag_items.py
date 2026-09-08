@@ -31,6 +31,7 @@ import argparse
 import csv
 import json
 import re
+import time
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -698,8 +699,78 @@ def denoise_ocr(text: str) -> str:
     """
     if not text:
         return text
-    return "\n".join(_HAN_ANY.sub(" ", l) if _gibberish(l) else l for l in text.split("\n"))
+    out = []
+    for l in text.split("\n"):
+        if _ENGLISH_FIT_BAR.match(l) or _FIT_VS_FIT.match(l):
+            continue                      # 「slim | crop regular tapered | ankle wide」 — 영문 핏 눈금자 줄
+                                          # 「flare fit vs wide fit」 — 핏 비교 설명 그림의 캡션(한 매장 13벌, 두 핏이 다 붙었다)
+        if _gibberish(l):
+            l = _HAN_ANY.sub(" ", l)
+        if _latin_garbage(l):
+            continue
+        out.append(l)
+    return "\n".join(out)
 
+
+# ── 영문 잡음 줄 ─────────────────────────────────────────────────────────────
+# 위 규칙은 쓰레기 줄의 **한글**만 지웠다. 영문은 남겼는데, 판독기 잡음이 네 글자 이하 영문 낱말을
+# 우연히 만들어 태그가 된다: 「ee ken oe se aa dart aoe perera eet」의 dart 가 다트(절개)로,
+# 「nanda nur vaan aged 4 iv」의 aged 가 에이징으로. 판매중 옷에서 dart 27/27 · aged 57/57 이
+# 전부 이 꼴이고, span·rib·lace·fur·belt·slit·mesh·midi·polo 까지 천 개 넘는 태그가 잡음이다
+# (2026-09-08 근거 스캔).
+#
+# 그런데 「pure new wool」·「*ykk 2way zipper & parts」·「cotton 95% span 5%」는 라벨 사진의 진짜
+# 글이라 영문을 통째로 버리면 안 된다. 그래서 **사전**으로 가른다 — 매장 HTML 설명글에 다섯 벌
+# 넘게 나온 세 글자 이상 영문 낱말이 「아는 낱말」이다(3,784개). 판독 줄의 영문 토막 가운데 아는
+# 낱말이 둘 이상이고 절반 이상이면 진짜 글, 아니면 잡음으로 보고 줄을 버린다. 두 글자 토막(ee·oe·aa)은
+# 잡음의 재료라서 모르는 것으로 센다. 한글이 두 글자 이상 이어진 줄과 「95%」가 있는 줄은 재지 않고
+# 둔다 — 「앞 중심의 무게감이 있는 ykk 사의 2way 지퍼」가 영문만 재면 잡음으로 보였다.
+#
+# 표본 재본 결과(0.5 기준 줄 삭제 시뮬레이션): dart 93% · aged 85% · belt 81% · slit 80% 지워짐,
+# wool 2% · crop 1% · slim 3% · knit 2% 만 지워짐(그것도 「iia ae a wool &」 같은 줄).
+_ENGLISH_FIT_BAR = re.compile(
+    r"^[\s|./]*(?:(?:slim|regular|tapered|wide|crop|ankle|loose|over\s?sized?|relaxed|straight|flare|skinny|"
+    r"standard|fit|semi|normal|long|short)[\s|./]*){3,}$", re.I)
+_FIT_VS_FIT = re.compile(r"^\s*[a-z-]+\s+fit\s+vs\.?\s+[a-z-]+\s+fit\s*$", re.I)
+_TOK2 = re.compile(r"[a-z]{2,}")
+_TOK3 = re.compile(r"[a-z]{3,}")
+_HAN_RUN2 = re.compile(r"[가-힣]{2,}")
+_PCT = re.compile(r"\d\s*%")
+_WHITE2 = {"of", "to", "in", "on", "at", "by", "or", "xs", "xl", "cm", "mm", "oz", "no", "up", "us", "uk", "eu", "kr"}
+_LEX: set | None = None
+
+
+def ensure_lexicon() -> set:
+    """매장 HTML 설명글에서 영문 사전을 한 번 만든다(다섯 벌 넘게 나온 세 글자 이상 낱말)."""
+    global _LEX
+    if _LEX is not None:
+        return _LEX
+    df: Counter = Counter()
+    for p in sorted(CRAWL.glob("*.jsonl")):
+        if p.name.startswith("_"):
+            continue
+        for d in load_latest(p).values():
+            words = set(_TOK3.findall(((d.get("description") or "") + " " + (d.get("detail_text") or "")
+                                       + " " + (d.get("name") or "")).lower()))
+            for w in words:
+                df[w] += 1
+    _LEX = {w for w, n in df.items() if n >= 5}
+    return _LEX
+
+
+def _latin_garbage(line: str) -> bool:
+    if _HAN_RUN2.search(line) or _PCT.search(line):
+        return False
+    toks = _TOK2.findall(line.lower())
+    if not toks:
+        return False
+    lex = ensure_lexicon()
+    if len(lex) < 500:
+        # 사전이 없거나 너무 작으면(크롤 파일이 안 보이는 자리에서 돌 때) 영문을 통째로 지우게 된다 —
+        # 그럴 땐 이 규칙을 끈다. 잡음을 남기는 쪽이 진짜 글을 다 버리는 쪽보다 낫다.
+        return False
+    known = sum(1 for t in toks if (len(t) >= 3 and t in lex) or t in _WHITE2)
+    return known < 2 or known / len(toks) < 0.5
 
 
 def load_latest(path: Path) -> dict[str, dict]:
@@ -801,6 +872,8 @@ def main():
     ap.add_argument("--report", action="store_true")
     args = ap.parse_args()
 
+    t0 = time.time()
+    print(f"영문 사전 {len(ensure_lexicon()):,}개 낱말 ({time.time() - t0:.0f}s)")
     tagger = Tagger(json.loads(VOCAB.read_text(encoding="utf-8")))
     rows = list(csv.DictReader(open(DATA / "products_full.csv", encoding="utf-8-sig")))
     if args.brands:
