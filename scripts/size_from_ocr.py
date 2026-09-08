@@ -1324,6 +1324,23 @@ def blank_stray_numbers(names: list[str]) -> list[str]:
     return out
 
 
+def _unreadable_only_differs(e: dict, have: list[str], names: list[str]) -> bool:
+    """판독기(ocr·sibling)가 읽은 이름과 옵션 이름이 자리 수가 같고, 다른 자리는 전부
+    사이즈로 읽히지 않는 글자(「SS」·「?」·「L.」)이며, 그런 자리가 하나라도 있는가."""
+    if e.get("source") not in ("ocr", "sibling") or len(have) != len(names):
+        return False
+    differs = 0
+    for h, o in zip(have, names):
+        if h.upper().replace(" ", "") == o.upper().replace(" ", ""):
+            continue
+        # 「1 size 95」·「1size」처럼 사이즈 글자로 시작하는 매장식 이름도 읽힌 것이다 — 옵션 「1」로
+        # 바꾸면 95 라는 정보만 잃는다(roughside 3벌·rshemiste 2벌, 2026-09-08).
+        if _opt_rank(h) is not None or h.isdigit() or _SIZE_HEAD.match(h) or re.match(r"^\d{1,2}(?=\D)", h):
+            return False                   # 둘 다 사이즈로 읽힌다 — 판단하지 않는다
+        differs += 1
+    return differs > 0
+
+
 def names_from_options(out: dict, rows_by_url: dict) -> int:
     """이름 없는 표에 매장 구매 옵션의 사이즈 이름을 붙인다(위 세 조건을 다 만족할 때만).
 
@@ -1336,8 +1353,6 @@ def names_from_options(out: dict, rows_by_url: dict) -> int:
         if not e.get("sizes"):
             continue
         have = [str(x).strip() for x in (e.get("size_names") or [])]
-        if have and len(set(have)) == len(have):
-            continue                       # 이름이 있고 겹치지도 않는다 — 손대지 않는다
         r = rows_by_url.get(u)
         if not r:
             continue
@@ -1348,6 +1363,13 @@ def names_from_options(out: dict, rows_by_url: dict) -> int:
         names = _size_option_names(opts)
         cols = max((len(v) for v in e["sizes"].values()), default=0)
         if len(names) < 2 or len(names) != cols:
+            continue
+        # 이름이 있고 겹치지도 않으면 손대지 않는다 — 단, 판독기가 읽은 이름 가운데 사이즈로
+        # 읽히지 않는 것(「SS」·「IS」·「L.」·「?」)이 있고 나머지가 자리마다 옵션과 같으면 옵션을
+        # 믿는다. frizmworks 348벌이 「SS, M, L, XL」인데 옵션은 「S | M | L | XL」이었다(2026-09-08).
+        # 「1, 2, 3」 vs 「S | M | L」처럼 둘 다 사이즈로 읽히는데 다르면 어느 쪽이 맞는지 모른다 —
+        # 그대로 둔다.
+        if have and len(set(have)) == len(have) and not _unreadable_only_differs(e, have, names):
             continue
         rk = [_opt_rank(o) for o in names]
         if any(x is None for x in rk) or rk != sorted(rk) or len(set(rk)) != len(rk):
@@ -1385,8 +1407,10 @@ def clean_names(out: dict) -> dict:
     사이즈 표가 아니다 — 앱에서 사람이 그 글자를 그대로 본다(2026-09-05).
 
     조심할 것: 매장이 쓰는 이름은 생각보다 다양하다. 「3(M)」 686 · 「S (cm)」 639 ·
-    「1 size 95」 458 · 「S/P」 52 · 「SS」 369 은 전부 진짜다. 처음에 어휘 밖 이름을 모두
+    「1 size 95」 458 · 「S/P」 52 는 전부 진짜다. 처음에 어휘 밖 이름을 모두
     「?」로 지우게 만들었다가 7,675개를 날릴 뻔했다. 그래서 **버리는 것은 좁게** 잡는다.
+    (「SS」 369 도 진짜라고 적어 두었는데 틀렸다 — 한 매장 348벌의 옵션이 「S | M | L | XL」이었다.
+    판독기가 S 를 SS 로 읽은 것. S 가 없고 M 이 있는 표의 SS 는 S 로 되돌린다, 2026-09-08.)
 
       · 이름이 전부 색이거나 전부 치수 이름이면 그 표는 사이즈 표가 아니다 — 통째로 버린다.
       · 뒤에 붙은 「(cm)」은 떼고, 「OOF」처럼 0을 O로 읽은 것은 되돌린다.
@@ -1429,6 +1453,10 @@ def clean_names(out: dict) -> dict:
             elif canon_label(y) or re.fullmatch(r"[가-힣]", y) or NOT_A_SIZE.match(y):
                 y = ""; n["이름이 아니라 지움"] += 1
             new.append(y)
+        # 「SS」는 S 를 겹쳐 읽은 것이다 — S 가 따로 없고 M 이 있을 때만(SS·S·M·L 로 파는 매장은 그대로).
+        if "SS" in new and "S" not in new and "M" in new:
+            new = ["S" if x == "SS" else x for x in new]
+            n["SS 를 S 로"] += 1
         new = blank_stray_numbers(new)
         # ① 이름도 값도 없는 자리는 통째로 뺀다 — 표 밑에 붙은 「MODEL 179cm/68kg」 줄이
         #    사이즈 한 칸으로 잡혀 앱에 값 없는 「?」 사이즈가 섰다(frizmworks).
