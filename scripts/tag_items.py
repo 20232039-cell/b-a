@@ -710,6 +710,12 @@ def denoise_ocr(text: str) -> str:
     """
     if not text:
         return text
+    # 스펙 그림의 「눈금」: 「신축성 600 0 없음 보통 있음 비침 …」처럼 라벨 뒤에 선택지 셋이 다 적혀 있고
+    # 표시(●)는 판독기가 못 읽는다. 어느 칸에 표시됐는지 모르면서 라벨 「신축성」만 보고 기능 태그를
+    # 붙였다 — 한 매장의 100벌, 그중 94벌은 그 블록 말고 신축성 근거가 없었다(2026-09-08 감사에서
+    # 기능 태그 40개 중 3개). 라벨과 선택지를 통째로 지운다. 「신축성 있음」·「신축성 약간 있음」처럼
+    # 값이 하나만 적힌 줄은 그대로 둔다(서로 다른 선택지가 둘 이상일 때만).
+    text = _SPEC_SCALE.sub(_blank_scale, text)
     out = []
     for l in text.split("\n"):
         if _ENGLISH_FIT_BAR.match(l) or _FIT_VS_FIT.match(l):
@@ -739,6 +745,16 @@ def denoise_ocr(text: str) -> str:
 #
 # 표본 재본 결과(0.5 기준 줄 삭제 시뮬레이션): dart 93% · aged 85% · belt 81% · slit 80% 지워짐,
 # wool 2% · crop 1% · slim 3% · knit 2% 만 지워짐(그것도 「iia ae a wool &」 같은 줄).
+_SPEC_SCALE = re.compile(r"(신축성|안감|기모)(?:[\s\S]{0,40}?)((?:(?:없음|보통|있음)[\s\S]{0,12}){2,})")
+_SCALE_TOK = re.compile(r"없음|보통|있음")
+
+
+def _blank_scale(m: re.Match) -> str:
+    if len(set(_SCALE_TOK.findall(m.group(2)))) < 2:
+        return m.group(0)
+    return "".join(c if c == "\n" else " " for c in m.group(0))
+
+
 _ENGLISH_FIT_BAR = re.compile(
     r"^[\s|./]*(?:(?:slim|regular|tapered|wide|crop|ankle|loose|over\s?sized?|relaxed|straight|flare|skinny|"
     r"standard|fit|semi|normal|long|short)[\s|./]*){3,}$", re.I)
