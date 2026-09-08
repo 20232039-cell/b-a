@@ -256,7 +256,11 @@ def main() -> int:
             price = float(r["price"] or 0)
         except ValueError:
             price = -1
-        if price <= 1000 or price > 3_000_000:
+        # 위를 300만으로 두었더니 진짜 비싼 옷 한 벌이 걸렸다 — 매장 페이지에 KRW
+        # 5,600,000(회원가 5,040,000)로 적혀 있는 리얼 무스탕이다. 우리 값이 맞다.
+        # 국내 디자이너 브랜드에서 무스탕·퍼는 이 값대가 실제로 있어서 위를 800만으로
+        # 넓힌다. 「말이 안 된다」로 세는 자리에 맞는 값이 앉아 있으면 잣대가 무뎌진다.
+        if price <= 1000 or price > 8_000_000:
             flag("가격이 말이 안 된다", r["source_url"], r["price"])
         if not (r.get("representative_color") or "").strip():
             flag("색이 비었다", r["source_url"], r["name"][:40])

@@ -1323,11 +1323,19 @@ def blank_stray_numbers(names: list[str]) -> list[str]:
 
 
 def names_from_options(out: dict, rows_by_url: dict) -> int:
-    """이름 없는 표에 매장 구매 옵션의 사이즈 이름을 붙인다(위 세 조건을 다 만족할 때만)."""
+    """이름 없는 표에 매장 구매 옵션의 사이즈 이름을 붙인다(위 세 조건을 다 만족할 때만).
+
+    이름이 이미 있어도 같은 이름이 두 번 나오면 그 이름은 잘못 읽은 것이다 — 앱 사이즈 칩에
+    같은 글자가 두 번 뜬다. 매장 옵션이 칸 수만큼 오름차순으로 있으면 그쪽을 믿는다
+    (2026-09-08: noirer 오간자 크롭 보머 자켓이 「36, 36」인데 옵션은 「36 | 38」이었다).
+    """
     n = 0
     for u, e in out.items():
-        if e.get("size_names") or not e.get("sizes"):
+        if not e.get("sizes"):
             continue
+        have = [str(x).strip() for x in (e.get("size_names") or [])]
+        if have and len(set(have)) == len(have):
+            continue                       # 이름이 있고 겹치지도 않는다 — 손대지 않는다
         r = rows_by_url.get(u)
         if not r:
             continue
@@ -1353,6 +1361,15 @@ def names_from_options(out: dict, rows_by_url: dict) -> int:
                 # 그 표를 검사할 수 있게 되므로, 잣대가 다르면 내가 붙인 이름이 곧바로
                 # 모순으로 잡힌다(andersson-bell 엉덩이 51.5·58.5·55.5, 2026-09-07).
                 if any(vv[i + 1] < vv[i] - 1.0 for i in range(cols - 1)):
+                    down = True
+                # 한 치수 올라가는데 25cm 넘게 뛰면 그건 사이즈 차례가 아니라 딴 옷이거나
+                # 잘못 읽은 값이다. 셋업(자켓+팬츠)을 한 표에 담은 매장이 있다 — 가슴
+                # 53 · 93 이 나란히 있고 총장은 한 줄뿐이었다. 「ONE, ONE」을 「S, M」으로
+                # 고쳐 놓으면 M 을 고른 사람이 팬츠 치수를 자켓 치수로 보게 된다.
+                # 상한을 10cm 로 잡아 봤더니 멀쩡한 표 29개가 이름을 잃었다(가슴 57·67.5
+                # 같은 큰 등급차는 실제로 있다). 25cm 로 두면 잃는 것은 셋 뿐이고 그 셋도
+                # 소매길이 16·90 처럼 표 자체가 깨진 것들이다(2026-09-08).
+                if any(vv[i + 1] > vv[i] + 25.0 for i in range(cols - 1)):
                     down = True
         if up and not down:
             # 매장이 소문자로 적어 두기도 한다(grove 「s | m」) — 글자 사이즈는 대문자로 맞춘다
