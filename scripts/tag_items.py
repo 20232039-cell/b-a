@@ -580,6 +580,10 @@ class Tagger:
             hits["pants_type"].add("진")
         if category in SKIRTY and MINI_NAME.search(name):
             hits["length"].add("미니")
+        # 랩(wrap) 구조는 옷 이야기다 — 폰케이스·목걸이·가방의 「wrap」은 감싸는 동사다(잡화 16벌: 주얼리 11 ·
+        # 잡화 4 · 가방 1, 2026-09-08 after6c).
+        if category in NON_GARMENT | {"Jewelry", "Headwear"}:
+            hits.get("construction", set()).discard("랩")
         if category not in NON_GARMENT:
             mats = hits.get("material") or set()
             if mats & WARM_MATERIALS:
