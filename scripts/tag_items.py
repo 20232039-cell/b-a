@@ -58,6 +58,7 @@ AXES = ["neckline", "sleeve_length", "silhouette", "length", "pants_type", "mate
         "finish_wash", "design_element", "construction", "pattern", "hardware", "function", "color"]
 GARMENT_AXES = {"neckline", "sleeve_length", "silhouette", "length", "pants_type"}
 NON_GARMENT = {"Accessories", "Bags", "Shoes"}
+GARMENT_CATEGORIES = {"Tops", "Pants", "Outerwear", "Knitwear", "Shirts", "Skirts", "Denim", "Dresses"}
 # 옷 전용 축(넥라인·소매·실루엣·기장·바지종류)을 지울 품목. NON_GARMENT 보다 넓다 —
 # 모자와 주얼리가 빠져 있어서 캡에 「레귤러핏」 59개, 발라클라바에 넥라인 「후드」 37개,
 # 브로치에 「슬리브리스」가 붙어 있었다(합계 243개, 2026-09-06 실측).
@@ -447,6 +448,8 @@ class Tagger:
         self.blocklist = [b.lower() for b in vocab.get("_color_blocklist", [])]
         self.text_blocklist = [b.lower() for b in vocab.get("_text_blocklist", [])]
         self.bottoms_only = [tuple(x.split(".", 1)) for x in vocab.get("_bottoms_only", [])]
+        # 옷의 소재가 금속·보석일 수는 없다 — 아래 tag() 주석 참고
+        self.not_garment_material = set(vocab.get("_not_garment_material", []))
         # 축 전체를 한 목록으로 — 길이 내림차순으로 매칭하고 매칭 구간을 마스킹한다
         text_rules, color_rules = [], []
         # 색은 수집기 어휘 하나만 쓴다. 예전에는 여기 25색을 따로 적어 두었는데, 그것은
@@ -558,6 +561,14 @@ class Tagger:
         if category not in BOTTOMS | {""}:
             for ax, val in self.bottoms_only:  # 하의 전용 값이 코디 문장으로 상의에 붙는 것 방지
                 hits.get(ax, set()).discard(val)
+        # 옷(상의·하의·아우터·니트·셔츠·스커트·데님·드레스)의 소재가 메탈·진주·황동·유리일 수는 없다.
+        # 「ykk metal buttons」「mother of pearl buttons」가 material/메탈·진주가 됐다 — 부자재 설명이
+        # 소재 축에 앉은 것이다. 판매중·품절 옷에서 메탈 927벌(927벌 다 부자재 태그도 함께 있었다) ·
+        # 진주 104 · 황동 73 · 유리 5(2026-09-08 무작위 감사에서 40벌 중 3벌이 이 꼴). 반지·키링 같은
+        # 잡화와 품목 빈칸은 건드리지 않는다 — 명시한 옷 품목에서만 뺀다.
+        if category in GARMENT_CATEGORIES and self.not_garment_material:
+            for val in self.not_garment_material:
+                hits.get("material", set()).discard(val)
         # 데님 칸에 든 바지는 청바지다 — 이름에 「데님」이라고 안 적은 223벌이 있다.
         if category == "Denim":
             hits["pants_type"].add("진")
