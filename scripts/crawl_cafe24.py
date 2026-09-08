@@ -226,7 +226,9 @@ ITEM_TYPE_VOCAB = {
     # 「fur」·「shearling」·「sheepskin」은 소재지 품목이 아니다. 품목으로 넣었더니
     # 「FUR MINIBAG」·「Real Mink Fur Hat」·「퍼 블랙 버블백」이 겉옷이 됐다(2026-09-05).
     # diafvine 가죽 겉옷 17벌은 「기타」로 남는다 — 모자·가방을 잃는 값보다 싸다.
-    "재킷": ["jacket", "자켓", "재킷", "blouson", "블루종", "jk", "트러커", "trucker"],
+    "재킷": ["jacket", "자켓", "재킷", "blouson", "블루종", "jk", "트러커", "trucker",
+             # 「N-1 Deck jkt」처럼 jkt 로 줄여 쓰는 이름 10벌이 품목 빈칸이었다(2026-09-08). 다른 이름은 한 개도 안 움직인다.
+             "jkt"],
     "코트": ["coat", "코트", "raincoat", "레인코트", "robe", "로브"],
     "패딩": ["padding", "puffer", "푸퍼", "패딩", "다운", "duck down", "덕다운",
             "구스다운", "goose down"],
