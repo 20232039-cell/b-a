@@ -61,12 +61,16 @@ jobs:
         run: |
           python scripts/tag_items.py > /tmp/tag.log
           head -20 /tmp/tag.log
+      - name: 사이즈 재생성 (실측 표 → product_sizes.json)
+        run: |
+          python scripts/size_from_ocr.py > /tmp/size.log
+          tail -3 /tmp/size.log
       - name: commit & push (rebase 후, 3회 재시도)
         shell: bash
         run: |
           git config user.name "layer-weekly-bot"
           git config user.email "weekly@layer.invalid"
-          git add data/crawl/ data/products_full.csv data/product_tags_full.json
+          git add data/crawl/ data/products_full.csv data/product_sizes.json data/product_tags_full.json
           git diff --cached --quiet && { echo "변화 없음"; exit 0; }
           git commit -m "주간 갱신 $(date -u +%Y-%m-%d) — 신상·품절·재입고·삭제 (Actions)"
           for i in 1 2 3; do
