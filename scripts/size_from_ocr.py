@@ -1099,6 +1099,31 @@ def shop_wide_tables(crawl_dir, rows: dict) -> set[tuple[str, str]]:
     return {k for k, (n, cats) in seen.items() if n >= 10 and len(cats) >= 3}
 
 
+def shop_wide_browser(brw: dict, rows_by_url: dict) -> set[str]:
+    """브라우저가 상품마다 같은 표를 담아 온 것을 가려낸다 — 같은 잣대(품목 셋 이상 × 열 벌 이상).
+
+    브라우저는 탭을 눌러 표를 읽는데, 페이지가 아직 안 바뀌었거나 매장 공용 사이즈 안내를 잡으면
+    상품이 달라도 같은 표가 나온다. 한 매장은 252벌이 전부 같은 표였고 또 한 곳은 72벌 중 42벌이
+    같았다 — 반팔 가디건 총장이 122.5cm 로 적히는 꼴이다(2026-09-10). 지금은 그 두 매장 모두 서버
+    HTML 표가 이겨서 값이 새어 나가진 않았지만, HTML 이 한 번 비면 곧바로 수백 벌이 같은 치수를 단다.
+    돌려주는 것: 버려야 할 표의 source_url 집합."""
+    seen = defaultdict(lambda: [[], set()])
+    for u, d in brw.items():
+        t = d.get("size_table_raw")
+        if not (isinstance(t, dict) and t):
+            continue
+        r = rows_by_url.get(u)
+        key = (d.get("brand_slug"), json.dumps(t, sort_keys=True, ensure_ascii=False))
+        seen[key][0].append(u)
+        if r and r.get("category"):
+            seen[key][1].add(r["category"])
+    bad: set[str] = set()
+    for (_, _), (urls, cats) in seen.items():
+        if len(urls) >= 10 and len(cats) >= 3:
+            bad.update(urls)
+    return bad
+
+
 # 색만 다른 같은 옷 — 소재·사이즈·디테일이 같다(사람 확인 2026-09-04). 한쪽에만 표가 있으면 물려준다.
 # 색 이름은 「꾸밈말 + 색」으로 온다 — 라이트 블루·빈티지 블루·워시드 인디고. 꾸밈말은
 # 뒤에 색이 따라올 때만 걷어낸다(「빈티지 데님」의 빈티지는 색이 아니라 스타일이다).
@@ -1678,6 +1703,9 @@ def main():
     girth_keys = brand_girth(CRAWL)
     label_med = brand_label_median(CRAWL)
     shared = shop_wide_tables(CRAWL, rows)
+    brw_shared = shop_wide_browser(brw, {r["source_url"]: r for r in rows.values()})
+    if brw_shared:
+        print(f"브라우저가 상품마다 같은 표를 담아 온 것 {len(brw_shared)}건 — 버린다")
     if girth_keys:
         print("둘레로 재는 브랜드×라벨:", sorted(f"{b}/{l}" for b, l in girth_keys))
     if shared:
@@ -1721,7 +1749,7 @@ def main():
             # 브라우저가 본 표·설명글 — 서버 HTML 에 없던 것이 여기 있다
             b = brw.get(r["source_url"])
             if len(sizes) < 2 and b:
-                raw = b.get("size_table_raw") or {}
+                raw = {} if r["source_url"] in brw_shared else (b.get("size_table_raw") or {})
                 if raw:
                     cand = normalize_html(raw, k[0], girth_keys, label_med)
                     if len(cand) > len(sizes):
