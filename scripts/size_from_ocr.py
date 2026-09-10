@@ -1246,6 +1246,19 @@ def _clash(vals: dict, a: int, b: int) -> list[str]:
 #   ③ 실측이 사이즈 따라 커진다 — 값이 다 있는 라벨 하나라도 단조증가이고, 줄어드는 라벨은 없다
 # ③ 이 노이러 니트 두 벌을 걸렀다(소매길이 62.6 → 54.0 — 표가 거꾸로거나 잘못 읽혔다).
 _OPT_SOLDOUT = re.compile(r"\s*[\[\(]?\s*(?:품절|sold\s?out|out\s*of\s*stock|일시\s?품절|재입고\s?예정)\s*[\]\)]?\s*$", re.I)
+# 「S/M」·「L/XL」처럼 두 치수를 묶어 파는 옵션(합사이즈). 표에서는 그대로 받으면서 옵션에서는 버려서
+# 두 칸 표 10벌이 이름 없이 남아 있었다(2026-09-10). 앞 글자로 차례를 매긴다 — S/M 다음은 L/XL 이다.
+# 두 쪽이 다 치수 글자일 때만 — 「S/P」(Small/Petit)·「M/M」 같은 나라별 표기는 표에만 있고 옵션엔 없다.
+# 뒤쪽이 앞쪽보다 커야 한다 — 「M/M」은 나라별 표기(Medium/Mediano)이지 합사이즈가 아니다.
+_SIZE_COMBO = re.compile(r"^(XXS|XS|S|M|L|XL|XXL)\s*/\s*(XXS|XS|S|M|L|XL|XXL)$", re.I)
+
+
+def _combo_rank(u: str):
+    m = _SIZE_COMBO.match(u)
+    if not m:
+        return None
+    a, b = _SIZE_RANK[m.group(1).upper()], _SIZE_RANK[m.group(2).upper()]
+    return a if a < b else None
 _SIZE_OPT = re.compile(r"^(?:XXS|XS|S|M|L|XL|XXL|2XL|3XL|FREE|F|ONE ?SIZE|\d{1,2}|0\d)$", re.I)
 _SIZE_RANK = {"XXS": 0, "XS": 1, "S": 2, "M": 3, "L": 4, "XL": 5, "XXL": 6, "2XL": 6, "3XL": 7}
 # 매장은 옵션 이름 뒤에 재고 사정을 덧붙인다(hatching-room 「1(XS) Only 1 Left」·「4(L) Low Stock」).
@@ -1270,7 +1283,7 @@ def _size_option_names(opts: list[str]) -> list[str]:
         o = _OPT_STOCK.sub("", _OPT_SOLDOUT.sub("", o)).strip()
         if not o:
             continue
-        if _SIZE_OPT.match(o):
+        if _SIZE_OPT.match(o) or _combo_rank(o) is not None:
             cand = o
         else:
             m = _SIZE_HEAD.match(o)
@@ -1294,6 +1307,9 @@ def _opt_rank(o: str):
     u = o.upper().replace(" ", "")
     if u in _SIZE_RANK:
         return _SIZE_RANK[u]
+    c = _combo_rank(u)
+    if c is not None:
+        return c                                     # 「S/M」은 S 자리
     return 100 + int(u) if u.isdigit() else None
 
 
