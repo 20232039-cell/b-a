@@ -267,11 +267,17 @@ def main():
     ap.add_argument("--workers", type=int, default=12)
     ap.add_argument("--delay", type=float, default=1.0)
     ap.add_argument("--no-csv", action="store_true", help="CSV 재생성 생략")
+    ap.add_argument("--csv-only", action="store_true",
+                    help="목록 스캔 없이 CSV 만 다시 만든다 — 스캔을 여러 러너로 나눈 뒤 합치는 자리에서 쓴다")
     args = ap.parse_args()
 
     with cc.BRANDS_CSV.open(encoding="utf-8-sig") as f:
         brands = {r["slug"]: r for r in csv.DictReader(f)}
     brand_gender = {s: cc.BRAND_GENDER.get(r.get("gender", ""), "UNISEX") for s, r in brands.items()}
+    if args.csv_only:
+        n, _ = cc.build_csv(brand_gender)
+        print(f"CSV {n}행")
+        return
     slugs = args.brands or sorted(p.stem for p in CRAWL_DIR.glob("*.jsonl") if not p.name.startswith("_"))
     shops = []
     for s in slugs:

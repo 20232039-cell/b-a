@@ -4,9 +4,13 @@
 # (데이터 저장소의 Contents 를 읽고 쓸 수 있는 파인그레인 토큰).
 # 주간 갱신 — 신상·품절·재입고·삭제만. 매주 월요일 03:00 KST (일요일 18:00 UTC).
 #
-# 하는 일: scripts/weekly_update.py(목록 스캔 → 신상 상세 → 사라진 것·품절인 것 상세 확인) →
-# 신상 중 설명 짧은 것 OCR(이미 한 상품은 건너뜀) → 태그 재생성 → 커밋.
-# 설명·소재 변경은 쫓지 않는다(사람 결정 2026-09-02). 비용: 러너 하나 30~40분/주 ≈ 월 150분.
+# 하는 일: 목록 스캔을 브랜드별로 러너에 흩어 돌리고(scan) → 한자리에 모아 CSV·OCR·태그·사이즈를
+# 다시 만들어 커밋한다(collect). 설명·소재 변경은 쫓지 않는다(사람 결정 2026-09-02).
+#
+# 왜 나누나: PoliteSession 은 매장 호스트마다 초당 한 번이다. 한 러너에서 12스레드로 돌리면
+# 브랜드 68곳이 여섯 물결로 나뉘어 5시간이 넘고, 300분 제한에 걸려 두 번 연속 통째로 취소됐다
+# (9/6 · 9/9). 한 브랜드는 반드시 한 러너 안에만 둔다 — 그래야 그 매장에 초당 한 번이 지켜진다.
+# 묶음 스무 개면 브랜드가 거의 한 물결에 들어가 가장 느린 브랜드 시간이면 끝난다(2026-09-10).
 
 name: weekly-update
 
@@ -19,6 +23,14 @@ on:
         description: "공백으로 나눈 slug 목록. 비우면 전부"
         required: false
         default: ""
+      buckets:
+        description: "러너(묶음) 수 — 계정 동시 실행 한도 20"
+        required: false
+        default: "20"
+      max_brands:
+        description: "묶음 하나에 담을 브랜드 수 상한(한 러너가 동시에 보는 매장 수)"
+        required: false
+        default: "6"
 
 env:
   DATA_BRANCH: crawl/cafe24-full-catalog
@@ -31,12 +43,93 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  update:
+  plan:
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: work
-    timeout-minutes: 300
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 데이터 저장소(비공개) 받기
+        uses: ./.github/actions/data-repo
+        with:
+          token: ${{ secrets.DATA_TOKEN }}
+      - id: plan
+        shell: bash
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import csv, collections, json, os, sys
+          want = "${{ inputs.brands }}".split()
+          cnt = collections.Counter()
+          for r in csv.DictReader(open("data/products_full.csv", encoding="utf-8-sig")):
+              cnt[r["brand_slug"]] += 1
+          for p in os.listdir("data/crawl"):          # 목록에 없던 새 브랜드도 센다
+              if p.endswith(".jsonl") and not p.startswith("_"):
+                  cnt.setdefault(p[:-6], 0)
+          brands = [(b, n) for b, n in sorted(cnt.items(), key=lambda x: -x[1]) if not want or b in want]
+          buckets = max(1, int("${{ inputs.buckets }}" or 20))
+          maxb = max(1, int("${{ inputs.max_brands }}" or 6))
+          groups = [[] for _ in range(buckets)]; load = [0] * buckets
+          for b, n in brands:                          # 한 브랜드는 한 묶음에만 — 매장당 초당 1회를 지키려고
+              cand = [j for j in range(buckets) if len(groups[j]) < maxb] or list(range(buckets))
+              i = min(cand, key=lambda j: (load[j], len(groups[j])))
+              groups[i].append(b); load[i] += n
+          inc = [{"bucket": i + 1, "brands": " ".join(g), "load": load[i]}
+                 for i, g in enumerate(groups) if g]
+          print("matrix=" + json.dumps({"include": inc}))
+          print(f"브랜드 {len(brands)} → 묶음 {len(inc)} · 묶음별 상품 수 {sorted(load, reverse=True)}", file=sys.stderr)
+          PY
+
+  scan:
+    needs: plan
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: work
+    timeout-minutes: 110
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 데이터 저장소(비공개) 받기
+        uses: ./.github/actions/data-repo
+        with:
+          token: ${{ secrets.DATA_TOKEN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -q requests beautifulsoup4 lxml
+      - name: 묶음 ${{ matrix.bucket }} 목록 스캔 (상품 ${{ matrix.load }})
+        run: |
+          python scripts/weekly_update.py --brands ${{ matrix.brands }} --workers 8 --no-csv
+      - name: 이 묶음이 맡은 파일만 골라 담기
+        shell: bash
+        run: |
+          mkdir -p _parts
+          for b in ${{ matrix.brands }}; do
+            cp "data/crawl/$b.jsonl" _parts/ 2>/dev/null || echo "  $b 파일 없음"
+          done
+          cp data/crawl/_weekly_log.jsonl "_parts/_weekly_log.b${{ matrix.bucket }}.log" 2>/dev/null || true
+          ls _parts | wc -l
+      - uses: actions/upload-artifact@v4
+        with:
+          name: weekly-b${{ matrix.bucket }}
+          path: work/_parts/*
+          if-no-files-found: ignore
+          retention-days: 3
+
+  collect:
+    needs: scan
+    if: always()
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: work
+    timeout-minutes: 200
     steps:
       - uses: actions/checkout@v4
       - name: 데이터 저장소(비공개) 받기
@@ -51,9 +144,21 @@ jobs:
           pip install -q requests beautifulsoup4 lxml
           sudo apt-get update -q
           sudo apt-get install -y -q tesseract-ocr tesseract-ocr-kor
-      - name: 목록 스캔 · 신상 · 품절 · 재입고 · 삭제
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: weekly-*
+          path: work/_parts
+          merge-multiple: true
+      - name: 조각을 본 파일에 올리기
+        shell: bash
         run: |
-          python scripts/weekly_update.py --workers 12 ${{ inputs.brands && format('--brands {0}', inputs.brands) || '' }}
+          shopt -s nullglob
+          n=0
+          for f in _parts/*.jsonl; do cp "$f" data/crawl/ ; n=$((n+1)); done
+          for f in _parts/_weekly_log.b*.log; do cat "$f" >> data/crawl/_weekly_log.jsonl ; done
+          echo "브랜드 파일 $n개 올림"
+      - name: CSV 다시 만들기
+        run: python scripts/weekly_update.py --csv-only
       - name: 신상 OCR (설명 짧은 것만, 이미 한 상품은 건너뜀)
         run: python scripts/ocr_detail_images.py --max-images 3 --procs 2
       - name: 태그 재생성
