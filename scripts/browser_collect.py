@@ -65,22 +65,49 @@ def _read_table_in(page) -> dict[str, list[str]]:
                 grid.append(cells)
         if len(grid) < 2:
             continue
-        out: dict[str, list[str]] = {}
-        # 전치형 — 각 행의 첫 칸이 라벨
-        for row in grid:
-            if len(row) >= 2 and SIZE_WORD.search(row[0]):
-                out[row[0]] = row[1:]
-        if len(out) >= 2:
+        out = grid_to_table(grid)
+        if out:
             return out
-        # 정방향 — 첫 행이 라벨
-        head = grid[0]
-        if sum(1 for h in head if SIZE_WORD.search(h)) >= 2:
-            for j, h in enumerate(head):
-                if not SIZE_WORD.search(h):
-                    continue
-                out[h] = [r[j] for r in grid[1:] if len(r) > j]
-            if len(out) >= 2:
-                return out
+    return {}
+
+
+def grid_to_table(grid: list[list[str]]) -> dict[str, list[str]]:
+    """표 격자를 {라벨: [값…]} 로. 사이즈 이름 줄·열은 「_names」로 함께 담는다.
+
+    이름을 버리면 앱 사이즈 칩에 무엇을 적을지 알 수 없다. 자바스크립트로 표를 그리는 매장은
+    서버 HTML 에 표가 없어 이 길이 유일한데(한 매장 324벌), 여기서 이름 줄을 떨구고 있었다
+    (2026-09-10). 전치형은 라벨이 아닌 첫 줄이, 정방향은 라벨이 아닌 첫 열이 이름이다.
+    """
+    out: dict[str, list[str]] = {}
+    # 전치형 — 각 행의 첫 칸이 라벨
+    width = 0
+    for row in grid:
+        if len(row) >= 2 and SIZE_WORD.search(row[0]):
+            out[row[0]] = row[1:]
+            width = max(width, len(row) - 1)
+    if len(out) >= 2:
+        for row in grid:                      # 라벨이 아닌 줄 가운데 칸 수가 맞는 첫 줄이 이름 줄
+            if len(row) >= 2 and not SIZE_WORD.search(row[0]):
+                cand = [c for c in row[1:] if c.strip()]
+                if len(cand) == width:
+                    out["_names"] = cand
+                    break
+        return out
+    # 정방향 — 첫 행이 라벨
+    head = grid[0]
+    if sum(1 for h in head if SIZE_WORD.search(h)) >= 2:
+        name_col = next((j for j, h in enumerate(head) if not SIZE_WORD.search(h)), None)
+        for j, h in enumerate(head):
+            if not SIZE_WORD.search(h):
+                continue
+            out[h] = [r[j] for r in grid[1:] if len(r) > j]
+        if len(out) >= 2:
+            if name_col is not None:
+                nm = [r[name_col].strip() for r in grid[1:] if len(r) > name_col and r[name_col].strip()]
+                n = max((len(v) for v in out.values()), default=0)
+                if len(nm) == n and n >= 2:
+                    out["_names"] = nm
+            return out
     return {}
 
 

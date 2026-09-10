@@ -1725,7 +1725,11 @@ def main():
                 if raw:
                     cand = normalize_html(raw, k[0], girth_keys, label_med)
                     if len(cand) > len(sizes):
-                        sizes, names, source = cand, None, "browser"
+                        # 브라우저 표도 사이즈 이름 줄을 함께 담아 온다(2026-09-10). 자바스크립트로
+                        # 표를 그리는 매장은 서버 HTML 에 표가 없어 이 길이 유일하다.
+                        bn = raw.get("_names")
+                        sizes, source = cand, "browser"
+                        names = [str(x) for x in bn] if isinstance(bn, list) and bn else None
                 if len(sizes) < 2:
                     flat2 = parse_flat(b.get("description") or "")
                     if flat2 and len(clean_ocr(flat2[1])) > len(sizes):
