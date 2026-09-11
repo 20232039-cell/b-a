@@ -1468,6 +1468,10 @@ def extract_size_table(html_text: str) -> dict[str, list[float]]:
     옷장에서 실측을 쓸 때 정리한다. 매장마다 표가 달라 지금 컬럼화하지 않는다(2026-09-02 결정)."""
     t = re.sub(r'<script type="application/ld\+json">.*?</script>', " ", html_text, flags=re.S)
     t = htmlmod.unescape(re.sub(r"<[^>]+>", " ", t))
+    # 폭 없는 글자(BOM·zero-width space)는 눈에 안 보이지만 \s 가 아니라 줄을 끊는다. 9999archive 본문에
+    # 「… / 32 \ufeff2: 67 / …」처럼 둘째 줄 앞에 BOM 이 끼어 세 사이즈짜리 표가 한 칸만 읽혔다
+    # (사람이 앱 화면에서 「프리사이즈」로 뜬 것을 보고 찾음, 2026-09-11).
+    t = re.sub(r"[\ufeff\u200b-\u200d\u2060\u00ad]", " ", t)
     t = re.sub(r"[ \t\r\n]+", " ", t)
     # 밀리미터로 적는 매장(mischief 「SIZE(mm) S 허리 345 기장 1020」)은 10 으로 나눈다.
     mm = bool(re.search(r"(?:size|사이즈|단위)\s*[（(]?\s*mm\s*[)）]?", t, re.I))
@@ -1518,7 +1522,8 @@ def extract_size_from_tables(soup) -> dict[str, list[float]]:
     for tb in soup.find_all("table"):
         rows = []
         for tr in tb.find_all("tr"):
-            cells = [c.get_text(" ", strip=True) for c in tr.find_all(["th", "td"])]
+            cells = [re.sub(r"[\ufeff\u200b-\u200d\u2060\u00ad]", "", c.get_text(" ", strip=True))
+                     for c in tr.find_all(["th", "td"])]
             if any(cells):
                 rows.append(cells)
         if len(rows) < 2:
