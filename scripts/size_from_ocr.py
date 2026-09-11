@@ -1423,6 +1423,18 @@ def names_from_options(out: dict, rows_by_url: dict) -> int:
         if any(x is None for x in rk) or rk != sorted(rk) or len(set(rk)) != len(rk):
             continue
         up = down = False
+        # 옵션 이름이 칸 수·차례가 맞는데 라벨 하나만 값이 줄어들면 그 라벨이 판독 오류다(「어깨 58 60 52」— 62 를
+        # 52 로 읽음). 표 전체의 이름을 포기하지 않고 그 라벨만 뺀다 — 늘어나는 라벨이 둘 이상이고 줄어드는 라벨이
+        # 소수일 때만. 전부 줄어들면 차례가 뒤집힌 표일 수 있으니 예전처럼 손대지 않는다(2026-09-11, 학습 예 2벌).
+        inc = [lab for lab, v in e["sizes"].items()
+               if len(v[:cols]) == cols and all(isinstance(x, (int, float)) for x in v[:cols])
+               and all(v[i] <= v[i + 1] for i in range(cols - 1))]
+        dec = [lab for lab, v in e["sizes"].items()
+               if len(v[:cols]) == cols and all(isinstance(x, (int, float)) for x in v[:cols])
+               and any(v[i + 1] < v[i] - 1.0 for i in range(cols - 1))]
+        if dec and len(inc) >= 2 and len(dec) < len(inc):
+            for lab in dec:
+                del e["sizes"][lab]
         for v in e["sizes"].values():
             vv = v[:cols]
             if len(vv) == cols and all(isinstance(x, (int, float)) for x in vv):
