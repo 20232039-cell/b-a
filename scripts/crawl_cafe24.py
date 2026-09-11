@@ -42,6 +42,7 @@ import json
 import os
 import random
 import re
+from collections import Counter
 import sys
 import threading
 import time
@@ -1462,6 +1463,47 @@ def parse_json_ld_product(html_text: str) -> dict:
     return {}
 
 
+# 「사이즈마다 라벨을 다시 적는」 표 — 한 줄에 라벨과 값이 번갈아 나오고 그 줄이 사이즈 수만큼 되풀이된다.
+#   [1] Length 64 / Shoulder 34 / Chest 40  [2] Length 66 / Shoulder 37 / Chest 43   (divein)
+#   SIZE M 어깨 52 가슴 63 총장 64  L 어깨 54 가슴 65 총장 65                          (nick-nicole)
+# SIZE_RX 는 라벨마다 첫 값만 담아 왔다 — 세 사이즈짜리 옷이 한 칸이 되어 앱에 「프리사이즈」로 떴다
+# (사람이 앱 화면에서 발견, 2026-09-11. 판매중 옷 4,065벌).
+_BLOCK_NAME = re.compile(r"(\[\s*[A-Za-z0-9]{1,4}\s*\]|[0-9]{1,3}\s*사이즈|"
+                         r"\b(?:XXS|XS|S|M|L|XL|XXL|XXXL|2XL|3XL|FREE|ONE)\b|\b[0-9]{1,3}\b)"
+                         r"[^가-힣A-Za-z0-9]{0,4}$", re.I)
+
+
+def repeated_block_table(seq: list[tuple[str, list[float], int]], t: str) -> dict[str, list[float]]:
+    """되풀이되는 라벨 묶음을 칸으로 편다. 아니면 빈 dict — 그러면 예전대로 첫 값만 쓴다."""
+    if len(seq) < 4:
+        return {}
+    cnt = Counter(l for l, _, _ in seq)
+    k = max(cnt.values())
+    if not 2 <= k <= 8:
+        return {}
+    multi = [l for l, c in cnt.items() if c == k]
+    if len(multi) < 2:
+        return {}
+    # 되풀이되는 라벨은 저마다 값이 하나여야 한다 — 값이 여럿이면 그건 이미 칸이 펴진 표다.
+    if any(len(nums) != 1 for l, nums, _ in seq if l in multi):
+        return {}
+    cols = {l: [nums[0] for ll, nums, _ in seq if ll == l] for l in multi}
+    # 같은 표가 두 번 찍힌 것뿐이면(값이 죄다 같다) 칸을 늘리지 않는다.
+    if all(len(set(v)) == 1 for v in cols.values()):
+        return {}
+    # 묶음마다 앞에 붙은 사이즈 이름을 주워 본다 — k 개가 다 다를 때만 쓴다.
+    starts = [pos for l, _, pos in seq if l == multi[0]]
+    names = []
+    for i, pos in enumerate(starts):
+        head = t[(starts[i - 1] if i else max(0, pos - 40)):pos]
+        m = _BLOCK_NAME.search(head)
+        nm = re.sub(r"[\[\]\s]", "", m.group(1)) if m else ""
+        names.append(re.sub(r"사이즈$", "", nm)[:12])
+    if len(names) == k and all(names) and len(set(names)) == k:
+        cols["_names"] = names
+    return cols
+
+
 def extract_size_table(html_text: str) -> dict[str, list[float]]:
     """사이즈 실측 — 총장·어깨·가슴… 뒤에 오는 숫자 묶음. 표(th/td)든 목록(ul/li)이든 스크립트 문자열
     안이든(lmood) 태그를 벗기고 글자 흐름에서 잡는다. 사이즈 이름(44/46/48)은 안 잡고 값의 순서만 남긴다 —
@@ -1477,12 +1519,19 @@ def extract_size_table(html_text: str) -> dict[str, list[float]]:
     mm = bool(re.search(r"(?:size|사이즈|단위)\s*[（(]?\s*mm\s*[)）]?", t, re.I))
     lo, hi = (30, 2000) if mm else (3, 200)
     rows: dict[str, list[float]] = {}
+    seq: list[tuple[str, list[float], int]] = []
     for m in SIZE_RX.finditer(t):
         label = re.sub(r"\s+", "", m.group(1)).lower()
         nums = [float(x) for x in re.findall(r"\d{1,4}(?:\.\d)?" if mm else r"\d{1,3}(?:\.\d)?", m.group(2))]
         nums = [n / 10 if mm else n for n in nums if lo <= n <= hi]
-        if nums and label not in rows:
+        if not nums:
+            continue
+        seq.append((label, nums, m.start()))
+        if label not in rows:
             rows[label] = nums[:8]
+    rep = repeated_block_table(seq, t)
+    if rep:
+        rows.update(rep)
     if len(rows) < 2:
         mat = extract_size_matrix(t)
         if len(mat) > len(rows):
@@ -1623,7 +1672,11 @@ def extract_size_matrix(t: str) -> dict[str, list[float]]:
     for h in _HEADER_MARK.finditer(t):
         # 머리: 표식 뒤 낱말들(숫자 아닌 토큰) — 첫 사이즈 행(이름 + 숫자)이 시작되는 곳까지, 최대 10개
         # 낱말은 통째로 먹는다(공백 없이) — 「Hem」의 m 을 사이즈 M 으로 잘라 읽던 버그(2026-09-04)
-        m = re.match(r"\s*((?:[A-Za-z가-힣(][A-Za-z가-힣.()]*\s*/?\s*){1,12}?)(?<![A-Za-z가-힣])(?=" + _SIZE_TOKEN + _ROW_LEAD + _NUM + r")", t[h.end():], re.I)
+        # 낱말 부분은 되짚지 않는다(*+ 소유 반복). 되짚게 두면 「This size chart is based on the average
+        # sizing for each country…」 같은 안내문에서 낱말을 쪼개 보는 경우의 수가 터져 파서가 멈춘다 —
+        # open-yy 앵클부츠 한 벌에 measure 가 1시간 넘게 붙들려 있었다(2026-09-12).
+        # 머리말은 표식 바로 뒤 600자 안에서만 찾는다 — 그보다 멀면 그 표식의 표가 아니다.
+        m = re.match(r"\s*((?:[A-Za-z가-힣(][A-Za-z가-힣.()]*+\s*/?\s*){1,12}?)(?<![A-Za-z가-힣])(?=" + _SIZE_TOKEN + _ROW_LEAD + _NUM + r")", t[h.end():h.end() + 600], re.I)
         if not m:
             continue
         head = m.group(1).strip().strip("()")
