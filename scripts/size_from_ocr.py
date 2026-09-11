@@ -1450,6 +1450,33 @@ def names_from_options(out: dict, rows_by_url: dict) -> int:
     return n
 
 
+def drop_reversed_labels(out: dict, tol: float = 1.0) -> dict:
+    """사이즈가 커지는데 값이 줄어드는 라벨을 그 상품에서 뺀다 — 틀린 치수는 없는 치수보다 나쁘다.
+
+    판독기가 상세 그림의 숫자를 흘리거나 칸을 건너뛰면 한 줄이 밀린다(「52 5126 FOZ 50.8 64.8」— 총장이 빠져
+    소매길이 자리에 어깨가 앉는다). 감사기가 33벌을 잡고 있었고 24벌이 한 매장에 몰렸다(2026-09-11). 어느 칸이
+    틀렸는지 하나로 가려지는 것은 9벌뿐이라 짐작해 고치지 않는다 — 그 라벨을 통째로 비운다. 이름이 오름차순으로
+    읽히는 표에서만(이름이 없거나 순서를 모르면 판단하지 않는다). 다른 라벨은 그대로 남는다."""
+    n = Counter()
+    for u, e in out.items():
+        names = e.get("size_names") or []
+        rk = [_opt_rank(str(x)) for x in names]
+        if len(rk) < 2 or any(r is None for r in rk) or rk != sorted(rk) or len(set(rk)) != len(rk):
+            continue
+        for lab in list(e["sizes"]):
+            v = e["sizes"][lab][:len(names)]
+            if len(v) != len(names) or not all(isinstance(x, (int, float)) for x in v):
+                continue
+            if any(v[i + 1] < v[i] - tol for i in range(len(v) - 1)):
+                del e["sizes"][lab]
+                n[lab] += 1
+        if not e["sizes"]:
+            n["표가 비어 뺌"] += 1
+    for u in [u for u, e in out.items() if not e.get("sizes")]:
+        del out[u]
+    return dict(n)
+
+
 def clean_names(out: dict) -> dict:
     """사이즈 「이름」을 마지막에 한 번 훑는다. 값이 맞아도 이름이 「HEM」·「BLACK」이면 그 표는
     사이즈 표가 아니다 — 앱에서 사람이 그 글자를 그대로 본다(2026-09-05).
@@ -1848,6 +1875,9 @@ def main():
     named = names_from_options(out, {r["source_url"]: r for r in rows.values()})
     if named:
         print(f"매장 옵션에서 사이즈 이름을 채운 상품 {named}벌")
+    rev = drop_reversed_labels(out)
+    if rev:
+        print("사이즈 커지는데 값 줄어드는 라벨 뺌: " + " · ".join(f"{k} {v}" for k, v in sorted(rev.items())))
     if fixed:
         print("사이즈 이름 정리: " + " · ".join(f"{k} {v}" for k, v in sorted(fixed.items())))
     OUT.write_text(json.dumps(out, ensure_ascii=False, indent=0), encoding="utf-8")
