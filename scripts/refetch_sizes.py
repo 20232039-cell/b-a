@@ -197,8 +197,11 @@ def refetch(http: cc.PoliteSession, shop: cc.Shop, only_missing: bool, log, fiel
                 if nd.get("size_table"):
                     got += 1
                 continue
-        st = cc.extract_size_table(r.text)
-        if st:
+        # 「size」만 받을 때도 <table> 파서를 먼저 태운다 — 글자열 파서만 쓰면 칸 이름을 못 만들고
+        # 「소매기장」을 「기장」으로 잘라 읽는다. 그리고 이미 있는 표보다 나쁘면 덮지 않는다
+        # (2026-09-11 select=all 한 판에 6매장 1,396벌이 사이즈 이름을, 436벌이 라벨을 잃었다).
+        st = cc.extract_size_any(r.text)
+        if cc.table_is_better(st, d.get("size_table") or {}):
             d["size_table"] = st
             d["size_source"] = "html"
             touched.append(no)

@@ -1693,6 +1693,37 @@ OPTION_SOLDOUT = re.compile(r"\s*[\[\(]?\s*(?:품절|sold\s?out|일시\s?품절|
 OPTION_SIZE_TITLE = re.compile(r"size|사이즈|사이스|치수", re.I)
 
 
+def extract_size_any(html_text: str) -> dict[str, list[float]]:
+    """표를 뽑는 두 길을 parse_detail 과 똑같은 차례로 태운다 — <table> 먼저, 글자열은 그 다음.
+
+    refetch_sizes 의 size-only 길이 글자열 파서만 쓰고 있었다. 그쪽은 칸 이름(_names)을 못 만들고
+    「소매기장」을 「기장」으로 잘라 읽어, 이미 잘 읽어 둔 표를 덮어쓰면 도리어 나빠진다
+    (2026-09-11 select=all 한 판에 1,396벌이 사이즈 이름을 잃었다).
+    """
+    soup = BeautifulSoup(html_text, "lxml")
+    t = extract_size_from_tables(soup)
+    if len(t) < 2:
+        t = extract_size_table(str(soup))
+    return t
+
+
+def table_is_better(new: dict, old: dict) -> bool:
+    """새 표로 갈아탈 만한가 — 이름이 있고 없고를 먼저, 그다음 라벨 수로 본다.
+
+    같으면 새 것을 쓴다(값이 바뀌었을 수 있다). 나빠지는 쪽으로는 절대 덮지 않는다.
+    """
+    if not new:
+        return False
+    if not old:
+        return True
+    n_nm, o_nm = bool(new.get("_names")), bool(old.get("_names"))
+    if n_nm != o_nm:
+        return n_nm
+    n = len([k for k in new if not k.startswith("_")])
+    o = len([k for k in old if not k.startswith("_")])
+    return n >= o
+
+
 def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
     soup = BeautifulSoup(html_text, "lxml")
     ld = parse_json_ld_product(html_text)
