@@ -35,7 +35,7 @@ MANUAL = DATA / "manual_sizes.csv"   # 사람이 그림을 보고 옮겨 적은 
 
 NON_APPAREL_CODES = {"shoes", "bags", "accessories", "headwear", "jewelry", "lifestyle", "pet"}
 # 옷에만 있는 실측 항목 — 잡화 행에 이게 있으면 표를 잘못 물어 온 것이다
-GARMENT_ONLY = {"어깨", "가슴", "밑위", "허벅지", "암홀", "화장", "소매길이"}
+GARMENT_ONLY = {"어깨", "가슴", "밑위", "뒤밑위", "허벅지", "암홀", "화장", "소매길이"}
 GARMENT_LABELS = {"Tops", "Pants", "Outerwear", "Knitwear", "Shirts", "Denim", "Skirts", "Dresses"}
 LABELS = json.loads((DATA / "size_labels.json").read_text(encoding="utf-8"))
 RANGES = LABELS["_ranges_cm"]
@@ -956,7 +956,7 @@ def brand_label_median(crawl_dir) -> dict[tuple[str, str], float]:
     return {k: statistics.median(v) for k, v in vals.items() if len(v) >= 12}
 
 
-FLOOR_10 = {"총장", "가슴", "어깨", "허리", "허벅지", "밑위", "엉덩이", "암홀", "화장"}
+FLOOR_10 = {"총장", "가슴", "어깨", "허리", "허벅지", "밑위", "뒤밑위", "엉덩이", "암홀", "화장"}
 
 
 def drop_strays(brand: str, c: str, vs: list[float], med: dict) -> list[float]:
