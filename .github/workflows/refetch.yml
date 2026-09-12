@@ -214,9 +214,13 @@ jobs:
             # 생성물이 부딪히면 저쪽 것을 받는다 — 원본에서 다시 만들면 그만이고,
             # 여기서 멈추면 이번 수집이 통째로 날아간다.
             if [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ]; then
-              for f in data/products_full.csv data/product_sizes.json data/product_tags_full.json; do
-                git checkout --ours -- "$f" 2>/dev/null && git add "$f"
+              # 판마다 통째로 다시 만드는 것들 — 생성물 셋과 보고 파일. 부딪히면 저쪽 것을
+              # 받는다. 원본에서 다시 만들면 그만이라, 이것 때문에 수확을 버릴 이유가 없다.
+              for f in $(git diff --name-only --diff-filter=U \
+                         | grep -E '^data/(products_full\.csv|product_sizes\.json|product_tags_full\.json|_audit\.(json|csv)|_issues[^/]*\.csv|size_unavailable\.csv|_missing[^/]*\.csv)$|^data/crawl/_[^/]*\.json$' || true); do
+                git checkout --ours -- "$f" && git add "$f"
               done
+              # 수확(매장별 jsonl)이 하나라도 안 풀리면 abort — 저쪽 것으로 덮지 않는다.
               if [ -z "$(git diff --name-only --diff-filter=U)" ]; then
                 git -c core.editor=true rebase --continue && git push && exit 0
               fi
