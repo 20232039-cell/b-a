@@ -141,7 +141,10 @@ jobs:
           python-version: "3.11"
       - name: deps (requests · bs4 · lxml · tesseract kor)
         run: |
-          pip install -q requests beautifulsoup4 lxml
+          # pillow 를 빼먹어 신상 OCR 이 ModuleNotFoundError 로 죽었고, 그 뒤 태그·사이즈
+          # 재생성과 커밋이 통째로 건너뛰어졌다 — 스캔 20갈래 1시간 35분이 커밋 없이 날아갔다
+          # (2026-09-12 run 34681341194). ocr.yml 은 pillow 를 깔고 있었다.
+          pip install -q requests beautifulsoup4 lxml pillow
           sudo apt-get update -q
           sudo apt-get install -y -q tesseract-ocr tesseract-ocr-kor
       - uses: actions/download-artifact@v4
@@ -160,6 +163,9 @@ jobs:
       - name: CSV 다시 만들기
         run: python scripts/weekly_update.py --csv-only
       - name: 신상 OCR (설명 짧은 것만, 이미 한 상품은 건너뜀)
+        # OCR 은 있으면 좋은 것이지 이 갱신의 뼈대가 아니다. 여기서 죽는다고 스캔 결과를
+        # 통째로 버리면 안 된다 — 실제로 한 번 그랬다(2026-09-12).
+        continue-on-error: true
         run: python scripts/ocr_detail_images.py --max-images 3 --procs 2
       - name: 태그 재생성
         # head 로 파이프하면 파이썬이 죽어도 워크플로가 넘어간다(pipefail 없음)
