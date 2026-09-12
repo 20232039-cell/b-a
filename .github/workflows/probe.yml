@@ -60,6 +60,25 @@ jobs:
                       print(f"{sel} → {el.get('id') or el.get('class')} : {txt}")
           hits = [re.sub(r"\s+", " ", m) for m in re.findall(r"[^>]{0,60}\d{1,3},\d{3}\s*원[^<]{0,20}", h)][:8]
           print("본문에서 「원」이 붙은 자리:", json.dumps(hits, ensure_ascii=False)[:600])
+          # 페이지가 무엇을 담고 있는지 — 값을 못 찾을 때 「빈 껍데기인지 자바스크립트로 그리는지」를 가른다
+          print("title:", (soup.title.get_text(strip=True) if soup.title else "")[:120])
+          for sel in ('meta[property="og:title"]', 'input[name="product_name"]',
+                      ".headingArea h2", ".infoArea h2", "h1", "h2"):
+              for el in soup.select(sel)[:2]:
+                  t = (el.get("content") or el.get("value") or el.get_text(" ", strip=True) or "")[:80]
+                  if t.strip():
+                      print(f"   {sel} : {t}")
+          print("iProductNo:", (re.search(r"iProductNo\s*=\s*(\d+)", h) or ["", "없음"])[1])
+          print("script 안 상품 자료 흔적:", {k: h.count(k) for k in
+                ("product_no", "product_name", "__NEXT_DATA__", "window.__", "/api/", "ajax", "EC_")
+                if h.count(k)})
+          for t in soup.select("script"):
+              src = t.get("src") or ""
+              if any(w in src for w in ("product", "detail", "app", "main")):
+                  print("   script src:", src[:110])
+          body = re.sub(r"\s+", " ", soup.get_text(" ", strip=True))
+          print("본문 글 길이:", len(body))
+          print("본문 앞머리:", body[:700])
           PY
         env:
           URL: ${{ inputs.url }}
