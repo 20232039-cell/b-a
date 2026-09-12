@@ -118,6 +118,15 @@ def fetch_one(http: cc.PoliteSession, shop: cc.Shop, no: int, url: str,
                 why = "룩북칸"
         if not why and not (d.get("gallery") or d.get("image_url")):
             why = "사진없음"
+        # 이름이 그 상품이 걸린 칸 이름과 똑같으면 페이지를 못 읽은 것이다 — crawl_brand 와 같은 판단.
+        # 주간 갱신에는 이 그물이 없어서, 수집기 쪽을 막은 뒤에도 유령 137벌이 다시 들어왔다
+        # (2026-09-12 run 34681341194 에서 확인).
+        if not why and not d.get("size_table") and not d.get("options"):
+            cats = {shop.categories.get(c, "").strip().casefold()
+                    for c in (shop.membership.get(no) or set())}
+            cats |= {(c := cc.cate_no_of(url)) and shop.categories.get(c, "").strip().casefold()}
+            if d["name"].strip().casefold() in (cats - {"", None}):
+                why = "칸 이름이 상품 이름으로 왔다(페이지 못 읽음)"
         if why:
             return "no-price", None
         d["price_missing"] = True
