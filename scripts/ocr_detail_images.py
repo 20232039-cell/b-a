@@ -659,6 +659,18 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
                     or not (t.get("design_element") or t.get("construction") or t.get("hardware"))):
                 gap_urls.add(u)
 
+    # 옛 6,000자 상한에 잘려 나간 기록 — 그때는 그림별 글을 남기지 않아서 되살릴 길이
+    # 그림을 다시 읽는 것뿐이다(지금 상한은 12,000자). 잘린 자리가 글 끝이라, 상세 그림
+    # 맨 뒤에 오는 사이즈 표·소재·케어가 통째로 날아간 상품이 있다.
+    capped_nos: set[int] = set()
+    if select == "capped" and main.exists():
+        for l in main.read_text(encoding="utf-8").splitlines():
+            if not l.strip():
+                continue
+            o = json.loads(l)
+            if 5995 <= len(o.get("ocr_text") or "") <= 6005 and not o.get("imgs"):
+                capped_nos.add(o["product_no"])
+
     ocr_sized: set[str] = set()
     if select in ("ocr", "all"):
         sp2 = CRAWL_DIR.parent / "product_sizes.json"
@@ -670,7 +682,7 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
     # 읽어 넣은 것이니 전부 done 안에 있다. 그래서 --redo 없이 돌리면 대상이 58 → 5 로
     # 주저앉는다(2026-09-07 실측: noirer 20 · easy-no-easy 9 · frizmworks 7 이 전부 0 이 됐다).
     # 이 갈래는 다시 읽기가 목적이므로 redo 를 켜고 시작한다.
-    if select == "bad-size":
+    if select in ("bad-size", "capped"):
         redo = True
 
     # --redo: 예전에 「앞 3~5장만」 읽고 끝난 상품은 done 에 들어 있어 12장짜리 재시도에서 아예 빠진다.
@@ -751,11 +763,14 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
             # 사이즈가 커지는데 값이 작아지는 표 — 그림을 다시 읽어 원본 숫자를 본다
             if d.get("source_url") not in bad_urls:
                 continue
+        elif select == "capped":
+            if no not in capped_nos:
+                continue
         elif only_short and len(d.get("description", "")) >= SHORT_TEXT:
             continue
         todo.append(d)
     todo = todo[k::n]
-    want_size = select in ("no-size", "ocr", "gaps", "bad-size")
+    want_size = select in ("no-size", "ocr", "gaps", "bad-size", "capped")
     log(f"[{slug}] OCR 대상 {len(todo)} (이미 {len(done)}, 조각 {k + 1}/{n})")
     n_img = n_txt = 0
     counters = {"img": 0, "txt": 0, "done": 0, "early": 0}
@@ -835,7 +850,7 @@ def main():
     ap.add_argument("--cdn-delay", type=float, default=0.25, help="공용 이미지 CDN(cafe24img) 에만 쓰는 대기")
     ap.add_argument("--shard", default="1/1", help="k/n — 대상을 n등분해 k번째(1부터)만 (Actions 샤딩)")
     ap.add_argument("--out-dir", help="조각 파일을 쓸 폴더 (crawl/ocr/<slug>.jsonl 대신 <slug>.<k>.jsonl)")
-    ap.add_argument("--select", default="short", choices=["short", "all", "no-size", "ocr", "gaps", "bad-size"], help="short=설명 짧은 것(기본) · all=전부 · no-size=사이즈 표 없는 옷 · ocr=사이즈를 그림에서 읽은 옷 다시 · gaps=사이즈·소재·색·디테일 중 하나라도 빈 옷 · bad-size=사이즈가 커지는데 값이 작아지는 표만 다시")
+    ap.add_argument("--select", default="short", choices=["short", "all", "no-size", "ocr", "gaps", "bad-size", "capped"], help="short=설명 짧은 것(기본) · all=전부 · no-size=사이즈 표 없는 옷 · ocr=사이즈를 그림에서 읽은 옷 다시 · gaps=사이즈·소재·색·디테일 중 하나라도 빈 옷 · bad-size=사이즈가 커지는데 값이 작아지는 표만 다시 · capped=옛 6,000자 상한에 잘린 기록만 다시")
     args = ap.parse_args()
     OCR_DIR.mkdir(parents=True, exist_ok=True)
     k, n = (int(x) for x in args.shard.split("/"))
