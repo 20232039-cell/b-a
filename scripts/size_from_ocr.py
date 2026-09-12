@@ -1284,7 +1284,10 @@ def _combo_rank(u: str):
         return None
     a, b = _SIZE_RANK[m.group(1).upper()], _SIZE_RANK[m.group(2).upper()]
     return a if a < b else None
-_SIZE_OPT = re.compile(r"^(?:XXS|XS|S|M|L|XL|XXL|2XL|3XL|FREE|F|ONE ?SIZE|\d{1,2}|0\d)$", re.I)
+# 「00S」·「00M」처럼 앞에 0 을 붙여 파는 매장이 있다(한 매장 352벌이 옵션이 표와 칸 수까지 맞는데도
+# 이름을 못 받고 있었다, 2026-09-12). 표를 읽는 쪽은 이미 00S 를 사이즈로 다룬다 — 옵션 쪽만 막혀 있었다.
+_SIZE_OPT = re.compile(r"^(?:0*(?:XXS|XS|S|M|L|XL|XXL|2XL|3XL)|FREE|F|ONE ?SIZE|\d{1,2}|0\d)$", re.I)
+_ZERO_ALPHA = re.compile(r"^0+(XXS|XS|S|M|L|XL|XXL|2XL|3XL)$", re.I)
 _SIZE_RANK = {"XXS": 0, "XS": 1, "S": 2, "M": 3, "L": 4, "XL": 5, "XXL": 6, "2XL": 6, "3XL": 7}
 # 매장은 옵션 이름 뒤에 재고 사정을 덧붙인다(hatching-room 「1(XS) Only 1 Left」·「4(L) Low Stock」).
 _OPT_STOCK = re.compile(r"\s*[\[\(]?\s*(?:only\s*\d+\s*left|low\s*stock|품절\s*임박|재고\s*\d+\s*개?|"
@@ -1332,6 +1335,9 @@ def _opt_rank(o: str):
     u = o.upper().replace(" ", "")
     if u in _SIZE_RANK:
         return _SIZE_RANK[u]
+    z = _ZERO_ALPHA.match(u)
+    if z:
+        return _SIZE_RANK[z.group(1).upper()]        # 「00S」는 S 자리
     c = _combo_rank(u)
     if c is not None:
         return c                                     # 「S/M」은 S 자리
@@ -1512,6 +1518,58 @@ def _fill_number(names: list[str]) -> list[str] | None:
     out = [x if x not in ("?", "") else str(vals[0] + st * (i - idx[0])).zfill(w)
            for i, x in enumerate(names)]
     return out if len(set(out)) == len(out) else None
+
+
+# 단면으로는 있을 수 없는 값 — 이보다 크면 둘레로 잰 것일 수 있다(브랜드 단위 판정인 GIRTH_MIN 보다 높게 잡는다).
+_HALF_MIN = {"가슴": 75, "허리": 55, "엉덩이": 65, "밑단": 50, "허벅지": 42, "어깨": 70, "암홀": 40, "소매단": 30}
+
+
+def halve_unit_outliers(out: dict, rows: dict) -> Counter:
+    """한 표 안에서만 둘레로 적힌 값을 단면으로 맞춘다 — 같은 라인에 절반 값이 실제로 있을 때만.
+
+    브랜드×라벨 단위로 둘레를 가려내는 brand_girth 는 한 브랜드 안에서 어떤 상품은 단면, 어떤
+    상품은 둘레인 경우를 못 잡는다. 같은 레깅스 라인에서 한쪽은 「엉덩이 65.5·69.5·73.5」이고
+    다른 쪽은 「32.7·34.7·36.7」이었다 — 정확히 절반이다(2026-09-12 사람이 앱 화면에서 밑단
+    차이를 보고 물어 찾음).
+
+    짐작으로 반을 나누지 않는다. 같은 브랜드·같은 품목·색만 다른 같은 이름 무리 안에서
+    ① 그 라벨의 가장 작은 값의 1.85~2.15배이고 ② 단면으로는 있을 수 없는 크기일 때만 접는다.
+    둘 다 아니면 손대지 않는다 — 틀린 치수는 없는 치수보다 나쁘다.
+    """
+    n = Counter()
+    grp = defaultdict(list)
+    for u, e in out.items():
+        r = rows.get(u)
+        if r and r.get("item_type"):
+            grp[(r["brand_slug"], r["item_type"], color_base(r["name"])[:14])].append(u)
+
+    def med(v):
+        x = [y for y in v if isinstance(y, (int, float))]
+        return statistics.median(x) if x else None
+
+    for us in grp.values():
+        if len(us) < 2:
+            continue
+        for lab, mn in _HALF_MIN.items():
+            vals = {u: med(out[u]["sizes"].get(lab) or []) for u in us}
+            vals = {u: v for u, v in vals.items() if v}
+            if len(vals) < 2:
+                continue
+            lo = min(vals.values())
+            for u, v in vals.items():
+                if not (v > mn and 1.85 <= v / lo <= 2.15):
+                    continue
+                # 치마는 밑단이 엉덩이보다 넓은 게 정상이다 — 접으면 A라인이 폭 좁은 치마가 된다
+                # (2026-09-12 표본에서 미니스커트 밑단 54 → 27 이 되는 것을 보고 막았다).
+                hip = med(out[u]["sizes"].get("엉덩이") or [])
+                it = (rows.get(u) or {}).get("item_type", "")
+                if lab == "밑단" and hip and ("스커트" in it or "치마" in it) and v / 2 < hip:
+                    n["치마 밑단이라 두었다"] += 1
+                    continue
+                out[u]["sizes"][lab] = [round(x / 2, 1) if isinstance(x, (int, float)) else x
+                                        for x in out[u]["sizes"][lab]]
+                n[lab] += 1
+    return n
 
 
 def repair_names(out: dict, rows: dict) -> Counter:
@@ -1995,6 +2053,10 @@ def main():
     named = names_from_options(out, {r["source_url"]: r for r in rows.values()})
     if named:
         print(f"매장 옵션에서 사이즈 이름을 채운 상품 {named}벌")
+    half = halve_unit_outliers(out, {r["source_url"]: r for r in rows.values()})
+    if half:
+        print("같은 라인에 절반 값이 있어 둘레를 단면으로 접음: "
+              + " · ".join(f"{k} {v}" for k, v in sorted(half.items())))
     rep = repair_names(out, {r["source_url"]: r for r in rows.values()})
     if rep:
         print("읽다 만 사이즈 이름: " + " · ".join(f"{k} {v}" for k, v in sorted(rep.items())))
