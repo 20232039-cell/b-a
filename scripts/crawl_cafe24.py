@@ -1504,7 +1504,7 @@ def _fix_url(u: str, base: str) -> str:
 SIZE_LABELS = (r"(총\s*장|총\s*기장|기장|어깨\s*너비|어깨|가슴\s*단면|가슴|소매\s*길이|소매|화장|암홀|허리\s*단면|허리|밑위|"
                r"허벅지\s*단면|허벅지|밑단\s*단면|밑단|엉덩이|힙|sleeve\s*length|total\s*length|shoulder\s*width|chest\s*width|"
                r"leg\s*opening|out\s*seam|bottom\s*hem|bottom\s*width|hem\s*width|"
-               r"front\s*rise|back\s*rise|"
+               r"front\s*rise|back\s*rise|팔\s*길이|"
                r"length|shoulder|chest|sleeve|waist|hip|thigh|hem|rise|inseam)")
 # 「Length - 61cm Shoulder - 55cm」(anotheryouth)처럼 붙임표로 잇는 표기도 읽는다
 SIZE_RX = re.compile(SIZE_LABELS + r"\s*(?:\([^)]{0,20}\))?\s*[:：\-–—]?\s*((?:\d{1,4}(?:\.\d)?\s*(?:cm|mm)?\s*[/,|]?\s*){1,8})", re.I)
