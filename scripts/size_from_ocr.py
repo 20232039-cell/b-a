@@ -1722,15 +1722,31 @@ _SET_PIECE = re.compile(
     r"티셔츠|셔츠|블라우스|니트|가디건|후드|맨투맨|자켓|재킷|코트|조끼|팬츠|바지|스커트|치마|원피스|볼레로|튜브|나시")
 
 
-def drop_piece_tables(out: dict) -> int:
-    """칸 이름이 죄다 옷 이름인 표를 뺀다(세트·팩). 몇 벌을 뺐는지 돌려준다."""
-    gone = 0
-    for u in [u for u, e in out.items()
-              if (nm := e.get("size_names")) and len(nm) >= 2
-              and all(_SET_PIECE.search(str(x) or "") for x in nm)]:
-        del out[u]
-        gone += 1
-    return gone
+_COLOR_NAME = re.compile(
+    r"(?i)^\s*(?:black|white|off\s*white|ivory|cream|beige|navy|charcoal|gr[ae]y|brown|khaki|olive|"
+    r"green|blue|red|pink|purple|violet|yellow|orange|melange|denim|indigo|burgundy|wine|mint|sky|"
+    r"camel|mocha|sand|silver|gold|blue\s*gr[ae]y|"
+    r"블랙|화이트|아이보리|네이비|차콜|그레이|브라운|카키|올리브|그린|블루|레드|핑크|퍼플|옐로우|"
+    r"베이지|크림|멜란지|와인|민트|카멜|모카|실버|골드)\s*$")
+
+
+def drop_piece_tables(out: dict) -> tuple[int, int]:
+    """칸 이름이 사이즈가 아닌 표를 뺀다. (옷 이름 = 세트·팩, 색 이름 = 색깔별 실측)
+
+    둘 다 앱에서 「사이즈 고르기」 칸에 그대로 떠서, 손님이 「a maxi t-sh」나 「BLACK」을
+    사이즈로 고르게 된다. 값이 맞든 틀리든 고를 수 없는 칸이라 통째로 뺀다 —
+    없는 치수보다 틀린 치수가 나쁘다.
+    """
+    piece = color = 0
+    for u in list(out):
+        nm = out[u].get("size_names")
+        if not nm or len(nm) < 2:
+            continue
+        if all(_SET_PIECE.search(str(x) or "") for x in nm):
+            del out[u]; piece += 1
+        elif all(_COLOR_NAME.match(str(x) or "") for x in nm):
+            del out[u]; color += 1
+    return piece, color
 
 
 def drop_reversed_labels(out: dict, tol: float = 1.0) -> dict:
@@ -2170,9 +2186,11 @@ def main():
     if half:
         print("같은 라인에 절반 값이 있어 둘레를 단면으로 접음: "
               + " · ".join(f"{k} {v}" for k, v in sorted(half.items())))
-    pieces = drop_piece_tables(out)
+    pieces, colors = drop_piece_tables(out)
     if pieces:
         print(f"칸 이름이 옷 이름인 표(세트·팩) {pieces}벌을 뺐다 — 사이즈가 아니다")
+    if colors:
+        print(f"칸 이름이 색 이름인 표 {colors}벌을 뺐다 — 사이즈가 아니다")
     rev = drop_reversed_labels(out)
     if rev:
         print("사이즈 커지는데 값 줄어드는 라벨 뺌: " + " · ".join(f"{k} {v}" for k, v in sorted(rev.items())))
