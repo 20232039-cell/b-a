@@ -1060,8 +1060,51 @@ def normalize_html(st: dict, brand: str = "", girth_keys: set | None = None,
     if sweep_all(st):
         return {}
     st = drop_inches(st)
+    def _spec(k) -> int:
+        """이름이 얼마나 또렷한가 — 작을수록 먼저. 「XX단면」이 맨 앞이다.
+
+        매장이 「밑단단면 36.5」와 「밑단 8.5」를 나란히 적는다. 뒤엣것은 밑단 시보리 높이지
+        옷의 밑단 너비가 아니다. 정식 라벨 그대로인 이름을 앞세웠더니 카디건 밑단이 8.5cm 가
+        됐다(2026-09-12, 표본 다섯 벌에서 잡았다). 「단면」이라 적어 준 쪽이 우리가 쓰는
+        치수(단면) 그 자체라 가장 또렷하다.
+        """
+        c = canon_label(k)
+        n = re.sub(r"[\s()（）:：]", "", str(k)).lower()
+        if n == f"{c}단면":
+            return 0
+        return 1 if n == c else 2
+
+    def _n(k) -> int:
+        v = st[k]
+        return len(v) if isinstance(v, list) else 0
+
+    # 한 표에 같은 정식 라벨로 떨어지는 칸이 둘 있을 때 누가 그 자리를 갖는가.
+    # 예전에는 먼저 나온 칸이었다. 그래서 「소매통 24 / 소매단 20」에서 팔뚝 둘레가 소매단
+    # 자리에 앉았다 — 다른 치수를 그 이름으로 적는 건 비워 두는 것보다 나쁘다(창고 전수 127벌).
+    #
+    # 고르는 잣대는 「그 표가 몇 칸짜리인가」다. 표의 칸 수는 column_count 와 같은 셈으로
+    # 정한다(남는 값이 가장 많은 칸 수). 그 칸 수에 맞는 후보가 먼저고, 같으면 이름이 정식
+    # 라벨 그대로인 쪽, 그래도 같으면 원문 차례다.
+    #   length 3칸 · shoulder 3칸 · 총장 1칸 · 가슴단면 1칸  → 표는 3칸, length 가 이긴다
+    #   허리 1 · 엉덩이 1 · 밑단 1 · 총장 1 · waist 2 · hip 2 → 표는 1칸, 한글 쪽이 이긴다
+    #     (그 waist 57·59 는 사이즈가 아니라 권장 체촌이다 — 프리사이즈 치마였다)
+    #   소매통 2 · 소매단 2                                  → 칸 수가 같으니 소매단이 이긴다
+    # 값이 범위 밖이라 한 칸도 안 남으면 다음 후보로 넘어간다 — 그 넘어감을 없앴다가
+    # 「기장 20 / length 57」에서 총장을 통째로 잃었다(2026-09-12, 표본에서 잡았다).
+    # 표가 몇 칸인지 셀 때는 **정식 라벨 하나에 한 표**다. 한글 표와 영문 표를 나란히 싣는
+    # 매장에서 같은 치수가 두 번 세어져, 「length 3칸 / 총장 1칸」인 표가 1칸으로 읽혔다.
+    _by_canon: dict[str, list] = {}
+    for k in st:
+        if k == "_names" or not _n(k):
+            continue
+        c = canon_label(k)
+        if c and _n(k) > len(_by_canon.get(c, [])):
+            _by_canon[c] = st[k]
+    _want = column_count(_by_canon) if _by_canon else 1
+    order = sorted(st, key=lambda k: (_n(k) != _want, -_n(k), _spec(k), list(st).index(k)))
     out: dict[str, list[float]] = {}
-    for k, vals in st.items():
+    for k in order:
+        vals = st[k]
         c = canon_label(k)
         if not c or c in out:
             continue
@@ -1072,7 +1115,13 @@ def normalize_html(st: dict, brand: str = "", girth_keys: set | None = None,
         vs = drop_strays(brand, c, vs, med or {})
         if vs:
             out[c] = vs
-    return out
+    # 고르는 차례와 보여 주는 차례는 다르다 — 칸 차례는 원문 그대로 돌려준다.
+    first = {}
+    for k in st:
+        c = canon_label(k)
+        if c and c not in first:
+            first[c] = list(st).index(k)
+    return {c: out[c] for c in sorted(out, key=lambda c: first.get(c, 99))}
 
 
 # 라벨별 「둘레로 보이는」 문턱 — 이 위로 브랜드 중앙값이 오면 그 브랜드는 둘레로 재는 것이다.
@@ -1660,6 +1709,30 @@ def repair_names(out: dict, rows: dict) -> Counter:
     return n
 
 
+# 사이즈 자리에 「옷 이름」이 들어온 표 — 세트·팩 상품이다. 한 상품의 사이즈가 아니라
+# 구성품 저마다의 실측이라, 사이즈 고르는 자리에 세우면 「a maxi t-sh」가 사이즈로 뜬다
+# (사람이 앱 화면에서 짚어 줌, 2026-09-12 — 판매중 옷 2,400벌 가운데 한 벌).
+# 그 페이지는 머리줄이 「Size(free)」다. 즉 사이즈는 하나뿐이고 칸은 구성품이다.
+# 값 자체는 맞지만 이름을 그대로 두면 틀린 사이즈가 되고, 이름만 비우면 서로 다른 옷의
+# 치수가 한 옷의 두 사이즈로 읽힌다(가슴 62.5 / 51). 그래서 통째로 뺀다 —
+# 없는 치수보다 틀린 치수가 나쁘다.
+_SET_PIECE = re.compile(
+    r"(?i)t-?sh|shirt|blouse|tee|top\b|knit|cardigan|sweater|hood|sweat|jacket|coat|vest|"
+    r"pants|denim|jean|skirt|dress|bolero|tube|camisole|slip\b|"
+    r"티셔츠|셔츠|블라우스|니트|가디건|후드|맨투맨|자켓|재킷|코트|조끼|팬츠|바지|스커트|치마|원피스|볼레로|튜브|나시")
+
+
+def drop_piece_tables(out: dict) -> int:
+    """칸 이름이 죄다 옷 이름인 표를 뺀다(세트·팩). 몇 벌을 뺐는지 돌려준다."""
+    gone = 0
+    for u in [u for u, e in out.items()
+              if (nm := e.get("size_names")) and len(nm) >= 2
+              and all(_SET_PIECE.search(str(x) or "") for x in nm)]:
+        del out[u]
+        gone += 1
+    return gone
+
+
 def drop_reversed_labels(out: dict, tol: float = 1.0) -> dict:
     """사이즈가 커지는데 값이 줄어드는 라벨을 그 상품에서 뺀다 — 틀린 치수는 없는 치수보다 나쁘다.
 
@@ -2097,6 +2170,9 @@ def main():
     if half:
         print("같은 라인에 절반 값이 있어 둘레를 단면으로 접음: "
               + " · ".join(f"{k} {v}" for k, v in sorted(half.items())))
+    pieces = drop_piece_tables(out)
+    if pieces:
+        print(f"칸 이름이 옷 이름인 표(세트·팩) {pieces}벌을 뺐다 — 사이즈가 아니다")
     rev = drop_reversed_labels(out)
     if rev:
         print("사이즈 커지는데 값 줄어드는 라벨 뺌: " + " · ".join(f"{k} {v}" for k, v in sorted(rev.items())))
