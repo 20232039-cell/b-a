@@ -1765,6 +1765,11 @@ def main():
                 continue
             per_brand_tot[k[0]] += 1
             st = d.get("size_table")
+            # 창고에 이미 담긴 표 가운데 「같은 표가 두 번 찍혀 칸이 배로 늘어난 것」을 여기서 접는다 —
+            # 다시 수확하지 않고도 고쳐진다(2026-09-12, 한 매장 668벌).
+            if isinstance(st, dict) and st:
+                import crawl_cafe24 as _cc2
+                st = _cc2.collapse_repeated_columns(dict(st))
             sizes, names, source = {}, None, None
             if isinstance(st, dict) and st and (k[0], json.dumps(st, sort_keys=True, ensure_ascii=False)) not in shared:
                 sizes = normalize_html(st, k[0], girth_keys, label_med)

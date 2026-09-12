@@ -1505,6 +1505,40 @@ def repeated_block_table(seq: list[tuple[str, list[float], int]], t: str) -> dic
     return cols
 
 
+def collapse_repeated_columns(tbl: dict) -> dict:
+    """같은 표가 페이지에 두 번 찍혀 칸이 배로 늘어난 것을 접는다.
+
+    한글 표와 영문 표를 나란히 싣는 매장이 있다. 되풀이 묶음 파서가 그걸 8칸으로 읽어
+    「총장 [56.5, 57.5, 56.5, 57.5]」 같은 표가 나왔고, 옵션이 둘뿐이라 사이저가 그 표를
+    통째로 버렸다 — 한 매장 668벌이 사이즈를 잃었다(2026-09-12). 모든 라벨에서 앞 절반과
+    뒤 절반이 똑같을 때만 접는다. 한 라벨이라도 다르면 진짜 여러 사이즈다.
+    """
+    allk = [k for k in tbl if not k.startswith("_")]
+    if not allk:
+        return tbl
+    n = max(len(tbl[k]) for k in allk)
+    # 칸 수가 가장 많은 라벨만 본다 — 모델 치수(「waist 23.6」)처럼 한 칸짜리가 섞여 있어도
+    # 표 자체는 접을 수 있어야 한다(2026-09-12: 그 탓에 두 벌이 안 접혀 사이즈를 잃었다).
+    labs = [k for k in allk if len(tbl[k]) == n]
+    if n < 2 or len(labs) < 2:
+        return tbl
+    nm = tbl.get("_names")
+    nm = nm if isinstance(nm, list) and len(nm) == n else None
+    for p in range(1, n):
+        if n % p:
+            continue                     # 되풀이 마디는 칸 수를 나누어떨어뜨려야 한다
+        if any(v[i] != v[i % p] for l in labs for i, v in ((i, tbl[l]) for i in range(n))):
+            continue
+        if nm and any(nm[i] != nm[i % p] for i in range(n)):
+            continue                     # 이름이 다르면 진짜 다른 사이즈다(S M L XL)
+        for l in labs:
+            tbl[l] = tbl[l][:p]
+        if nm:
+            tbl["_names"] = nm[:p]
+        return tbl
+    return tbl
+
+
 def extract_size_table(html_text: str) -> dict[str, list[float]]:
     """사이즈 실측 — 총장·어깨·가슴… 뒤에 오는 숫자 묶음. 표(th/td)든 목록(ul/li)이든 스크립트 문자열
     안이든(lmood) 태그를 벗기고 글자 흐름에서 잡는다. 사이즈 이름(44/46/48)은 안 잡고 값의 순서만 남긴다 —
@@ -1532,7 +1566,7 @@ def extract_size_table(html_text: str) -> dict[str, list[float]]:
             rows[label] = nums[:8]
     rep = repeated_block_table(seq, t)
     if rep:
-        rows.update(rep)
+        rows.update(collapse_repeated_columns(rep))
     if len(rows) < 2:
         mat = extract_size_matrix(t)
         if len(mat) > len(rows):
