@@ -27,7 +27,17 @@ jobs:
           r = requests.get(url, timeout=30, headers={
               "User-Agent": "LAYER-bot (data quality check; contact via shop inquiry)"})
           h = r.text
-          print("status", r.status_code, "bytes", len(h))
+          print("status", r.status_code, "bytes", len(h), "ctype", r.headers.get("content-type", "")[:40])
+          if "<urlset" in h[:2000] or "<sitemapindex" in h[:2000] or url.endswith(".xml"):
+              locs = re.findall(r"<loc>\s*([^<]+?)\s*</loc>", h)
+              print("사이트맵 <loc> 수:", len(locs))
+              prod = [u for u in locs if "/product/" in u]
+              print("그중 /product/ :", len(prod))
+              for u in prod[:12]:
+                  print("   ", u)
+              for u in locs[:8] if not prod else []:
+                  print("   (상품 아님)", u)
+              raise SystemExit
           soup = BeautifulSoup(h, "lxml")
           for var in ("product_price", "product_sale_price", "product_custom_price"):
               m = re.search(var + r"\s*=\s*['\"]?([\d.]*)", h)
