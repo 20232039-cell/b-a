@@ -21,7 +21,7 @@ on:
 jobs:
   crawl:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 350
     env:
       DATA_BRANCH: crawl/cafe24-full-catalog
     steps:
