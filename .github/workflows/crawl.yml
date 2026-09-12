@@ -1,0 +1,60 @@
+# 브랜드 하나를 처음부터 수집한다 — 씨앗에는 있는데 상품이 0인 매장을 살리려고 만들었다.
+# 기존 워크플로는 전부 「이미 있는 상품」을 갱신하는 것이라, 새 매장을 들일 길이 없었다.
+# 필요한 것: Settings → Secrets and variables → Actions 에 DATA_TOKEN.
+name: crawl-brand
+
+on:
+  workflow_dispatch:
+    inputs:
+      brands:
+        description: "공백으로 나눈 slug 목록 (예: opus-0012 pog-service)"
+        required: true
+      workers:
+        description: "동시에 볼 매장 수 — 한 매장에는 언제나 초당 하나만 간다"
+        required: false
+        default: "2"
+      refresh:
+        description: "true 면 그 매장 파일을 비우고 새로 받는다"
+        required: false
+        default: "false"
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      DATA_BRANCH: crawl/cafe24-full-catalog
+    steps:
+      - uses: actions/checkout@v4
+      - name: 데이터 저장소(비공개) 받기
+        uses: ./.github/actions/data-repo
+        with: {token: "${{ secrets.DATA_TOKEN }}"}
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: pip install -q requests beautifulsoup4 lxml
+      - name: 수집
+        working-directory: work
+        run: |
+          python scripts/crawl_cafe24.py --brands ${{ inputs.brands }} \
+            --workers ${{ inputs.workers }} \
+            ${{ inputs.refresh == 'true' && '--refresh' || '' }} | tail -40
+      - name: CSV · 사이즈 · 태그 재생성
+        working-directory: work
+        run: |
+          python scripts/crawl_cafe24.py --build-csv | tail -3
+          python scripts/size_from_ocr.py | tail -4
+          python scripts/tag_items.py | tail -3
+      - name: commit & push (rebase 후, 3회 재시도)
+        working-directory: work
+        shell: bash
+        run: |
+          git config user.name "layer-crawl-bot"
+          git config user.email "crawl@layer.invalid"
+          git add data/crawl/ data/products_full.csv data/product_sizes.json data/product_tags_full.json
+          git diff --cached --quiet && { echo "변화 없음"; exit 0; }
+          git commit -m "새 매장 수집 $(date -u +%Y-%m-%d) — ${{ inputs.brands }} (Actions)"
+          for i in 1 2 3; do
+            git pull --rebase --autostash origin "$DATA_BRANCH" && git push && exit 0
+            echo "푸시 실패, 재시도 $i"; sleep 10
+          done
+          exit 1
