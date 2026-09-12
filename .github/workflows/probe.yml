@@ -39,6 +39,12 @@ jobs:
                   print("   (상품 아님)", u)
               raise SystemExit
           soup = BeautifulSoup(h, "lxml")
+          cates = sorted({int(x) for x in re.findall(r"cate_no=(\d{1,5})", h)})
+          prods = sorted({m for m in re.findall(r'href="(/product/[^"]{3,120})"', h)})
+          print("cate_no 후보:", cates[:40], "총", len(cates))
+          print("/product/ 링크:", len(prods))
+          for u in prods[:10]:
+              print("   ", u)
           for var in ("product_price", "product_sale_price", "product_custom_price"):
               m = re.search(var + r"\s*=\s*['\"]?([\d.]*)", h)
               print(f"JS {var}:", m.group(1) if m else "없음")
