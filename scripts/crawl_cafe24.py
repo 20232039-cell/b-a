@@ -506,6 +506,29 @@ def carry_over(prev: dict, d: dict, when: str) -> None:
         if len(d.get(k) or "") < len(prev.get(k) or "") // 2:
             d[k] = prev.get(k)
 
+def is_category_page(html_text: str) -> bool:
+    """상품 페이지인 줄 알고 열었는데 칸(카테고리) 페이지인 것을 가려낸다.
+
+    pog-service 의 목록(list2.html)은 상품을 /product/detail2.html?product_no=N 으로 건다.
+    그런데 그 detail2 는 죽은 판이라 어느 번호로 열어도 그 상품이 걸린 **칸**을 그린다 —
+    og:type 이 product.group 이고 og:url 이 /category/jewerly/25/ 다. 이름 자리가 비어
+    <title>(「jewerly - jewerly - POG service」)까지 내려가고, 값도 글도 없다.
+    그렇게 이름이 전부 칸 이름이고 값이 하나도 없는 상품 137벌이 들어왔다(2026-09-12).
+
+    같은 번호를 /product/detail.html?product_no=322 로 열면 153KB 짜리 진짜 상품
+    페이지다 — 「SYSTEM FRAG necklace (ver.6)」 688,000원. 매장이 제 링크를 잘못 걸어 둔 것이라
+    우리가 주소를 바로잡아 한 번 더 열면 된다.
+    """
+    head = html_text[:20000]
+    if re.search(r'og:type"\s+content="product\.group"', head):
+        return True
+    for rx in (r'<link[^>]+rel="canonical"[^>]+href="([^"]+)"', r'og:url"\s+content="([^"]+)"'):
+        m = re.search(rx, head)
+        if m and re.search(r"/category/|/product/list", m.group(1)):
+            return True
+    return False
+
+
 def not_a_product(name: str, shop_titles: set[str] = frozenset()) -> str | None:
     """상품이 아닌 페이지면 그 까닭을, 상품 같으면 None 을 준다."""
     n = (name or "").strip()
@@ -2309,6 +2332,14 @@ def crawl_brand(http: PoliteSession, shop: Shop, refresh: bool, log, refetch_ids
                 # 사이트맵 주소가 죽었어도 번호로는 열리는 경우가 있다
                 url = f"{shop.base}/product/detail.html?product_no={no}"
                 r = http.get(url, retries=1)
+            # 매장이 제 상품 링크를 죽은 판(detail2.html)에 걸어 둔 곳이 있다 — 열면 칸 페이지가
+            # 나온다. 보통 주소로 한 번 더 연다(pog-service, 2026-09-12).
+            if (r is not None and r.status_code == 200 and is_category_page(r.text)
+                    and not re.search(r"/product/detail\.html\?product_no=", url)):
+                alt = f"{shop.base}/product/detail.html?product_no={no}"
+                r2 = http.get(alt, retries=1)
+                if r2 is not None and r2.status_code == 200 and not is_category_page(r2.text):
+                    url, r = alt, r2
             if r is None or r.status_code != 200:
                 failed += 1
                 shop.failures.append({"product_no": no, "url": url, "reason": f"http {getattr(r, 'status_code', 'ERR')}"})

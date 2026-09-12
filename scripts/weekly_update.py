@@ -88,6 +88,13 @@ def fetch_one(http: cc.PoliteSession, shop: cc.Shop, no: int, url: str,
     if r is not None and r.status_code in (404, 410) and "product_no=" not in url:
         url = f"{shop.base}/product/detail.html?product_no={no}"
         r = http.get(url, retries=1)
+    # 죽은 판(detail2.html)에 걸린 링크는 칸 페이지를 준다 — 보통 주소로 한 번 더 (crawl_brand 와 같은 판단)
+    if (r is not None and r.status_code == 200 and cc.is_category_page(r.text)
+            and not re.search(r"/product/detail\.html\?product_no=", url)):
+        alt = f"{shop.base}/product/detail.html?product_no={no}"
+        r2 = http.get(alt, retries=1)
+        if r2 is not None and r2.status_code == 200 and not cc.is_category_page(r2.text):
+            url, r = alt, r2
     if r is None:
         return "http", None
     if r.status_code in (404, 410):
