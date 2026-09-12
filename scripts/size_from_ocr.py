@@ -1423,7 +1423,10 @@ def names_from_options(out: dict, rows_by_url: dict) -> int:
         # 믿는다. frizmworks 348벌이 「SS, M, L, XL」인데 옵션은 「S | M | L | XL」이었다(2026-09-08).
         # 「1, 2, 3」 vs 「S | M | L」처럼 둘 다 사이즈로 읽히는데 다르면 어느 쪽이 맞는지 모른다 —
         # 그대로 둔다.
-        if have and len(set(have)) == len(have) and not _unreadable_only_differs(e, have, names):
+        # 이미 있는 이름이 고를 수 없는 것이면(「?」가 끼었거나 같은 이름이 두 번) 옵션이 이긴다.
+        # 서로 다른 글자라는 이유로 「?, 5」 같은 이름을 지키느라 옵션 「M | L」을 버리고 있었다
+        # (2026-09-12: 그렇게 지나친 상품이 나중에 이름을 통째로 잃었다).
+        if have and not _name_row_bad(have) and not _unreadable_only_differs(e, have, names):
             continue
         rk = [_opt_rank(o) for o in names]
         if any(x is None for x in rk) or rk != sorted(rk) or len(set(rk)) != len(rk):
@@ -2057,12 +2060,18 @@ def main():
     if half:
         print("같은 라인에 절반 값이 있어 둘레를 단면으로 접음: "
               + " · ".join(f"{k} {v}" for k, v in sorted(half.items())))
-    rep = repair_names(out, {r["source_url"]: r for r in rows.values()})
-    if rep:
-        print("읽다 만 사이즈 이름: " + " · ".join(f"{k} {v}" for k, v in sorted(rep.items())))
     rev = drop_reversed_labels(out)
     if rev:
         print("사이즈 커지는데 값 줄어드는 라벨 뺌: " + " · ".join(f"{k} {v}" for k, v in sorted(rev.items())))
+    # 표를 정리하고 나면 칸 수가 바뀐다. 옵션 이름 붙이기를 한 번 더 돌린다 — 첫 판에서는
+    # 「옵션 2개 vs 표 4칸」이라 지나쳤던 상품이, 어긋난 라벨이 빠진 뒤에는 딱 맞는다
+    # (2026-09-12: 옵션과 칸 수가 맞는데도 이름이 없던 상품들의 원인이 이 차례였다).
+    again = names_from_options(out, {r["source_url"]: r for r in rows.values()})
+    if again:
+        print(f"표를 정리한 뒤 옵션에서 이름을 더 채운 상품 {again}벌")
+    rep = repair_names(out, {r["source_url"]: r for r in rows.values()})
+    if rep:
+        print("읽다 만 사이즈 이름: " + " · ".join(f"{k} {v}" for k, v in sorted(rep.items())))
     if fixed:
         print("사이즈 이름 정리: " + " · ".join(f"{k} {v}" for k, v in sorted(fixed.items())))
     OUT.write_text(json.dumps(out, ensure_ascii=False, indent=0), encoding="utf-8")
