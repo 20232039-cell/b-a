@@ -1592,6 +1592,12 @@ def extract_size_table(html_text: str) -> dict[str, list[float]]:
         label = re.sub(r"\s+", "", m.group(1)).lower()
         nums = [float(x) for x in re.findall(r"\d{1,4}(?:\.\d)?" if mm else r"\d{1,3}(?:\.\d)?", m.group(2))]
         nums = [n / 10 if mm else n for n in nums if lo <= n <= hi]
+        # 「… 소매 60 3 SIZE(cm) 총장 66 …」 — 다음 묶음의 이름(3)이 앞 라벨의 값으로 딸려 온다.
+        # 그 한 칸 때문에 되풀이 묶음 파서가 「칸이 하나가 아니다」라며 표 접기를 포기해,
+        # 매장이 두세 사이즈를 파는데 앞 사이즈만 남았다(fabrega 122 · divein 16, 2026-09-12).
+        # 값이 둘 이상일 때만 뗀다 — 하나뿐인 값을 떼면 라벨이 통째로 사라진다.
+        if len(nums) >= 2 and re.match(r"\s*(?:size|사이즈)\b", t[m.end():m.end() + 10], re.I):
+            nums = nums[:-1]
         if not nums:
             continue
         seq.append((label, nums, m.start()))
