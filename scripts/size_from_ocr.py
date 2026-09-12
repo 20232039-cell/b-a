@@ -983,6 +983,40 @@ def drop_strays(brand: str, c: str, vs: list[float], med: dict) -> list[float]:
     return keep if any(isinstance(v, (int, float)) for v in keep) else vs
 
 
+def column_count(sizes: dict[str, list]) -> int:
+    """라벨마다 칸 수가 다를 때, 표를 몇 칸으로 볼지 고른다.
+
+    예전에는 가장 짧은 라벨에 맞췄다. 그랬더니 「모델 착용 치수」한 줄이 표 전체를 한 칸으로
+    끌어내렸다 — nick-nicole 의 「가슴 35·37 / 총장 51·52 / waist 58 / hip 87」이 앞칸만 남아
+    M·L 두 사이즈짜리 옷이 앱에서 프리사이즈로 섰다(2026-09-12, 판매중 옷 309벌).
+    앞칸만 남기는 건 없는 것보다 나쁘다 — M 의 가슴을 「이 옷의 유일한 치수」라고 적는 꼴이다.
+
+    그래서 「남는 값이 가장 많은 칸 수」를 고른다: 칸 수 n 을 택하면 n 칸 이상인 라벨만 남으므로
+    남는 값은 n × (n 칸 이상인 라벨 수)다. 이 값이 가장 큰 n 을 고른다. 비기면 작은 쪽이다 —
+    「총장 75 / 소매 60·3」에서 뒤엣것을 사이즈로 믿고 총장을 버리면 안 된다(그 3 은 오차 안내다).
+    값이 더 남을 때만 칸이 늘고, 가장 짧은 길이도 후보라 지금보다 값이 줄어드는 일은 없다.
+      가슴2 총장2 허리1     → n=2 (값 4 > 3) · 허리는 뺀다
+      총장3 어깨3 가슴3 밑단3 힙1 → n=3 (12 > 5)
+      총장1 어깨1 가슴1 소매2   → n=1 (4 > 2) · 소매의 뒷칸은 오차 안내다(fabrega)
+
+    다만 소수가 다수를 이기지는 못한다 — 남는 라벨이 빠지는 라벨보다 적으면 그 n 은 쓰지 않는다.
+    noice 후드의 「가슴 27·28.5·30·32 / 허리 22·22.5·23·24 / 어깨 57 / 소매길이 60 / 총장 58.5」에서
+    앞 둘은 매장 공용 치수표고 뒤 셋이 이 옷의 실측이다. 값 수만 따지면 공용표가 이겨
+    옷의 총장·어깨·소매를 버리게 된다(2026-09-12 표본 확인). 가장 짧은 길이는 늘 이 조건을
+    지나가니 막다른 곳은 없다.
+    """
+    lens = sorted({len(v) for v in sizes.values()})
+    best, best_score = lens[0], -1
+    for n in lens:
+        keep = sum(1 for v in sizes.values() if len(v) >= n)
+        if keep < len(sizes) - keep:
+            continue
+        score = n * keep
+        if score > best_score:      # 비기면 먼저 본 작은 n 이 남는다
+            best, best_score = n, score
+    return best
+
+
 def _monotone(a: list[float]) -> bool:
     return all(x <= y for x, y in zip(a, a[1:])) or all(x >= y for x, y in zip(a, a[1:]))
 
@@ -2006,16 +2040,19 @@ def main():
             # 가방에 어깨너비가 있을 리 없고, 있다면 그건 남의 옷 표다.
             if r.get("category_code") in NON_APPAREL_CODES and set(sizes) & GARMENT_ONLY:
                 continue
-            # 사이즈 개수가 라벨마다 다르면(OCR 누락) 가장 짧은 길이로 맞춘다
-            n = min(len(v) for v in sizes.values())
+            # 사이즈 개수가 라벨마다 다르면(모델 치수 한 줄·OCR 누락) 칸 수를 골라 맞춘다.
+            # 짧은 라벨은 뺀다 — 앞칸만 남겨 두면 M 의 치수가 그 옷의 유일한 치수로 적힌다.
+            n = column_count(sizes)
             # 길이를 맞추고 나서 다시 본다 — 자르고 나면 값이 하나도 안 남는 라벨이 생긴다
             # (noirer 「가슴: [null]」 — 앱 상세에 빈 줄이 선다).
-            sizes = {c: v[:n] for c, v in sizes.items()}
+            sizes = {c: v[:n] for c, v in sizes.items() if len(v) >= n}
             sizes = {c: v for c, v in sizes.items() if any(isinstance(x, (int, float)) for x in v)}
             if not sizes:
                 continue
+            # 이름이 칸보다 적으면 붙이지 않는다 — 세 칸짜리 표에 이름 둘을 걸면 어긋난다.
+            # 뒤에서 매장 옵션·형제에게서 다시 채운다.
             if names:
-                names = names[:n]
+                names = names[:n] if len(names) >= n else None
             out[r["source_url"]] = {"brand_slug": k[0], "source": source, "size_names": names, "sizes": sizes}
             src[source] += 1
             (per_brand_html if source in ("html", "browser") else per_brand_ocr)[k[0]] += 1
