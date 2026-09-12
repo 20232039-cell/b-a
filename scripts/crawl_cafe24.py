@@ -1284,6 +1284,39 @@ def load_robots(http: PoliteSession, shop: Shop):
         shop.robots = rp
 
 
+def enumerate_by_number(http: PoliteSession, shop: Shop, limit: int = 800, miss_stop: int = 40) -> None:
+    """사이트맵도 목록도 안 되는 매장에서 상품 번호를 1부터 훑는다.
+
+    메뉴를 자바스크립트로 그리는 스킨이 있다. 그런 매장은 홈 HTML 에 상품 링크가 0개고,
+    sitemap.xml 과 /product/list.html 이 둘 다 404 라 지금까지 상품을 하나도 못 받았다
+    (두 매장이 통째로 빠져 있었다 — 2026-09-12 사람이 앱에서 없는 브랜드를 보고 짚어 줌).
+    cafe24 는 스킨과 무관하게 /product/detail.html?product_no=N 을 열어 주므로 그 길로 센다.
+
+    번호는 띄엄띄엄하다. 연달아 miss_stop 번 빈손이면 끝으로 보고 멈춘다. 다른 길로 이미
+    상품을 찾은 매장에서는 돌지 않는다 — 68개 매장은 지금까지처럼 사이트맵으로 간다.
+    """
+    if len(shop.product_urls) >= 5:
+        return
+    miss = 0
+    found = 0
+    for no in range(1, limit + 1):
+        url = f"{shop.base}/product/detail.html?product_no={no}"
+        if not shop.allowed(url):
+            continue
+        r = http.get(url, retries=1)
+        if r is None or r.status_code != 200 or "product_no" not in r.text:
+            miss += 1
+            if miss >= miss_stop:
+                break
+            continue
+        miss = 0
+        found += 1
+        shop.product_urls.setdefault(str(no), url)
+    if found:
+        shop.enumerated_by = "number-sweep"
+    print(f"[{shop.slug}] 번호로 훑기 — 찾은 상품 {found}", flush=True)
+
+
 def enumerate_by_sitemap(http: PoliteSession, shop: Shop) -> None:
     """사이트맵(인덱스면 하위까지)에서 상품 URL 을 모은다."""
     seen_maps: set[str] = set()
@@ -1861,10 +1894,17 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
     if price is None and str(ld_offer.get("price", "")).replace(".", "").isdigit():
         price = int(float(ld_offer["price"]))
     if price is None:
-        span = soup.select_one("#span_product_price_text")
-        if span:
-            digits = re.sub(r"[^\d]", "", span.get_text())
-            price = int(digits) if digits and int(digits) > 0 else None
+        # 할인 중인 매장은 판매가 자리(#span_product_price_text)에 할인가를 넣고 정가를 따로 둔다.
+        # 둘 다 있고 정가 쪽이 더 크면 그쪽이 정가다 — 우리는 수시로 바뀌는 할인가를 쓰지 않는다
+        # (2026-09-12: 정가 69,000 · 할인가 62,100 인 매장에서 확인).
+        def _won(sel):
+            el = soup.select_one(sel)
+            if not el:
+                return None
+            d = re.sub(r"[^\d]", "", el.get_text())
+            return int(d) if d and int(d) > 0 else None
+        sale, listed = _won("#span_product_price_text"), _won("#span_product_price_custom")
+        price = listed if (listed and sale and listed > sale) else (sale or listed)
 
     soldout = False
     m = re.search(r"(?:is_)?soldout_icon\s*=\s*'(\w)'", html_text)
@@ -2234,6 +2274,7 @@ def crawl_brand(http: PoliteSession, shop: Shop, refresh: bool, log, refetch_ids
     else:
         enumerate_by_sitemap(http, shop)
         crawl_category_lists(http, shop)
+        enumerate_by_number(http, shop)      # 앞의 두 길이 빈손일 때만 돈다
         todo = [(no, u) for no, u in shop.product_urls.items() if no not in done and no not in members_only]
     log(f"[{shop.slug}] 카테고리 {len(shop.categories)} · 상품 URL {len(shop.product_urls)} ({shop.enumerated_by}) · 받을 것 {len(todo)} · 이미 {len(done)}")
 
