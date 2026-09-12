@@ -1835,8 +1835,13 @@ def is_skin_asset(url: str, max_stem: int = 24) -> bool:
     return len(stem) <= max_stem and bool(_ASSET_WORD.search(stem))
 
 
+# C0 제어문자 — 매장 본문에 \x03·\x08 이 섞여 있다(93줄). 눈에 안 보이는데 JSON·CSV·DB 로
+# 옮길 때 줄을 깨뜨린다. 줄바꿈·탭은 남긴다.
+_CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
 def _strip_tags(s: str) -> str:
-    return re.sub(r"\s+", " ", htmlmod.unescape(re.sub(r"<[^>]+>", " ", s or ""))).strip()
+    return re.sub(r"\s+", " ", _CTRL.sub("", htmlmod.unescape(re.sub(r"<[^>]+>", " ", s or "")))).strip()
 
 
 # 옵션 칸에 든 안내 문구 — 사이즈가 아니다. 예전엔 한 문장만 정확히 맞춰 뺐는데
@@ -1992,6 +1997,12 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
     canon = soup.select_one('link[rel="canonical"]')
     canon_href = htmlmod.unescape(canon.get("href")) if canon and canon.get("href") else ""
     source_url = canon_href if product_no_of(canon_href) else url
+    # 열었던 주소에도 상품 번호가 없으면(매장 첫 화면으로 튕긴 경우) 번호로 다시 짓는다.
+    # 한 매장 일곱 벌이 source_url 로 매장 첫 화면을 갖고 있었다 — 일곱이 같은 주소라
+    # 사이즈·태그가 주소로 이어지질 못해 그 일곱 벌은 표가 있는데도 실측이 0이었다.
+    # 공용 DB 에 넣을 때도 같은 주소 일곱이 부딪힌다(2026-09-13).
+    if not product_no_of(source_url):
+        source_url = f"{shop.base}/product/detail.html?product_no={no}"
 
     # ── 상세 설명 ──
     # cafe24 상세는 대개 #prdDetail 에 「이미지」로 들어 있고 글은 거의 없다(matin-kim 1,170건 글 0자).
@@ -2083,7 +2094,8 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
         t = re.sub(r"\s+", " ", cells[1].get_text(" ", strip=True))
         if len(t) >= 15 and not POLICY.search(t) and t not in parts and not any(t in x for x in parts):
             parts.append(t)
-    body_text = " ".join(parts)
+    # 본문 조각은 태그를 벗기지 않고 모아서 _strip_tags 를 안 탄다 — 여기서 제어문자를 걷는다.
+    body_text = _CTRL.sub("", " ".join(parts))
     ld_text = _strip_tags(ld.get("description", ""))
     if POLICY.search(ld_text):
         ld_text = ""
