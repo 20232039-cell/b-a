@@ -50,7 +50,18 @@ jobs:
           git commit -m "새 매장 수집 $(date -u +%Y-%m-%d) — ${{ inputs.brands }} (Actions)"
           for i in 1 2 3; do
             git pull --rebase --autostash origin "$DATA_BRANCH" && git push && exit 0
-            git rebase --abort 2>/dev/null || true
+            # 매장별 jsonl 은 서로 겹칠 일이 없지만, 판마다 통째로 다시 쓰는 보고 파일
+            # (_summary.json · _members_only.json)은 동시에 돌면 반드시 부딪힌다.
+            # 그것 때문에 이번 수집을 버릴 이유가 없다 — 저쪽 것을 받고 이어간다.
+            if [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ]; then
+              for f in $(git diff --name-only --diff-filter=U | grep -E '^data/crawl/_[^/]*\.json$' || true); do
+                git checkout --ours -- "$f" && git add "$f"
+              done
+              if [ -z "$(git diff --name-only --diff-filter=U)" ]; then
+                git -c core.editor=true rebase --continue && git push && exit 0
+              fi
+              git rebase --abort 2>/dev/null || true
+            fi
             echo "원본 푸시 실패, 재시도 $i"; sleep 10
           done
           exit 1
