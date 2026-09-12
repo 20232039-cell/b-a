@@ -1462,6 +1462,109 @@ def names_from_options(out: dict, rows_by_url: dict) -> int:
     return n
 
 
+_ALPHA_LADDER = ["XXS", "XS", "S", "M", "L", "XL", "XXL", "XXXL"]
+
+
+def _name_row_bad(names: list[str]) -> bool:
+    """고를 수 없는 이름 줄인가 — 빈 자리·물음표가 있거나 같은 이름이 두 번 있다."""
+    return (not names) or any(x in ("?", "") for x in names) or len(names) != len(set(names))
+
+
+def _fill_alpha(names: list[str]) -> list[str] | None:
+    """읽힌 자리가 S·M·L 사다리에서 칸 간격과 똑같이 떨어져 있으면 빈 자리를 메운다."""
+    idx = [i for i, x in enumerate(names) if x.upper() in _ALPHA_LADDER]
+    if len(idx) < 2 or len(idx) == len(names):
+        return None
+    pos = [_ALPHA_LADDER.index(names[i].upper()) for i in idx]
+    if any(pos[j + 1] - pos[j] != idx[j + 1] - idx[j] for j in range(len(idx) - 1)):
+        return None
+    out = []
+    for i, x in enumerate(names):
+        if x.upper() in _ALPHA_LADDER:
+            out.append(x.upper())
+            continue
+        p = pos[0] + (i - idx[0])
+        if not 0 <= p < len(_ALPHA_LADDER):
+            return None
+        out.append(_ALPHA_LADDER[p])
+    return out if len(set(out)) == len(out) else None
+
+
+def _fill_number(names: list[str]) -> list[str] | None:
+    """읽힌 자리가 등차 정수열이면 빈 자리를 메운다(「1, ?, 3」→ 2). 간격이 정수가 아니면
+    손대지 않는다 — 「48 ? 51」처럼 이름 줄이 아니라 치수 줄을 읽은 것일 수 있다."""
+    idx = [i for i, x in enumerate(names) if x not in ("?", "")]
+    if len(idx) < 2 or len(idx) == len(names):
+        return None
+    vals = []
+    for i in idx:
+        m = re.fullmatch(r"0*(\d{1,3})", names[i])
+        if not m:
+            return None
+        vals.append(int(m.group(1)))
+    steps = {(vals[j + 1] - vals[j]) / (idx[j + 1] - idx[j]) for j in range(len(idx) - 1)}
+    if len(steps) != 1:
+        return None
+    st = steps.pop()
+    if st <= 0 or st != int(st):
+        return None
+    st, w = int(st), len(names[idx[0]])
+    out = [x if x not in ("?", "") else str(vals[0] + st * (i - idx[0])).zfill(w)
+           for i, x in enumerate(names)]
+    return out if len(set(out)) == len(out) else None
+
+
+def repair_names(out: dict, rows: dict) -> Counter:
+    """판독기가 이름 줄의 한 칸을 놓쳐 「?」가 남거나 같은 이름이 두 번인 표를 고친다.
+
+    앱 사이즈 칩에 「?」가 뜨거나 같은 글자가 두 번 뜬다 — 둘 다 고를 수 없는 값이다
+    (2026-09-12 감사: 「?」 247벌 · 겹침 21벌). 채우는 길은 확신 순서로 셋이고, 어느 것도
+    안 되면 이름 줄을 통째로 비운다 — 「고를 수 없음」이 「틀린 이름」보다 낫다.
+      1. 색만 다른 형제가 온전한 이름을 같은 칸 수로 갖고 있으면 그대로 받는다(가장 확실).
+      2. S·M·L 사다리에서 자리 간격이 맞으면 메운다(「?, M, L, XL」→ S).
+      3. 등차 정수열이면 메운다(「?, 2, 3」→ 1). 간격이 정수가 아니면 손대지 않는다.
+    매장 옵션으로 채우는 길은 names_from_options 가 앞서 처리한다.
+    """
+    n = Counter()
+    by_base = defaultdict(list)
+    for u, r in rows.items():
+        if u in out:
+            by_base[(r["brand_slug"], color_base(r["name"]))].append(u)
+
+    def cols(e):
+        return max((len(v) for v in e["sizes"].values()), default=0)
+
+    for u, e in out.items():
+        names = [str(x).strip() for x in (e.get("size_names") or [])]
+        if names and not _name_row_bad(names):
+            continue
+        r = rows.get(u)
+        got = None
+        # 한 칸짜리 표에 형제의 이름을 붙여 봐야 고를 게 없다 — 「001」 같은 매장 코드만 남는다.
+        if r and (names or cols(e) >= 2):
+            for v in by_base.get((r["brand_slug"], color_base(r["name"])), []):
+                ev = out.get(v)
+                if v == u or not ev:
+                    continue
+                nv = [str(x).strip() for x in (ev.get("size_names") or [])]
+                if nv and not _name_row_bad(nv) and len(nv) == cols(e) == cols(ev) and (not names or len(names) == cols(e)):
+                    got, why = nv, "형제에게서 받음"
+                    break
+        if got is None:
+            got = _fill_alpha(names)
+            why = "S·M·L 사다리로 메움"
+        if got is None:
+            got = _fill_number(names)
+            why = "등차 숫자로 메움"
+        if got is not None:
+            e["size_names"] = got
+            n[why if names else "이름 없던 표가 형제에게서 받음"] += 1
+        elif names:
+            e["size_names"] = None          # 원래 없던 표는 그대로 둔다 — 셈이 부풀지 않게
+            n["고를 수 없어 이름을 비움"] += 1
+    return n
+
+
 def drop_reversed_labels(out: dict, tol: float = 1.0) -> dict:
     """사이즈가 커지는데 값이 줄어드는 라벨을 그 상품에서 뺀다 — 틀린 치수는 없는 치수보다 나쁘다.
 
@@ -1892,6 +1995,9 @@ def main():
     named = names_from_options(out, {r["source_url"]: r for r in rows.values()})
     if named:
         print(f"매장 옵션에서 사이즈 이름을 채운 상품 {named}벌")
+    rep = repair_names(out, {r["source_url"]: r for r in rows.values()})
+    if rep:
+        print("읽다 만 사이즈 이름: " + " · ".join(f"{k} {v}" for k, v in sorted(rep.items())))
     rev = drop_reversed_labels(out)
     if rev:
         print("사이즈 커지는데 값 줄어드는 라벨 뺌: " + " · ".join(f"{k} {v}" for k, v in sorted(rev.items())))
