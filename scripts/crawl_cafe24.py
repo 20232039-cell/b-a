@@ -2338,6 +2338,18 @@ def crawl_brand(http: PoliteSession, shop: Shop, refresh: bool, log, refetch_ids
                         why = "룩북칸:" + str(verdicts[0])[:24]
                 if not why and not (d.get("gallery") or d.get("image_url")):
                     why = "사진없음"
+                # 이름이 그 상품이 걸린 칸 이름과 똑같다 — 페이지를 못 읽었다는 뜻이다.
+                # parse_detail 은 이름을 못 찾으면 <title> 을 줍는데, 스킨이 다른 매장
+                # (pog-service 는 detail.html 이 아니라 detail2.html 이다)에서는 그 title 이
+                # 칸 이름이다. 그렇게 「jewerly」라는 이름에 값도 옵션도 표도 없는 상품
+                # 137벌이 창고에 들어왔다(2026-09-12). 값도 없고 이름도 칸 이름이면 안 담는다 —
+                # 못 읽은 페이지를 유령 상품으로 남기느니 없는 게 낫다.
+                if not why and not d.get("size_table") and not d.get("options"):
+                    cats = {shop.categories.get(c, "").strip().casefold()
+                            for c in (shop.membership.get(no) or set())}
+                    cats |= {(c := cate_no_of(url)) and shop.categories.get(c, "").strip().casefold()}
+                    if d["name"].strip().casefold() in (cats - {"", None}):
+                        why = "칸 이름이 상품 이름으로 왔다(페이지 못 읽음)"
                 if why:
                     failed += 1
                     shop.failures.append({"product_no": no, "url": url, "reason": why, "bytes": len(r.text)})
