@@ -8,6 +8,10 @@ on:
       url:
         description: "상품 페이지 주소"
         required: true
+      ua:
+        description: "User-Agent — 비우면 수집기와 같은 것. 「browser」라고 적으면 흔한 브라우저 것"
+        required: false
+        default: ""
 
 jobs:
   probe:
@@ -24,8 +28,13 @@ jobs:
           import os, re, json, requests
           from bs4 import BeautifulSoup
           url = os.environ["URL"]
-          r = requests.get(url, timeout=30, headers={
-              "User-Agent": "LAYER-bot (data quality check; contact via shop inquiry)"})
+          BOT = "Mozilla/5.0 (compatible; LayerCatalog/0.2; +https://github.com/20232039-cell/layer-brand-agent)"
+          BROWSER = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                     "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
+          ua = os.environ.get("UA", "").strip()
+          ua = BROWSER if ua.lower() == "browser" else (ua or BOT)
+          print("보낸 User-Agent:", ua[:70])
+          r = requests.get(url, timeout=30, headers={"User-Agent": ua, "Accept-Language": "ko,en;q=0.8"})
           h = r.text
           print("status", r.status_code, "bytes", len(h), "ctype", r.headers.get("content-type", "")[:40])
           if "<urlset" in h[:2000] or "<sitemapindex" in h[:2000] or url.endswith(".xml"):
@@ -82,3 +91,4 @@ jobs:
           PY
         env:
           URL: ${{ inputs.url }}
+          UA: ${{ inputs.ua }}
