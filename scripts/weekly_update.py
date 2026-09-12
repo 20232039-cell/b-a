@@ -49,6 +49,7 @@ GUARD_RATIO = 0.5          # 목록 수 < 아는 판매중 × 이 비율 → 상
 DELIST_AFTER_WEEKS = 2     # 연속 이만큼 목록에 없고 404 면 delisted
 STALE_SOLDOUT_DAYS = 180   # 이보다 오래 품절이면 재입고 확인은 매달 첫 주만
 DEAD_SOLDOUT_DAYS = 365    # 1년 넘은 품절은 더 안 본다 — 목록에 다시 나타날 때만(시그니처 재발매가 같은 상품 번호를 쓰는 경우)
+STALE_PRICE_DAYS = 7       # 판매중인데 값을 이보다 오래 안 봤으면 상세를 다시 읽는다
 
 
 def today() -> str:
@@ -254,10 +255,38 @@ def update_brand(http: cc.PoliteSession, shop: cc.Shop, log, first_week_of_month
             elif status == "http":
                 rep["failed"] += 1
 
+        # 5. 값 갱신 — 계속 팔리고 있는 상품.
+        # 여기까지 주간 갱신은 신상·품절·재입고·삭제만 봤다. 목록에 그대로 있는 상품은
+        # last_seen 만 찍고 상세를 다시 읽지 않아서, 값이 첫 수집 때 그대로 굳었다 —
+        # 2026-09-12 실측으로 40,880벌 가운데 21,272벌(52%)의 값이 열흘 묵어 있었다
+        # (사람 지적: 「할인가는 계속 바뀌는데 우리가 업데이트를 매일 하는 게 아니잖아」).
+        # 값을 본 지 오래된 것부터 다시 읽는다. 오래된 순이라 시간이 모자라도 가장 묵은 쪽이 먼저 산다.
+        def _price_age(no: int) -> int:
+            seen = (rows[no].get("price_seen_at") or rows[no].get("crawled_at") or "")[:10]
+            try:
+                return (date.fromisoformat(now) - date.fromisoformat(seen)).days
+            except ValueError:
+                return 9999
+        stale = sorted((no for no in active & set(listed) if _price_age(no) >= STALE_PRICE_DAYS),
+                       key=_price_age, reverse=True)
+        rep["price_stale"] = len(stale)
+        for no in stale:
+            prev = rows[no]
+            url = prev.get("source_url", "")
+            url = url if cc.product_no_of(url) else f"{shop.base}/product/detail.html?product_no={no}"
+            status, d = check(no, url)
+            rep["checked"] += 1
+            if status == "ok":
+                apply_detail(no, d, prev)
+            elif status == "404":
+                prev["missing_weeks"] = int(prev.get("missing_weeks", 0)) + 1
+            elif status == "http":
+                rep["failed"] += 1
+
     save_rows(path, rows)
     rep["total"] = len(rows)
     rep["sec"] = round(time.time() - t0)
-    log(f"[{shop.slug}] 목록 {rep['listed']} · 신상 {rep['new']} · 품절 {rep['soldout']} · 재입고 {rep['restock']} · 삭제 {rep['delisted']} · 확인 {rep['checked']} {rep['reasons']} · {rep['sec']}s{' · ' + rep['guard'] if rep['guard'] else ''}")
+    log(f"[{shop.slug}] 목록 {rep['listed']} · 신상 {rep['new']} · 품절 {rep['soldout']} · 재입고 {rep['restock']} · 삭제 {rep['delisted']} · 값 갱신 {rep.get('price_stale', 0)} · 확인 {rep['checked']} {rep['reasons']} · {rep['sec']}s{' · ' + rep['guard'] if rep['guard'] else ''}")
     return rep
 
 
@@ -312,7 +341,7 @@ def main():
         for r in sorted(reports, key=lambda x: x["slug"]):
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
-    tot = {k: sum(int(r.get(k, 0) or 0) for r in reports) for k in ("listed", "new", "soldout", "restock", "delisted", "price_changed", "checked", "failed")}
+    tot = {k: sum(int(r.get(k, 0) or 0) for r in reports) for k in ("listed", "new", "soldout", "restock", "delisted", "price_changed", "price_stale", "checked", "failed")}
     guarded = [r["slug"] for r in reports if r.get("guard")]
     log(f"전부 끝 — 브랜드 {len(reports)} · 신상 {tot['new']} · 품절 {tot['soldout']} · 재입고 {tot['restock']} · 삭제 {tot['delisted']} · 가격 변동 {tot['price_changed']} · 상세 확인 {tot['checked']} · 요청 {http.requests_made} · {round(time.time() - started)}s")
     if guarded:

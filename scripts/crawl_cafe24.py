@@ -484,6 +484,12 @@ def carry_over(prev: dict, d: dict, when: str) -> None:
         d.pop("price_kept", None)
         d.pop("price_missing", None)
         d["price_seen_at"] = when
+    # 정가는 매장이 할인을 걷으면 페이지에서 사라진다 — 한 번 본 정가는 이어 쓴다.
+    if not d.get("price_listed") and prev.get("price_listed"):
+        d["price_listed"] = prev["price_listed"]
+    # 지금 파는 값이 정가 이상이면 할인이 끝난 것이다 — 옛 정가를 뗀다.
+    if d.get("price") and d.get("price_listed") and d["price"] >= d["price_listed"]:
+        d.pop("price_listed", None)
     plog = list(prev.get("price_log") or [])
     if d.get("price") and (not plog or plog[-1][1] != d["price"]):
         plog.append([when[:10], d["price"]])
@@ -1893,6 +1899,13 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
     # 「price is None」 조건에 걸려 아예 안 돌고, 마지막에 0 이 거짓이라 상품이 통째로 버려진다.
     # blr 은 JS 변수를 0 으로 두고 사이즈별 offers 배열에만 가격을 적는다 — 66벌이 그렇게
     # 날아갔다(2026-09-06). 「Faded Layer Hoodie Zip-Up Jacket Ivory」 187,000원 · InStock.
+    def _won(sel):
+        el = soup.select_one(sel)
+        if not el:
+            return None
+        d = re.sub(r"[^\d]", "", el.get_text())
+        return int(d) if d and int(d) > 0 else None
+
     price = None
     p = _js_str(html_text, "product_price")
     if p and p.strip().isdigit() and int(p) > 0:
@@ -1900,17 +1913,14 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
     if price is None and str(ld_offer.get("price", "")).replace(".", "").isdigit():
         price = int(float(ld_offer["price"]))
     if price is None:
-        # 할인 중인 매장은 판매가 자리(#span_product_price_text)에 할인가를 넣고 정가를 따로 둔다.
-        # 둘 다 있고 정가 쪽이 더 크면 그쪽이 정가다 — 우리는 수시로 바뀌는 할인가를 쓰지 않는다
-        # (2026-09-12: 정가 69,000 · 할인가 62,100 인 매장에서 확인).
-        def _won(sel):
-            el = soup.select_one(sel)
-            if not el:
-                return None
-            d = re.sub(r"[^\d]", "", el.get_text())
-            return int(d) if d and int(d) > 0 else None
-        sale, listed = _won("#span_product_price_text"), _won("#span_product_price_custom")
-        price = listed if (listed and sale and listed > sale) else (sale or listed)
+        price = _won("#span_product_price_text") or _won("#span_product_price_custom")
+    # 「값」은 어느 매장에서든 한 가지 뜻이어야 한다 — 지금 파는 값이다. 어제는 이 자리에서
+    # 정가를 먼저 골랐는데, 그러면 JSON-LD 에 할인가를 적어 두는 매장(거의 전부)과 아닌 매장의
+    # 뜻이 갈린다. 정가는 버리지 않고 옆칸에 따로 담아 앱이 고르게 한다.
+    # 할인가는 수시로 바뀌는데 우리는 매일 받지 못한다 — 2026-09-12 실측으로 40,880벌 가운데
+    # 21,272벌(52%)의 값이 열흘 묵어 있었다(사람 지적: 「우리가 업데이트를 매일 하는 게 아니잖아」).
+    # 정가 자리(#span_product_price_custom)가 파는 값보다 클 때만 정가로 본다.
+    listed = _won("#span_product_price_custom")
 
     soldout = False
     m = re.search(r"(?:is_)?soldout_icon\s*=\s*'(\w)'", html_text)
@@ -2158,6 +2168,7 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
         "product_no": no,
         "name": name,
         "price": price,
+        **({"price_listed": listed} if listed and price and listed > price else {}),
         "soldout": soldout,
         "image_url": image,
         "gallery": gallery[:12],
