@@ -1381,7 +1381,9 @@ def _combo_rank(u: str):
     return a if a < b else None
 # 「00S」·「00M」처럼 앞에 0 을 붙여 파는 매장이 있다(한 매장 352벌이 옵션이 표와 칸 수까지 맞는데도
 # 이름을 못 받고 있었다, 2026-09-12). 표를 읽는 쪽은 이미 00S 를 사이즈로 다룬다 — 옵션 쪽만 막혀 있었다.
-_SIZE_OPT = re.compile(r"^(?:0*(?:XXS|XS|S|M|L|XL|XXL|2XL|3XL)|FREE|F|ONE ?SIZE|\d{1,2}|0\d)$", re.I)
+_SIZE_OPT = re.compile(r"^(?:0*(?:XXS|XS|S|M|L|XL|XXL|2XL|3XL)|FREE|F|ONE ?SIZE|\d{1,2}|0\d"
+                       r"|X{0,2}[\-\s]?SMALL|MEDIUM|X{0,2}[\-\s]?LARGE"
+                       r"|엑스?스몰|스몰|미디움|미디엄|라지|라아지|엑스라지)$", re.I)
 _ZERO_ALPHA = re.compile(r"^0+(XXS|XS|S|M|L|XL|XXL|2XL|3XL)$", re.I)
 _SIZE_RANK = {"XXS": 0, "XS": 1, "S": 2, "M": 3, "L": 4, "XL": 5, "XXL": 6, "2XL": 6, "3XL": 7}
 # 매장은 옵션 이름 뒤에 재고 사정을 덧붙인다(hatching-room 「1(XS) Only 1 Left」·「4(L) Low Stock」).
@@ -1426,8 +1428,24 @@ def _size_option_names(opts: list[str]) -> list[str]:
     return names
 
 
+# 사이즈를 글자 그대로 풀어 적는 매장이 있다(「SMALL | MEDIUM」·「스몰 | 라지」).
+# 판매중 1,986벌이 이렇게 파는데 한 글자짜리만 사이즈로 읽고 있어, 표가 멀쩡히 있는
+# 46벌이 이름을 못 받았다(2026-09-13). 앱에서는 고를 수 없는 표가 된다.
+_SPELLED = {
+    "XXSMALL": "XXS", "XXSMALL.": "XXS",
+    "XSMALL": "XS", "X-SMALL": "XS", "엑스스몰": "XS",
+    "SMALL": "S", "스몰": "S",
+    "MEDIUM": "M", "미디움": "M", "미디엄": "M",
+    "LARGE": "L", "라지": "L", "라아지": "L",
+    "XLARGE": "XL", "X-LARGE": "XL", "엑스라지": "XL",
+    "XXLARGE": "XXL", "XX-LARGE": "XXL",
+}
+
+
 def _opt_rank(o: str):
     u = o.upper().replace(" ", "")
+    if u in _SPELLED:
+        u = _SPELLED[u]
     if u in _SIZE_RANK:
         return _SIZE_RANK[u]
     z = _ZERO_ALPHA.match(u)
