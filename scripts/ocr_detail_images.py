@@ -337,6 +337,146 @@ def _is_value_row(toks) -> bool:
     return num >= 2 and num >= len(toks) - 1
 
 
+# 머리줄을 이어 붙인 글자에서 찾아 쓸 치수 낱말. 사이저의 어휘(size_labels.json)를
+# 그대로 쓴다 — 여기서 목록을 새로 적으면 둘이 갈라진다. 못 읽어 오면 최소한만 쓴다.
+def _label_words() -> list[str]:
+    out: set[str] = set()
+    try:
+        import json as _j
+        from pathlib import Path as _P
+        d = _j.loads((_P(__file__).resolve().parents[1] / "data" / "size_labels.json")
+                     .read_text(encoding="utf-8"))
+        for k, v in d.items():
+            if k.startswith("_") or not isinstance(v, list):
+                continue                      # _comment·_ranges_cm 같은 메모 칸은 라벨이 아니다
+            out.add(str(k))
+            out.update(str(a) for a in v)
+    except Exception:
+        pass
+    out |= {"총장", "총길이", "기장", "어깨", "어깨너비", "어깨단면", "가슴", "가슴단면",
+            "허리", "허리단면", "밑단", "밑단단면", "소매", "소매길이", "화장", "암홀",
+            "엉덩이", "엉덩이단면", "허벅지", "허벅지단면", "밑위", "팔기장", "팔통"}
+    # 머리줄을 공백 없이 이어 붙인 글자에서 찾을 것이므로, 공백·기호 없는 한글 낱말만 쓴다.
+    # 긴 것부터 봐야 「가슴단면」이 「가슴」에 먼저 먹히지 않는다.
+    words = {w for w in (x.strip() for x in out)
+             if 2 <= len(w) <= 8 and re.fullmatch(r"[가-힣]+", w)}
+    return sorted(words, key=len, reverse=True)
+
+
+_LABEL_WORDS = _label_words()
+
+
+def grid_from_value_rows(rows) -> str:
+    """숫자 줄로 열을 먼저 세우고, 그 위 글자들을 열에 나눠 담아 머리줄을 짓는다.
+
+    예전 방식은 「값 줄 바로 위 한 줄이 머리줄이고 토큰 수가 값 줄과 똑같아야 한다」였다.
+    한글 표에서는 그 가정이 자주 깨진다 — 머리줄이 두세 줄로 나뉘고(라벨 아래 「(Reglan)」),
+    tesseract 가 한글을 글자 단위로 끊어 토큰 수가 안 맞는다. 그러면 표 전체를 버렸다.
+
+    실제로 걸린 표(사람이 앱에서 「프리사이즈로 뜬다」고 짚어 찾음, 2026-09-13):
+        (cm)      총장    어깨너비      가슴단면   소매길이
+                         (Reglan)             (Reglan)
+        48 SIZE   66     78.7        55.9     78.7
+        50 SIZE   67.9   81.3        58.4     81.3
+    평문으로 읽으면 머리줄 순서가 엉키는데(「어깨너비 소매길이 / 초장 ... / [슴단면」),
+    숫자 줄의 x 좌표는 256·424·604·784 로 또렷하다. 그래서 숫자가 기준이 되어야 한다.
+
+    머리줄을 못 읽어도 값은 살린다 — 라벨 자리는 「-」로 비워 둔다. 뒤 파서가 라벨 없는
+    칸을 버리므로, 틀린 라벨이 붙는 일은 없다(없는 치수보다 틀린 치수가 나쁘다).
+    """
+    vr = [i for i, r in enumerate(rows) if _is_value_row(r)]
+    if not vr:
+        return ""
+    first = vr[0]
+    # 붙어 있는 값 줄만 한 표로 본다 — 사이에 두 줄 넘게 비면 다른 표다
+    body, prev = [], None
+    for i in vr:
+        if prev is not None and i - prev > 3:
+            break
+        body.append(rows[i])
+        prev = i
+    if not body:
+        return ""
+
+    def centers(toks):
+        return [(t[0] + t[2] / 2.0) for t in toks]
+
+    base = max(body, key=len)
+    xs = centers(base)
+    if len(xs) < 3:
+        return ""
+    gaps = sorted(b - a for a, b in zip(xs, xs[1:]))
+    if not gaps:
+        return ""
+    med = gaps[len(gaps) // 2]
+    # 사이즈 이름 칸은 「48」「SIZE」처럼 두 토막으로 읽히기도 한다. 가까운 것끼리 묶어
+    # 한 열로 본다 — 안 묶으면 최소 간격이 그 둘 사이로 잡혀 허용 오차가 지나치게 좁아지고,
+    # 머리줄 글자가 열 밖으로 밀려 잘린다(「어깨너비」가 「깨너비」가 됐다).
+    groups: list[list[float]] = [[xs[0]]]
+    for x in xs[1:]:
+        if x - groups[-1][-1] < med * 0.35:
+            groups[-1].append(x)
+        else:
+            groups.append([x])
+    anchors = [sum(g) / len(g) for g in groups]
+    if len(anchors) < 3:
+        return ""
+    tol = max(20.0, med * 0.5)
+
+    def assign(toks, skip_num=False):
+        cols: list[list[tuple[int, int, str]]] = [[] for _ in anchors]
+        for (l, t, w, h, txt) in toks:
+            if skip_num and CELL_NUM.fullmatch(txt):
+                continue
+            cx = l + w / 2.0
+            k = min(range(len(anchors)), key=lambda j: abs(anchors[j] - cx))
+            if abs(anchors[k] - cx) <= tol:
+                cols[k].append((t, l, txt))
+        return cols
+
+    # 글자마다 top 이 1~2픽셀씩 다르다. 그대로 (top, left) 로 세우면 같은 줄 글자가
+    # 뒤섞인다 — 「소매길이」가 「매소길이」로, 「가슴다며」가 「다며슴가」로 나왔다.
+    # 줄 높이만큼의 띠로 먼저 묶고, 띠 안에서 왼쪽부터 읽는다.
+    _hs = sorted(t[3] for r in rows[:first] for t in r) or [20]
+    band_h = max(8, _hs[len(_hs) // 2])
+
+    def _read_order(x):
+        return (x[0] // band_h, x[1])
+
+    head = assign([tok for r in rows[:first] for tok in r], skip_num=True)
+    labs = []
+    for c in head:
+        c.sort(key=_read_order)
+        raw = re.sub(r"[\s()\[\]]", "", "".join(x[2] for x in c))
+        # 이어 붙인 글자가 깨져 있을 수 있다(「가슴다며즘단면」). 아는 낱말이 통째로 들어
+        # 있을 때만 그 낱말을 쓴다 — 편집거리로 짐작하지 않는다. 못 고르면 「-」로 비운다.
+        hit = ""
+        for w in _LABEL_WORDS:
+            if w in raw and len(w) > len(hit):
+                hit = w
+        labs.append(hit or "-")
+    if sum(1 for l in labs if l != "-") < 2:
+        return ""
+    # 라벨을 못 읽은 칸은 **값까지 함께** 버린다. 라벨 자리만 「-」로 비워 두면 뒤 파서가
+    # 그 칸만 건너뛰고 값은 그대로 세어, 남은 값이 한 칸씩 밀린다 — 실제로 가슴단면 값
+    # 55.9 가 소매길이로 붙었다. 없는 치수보다 틀린 치수가 나쁘다.
+    # 첫 칸(사이즈 이름)은 라벨이 없어도 지킨다.
+    keep = [0] + [i for i, l in enumerate(labs) if i > 0 and l != "-"]
+    if len(keep) < 3:
+        return ""
+    out = [" ".join(labs[i] if i > 0 else "-" for i in keep)]
+    for r in body:
+        cols = assign(r)
+        line = []
+        for i in keep:
+            c = sorted(cols[i], key=_read_order)
+            # 한 칸 안의 토막은 **붙여서** 낸다 — 공백으로 이으면 뒤 파서가 「48 SIZE」를
+            # 두 칸으로 보고 머리줄과 칸 수가 어긋난다(값이 한 칸씩 밀린다).
+            line.append("".join(x[2] for x in c) or "-")
+        out.append(" ".join(line))
+    return "\n".join(out)
+
+
 def ocr_cell_grid(small, src=None, ratio: float = 1.0, max_tables: int = 3) -> str:
     """값 줄이 보이면 그 바로 위 줄을 낱말 하나씩 다시 읽어 「라벨 줄 + 값 줄」을 짜 준다."""
     rows = _tsv_rows(small)
@@ -382,6 +522,10 @@ def ocr_cell_grid(small, src=None, ratio: float = 1.0, max_tables: int = 3) -> s
             i += 1
         out.append("\n".join(block))
         used += 1
+    if not out:
+        # 엄격한 길(머리줄 한 줄 · 토큰 수 일치)이 못 짚으면 숫자 좌표로 열을 세워 본다.
+        # 한글 표는 머리줄이 두세 줄로 나뉘고 글자 단위로 끊겨 토큰 수가 자주 안 맞는다.
+        return grid_from_value_rows(rows)
     return "\n".join(out)
 
 
