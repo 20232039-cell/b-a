@@ -1021,7 +1021,14 @@ def main():
             if dt and dt[:200] != desc[:200]:
                 desc = desc + "\n" + dt   # JSON-LD 요약과 본문 글이 다르면 둘 다 읽는다(2026-09-03)
             sbody, scolor = spec_texts(d.get("spec"))
-            otext = denoise_ocr(o.get("ocr_text") or "")
+            # 글자 상한(12,000자)에 걸려 잘린 기록은 그림별 글을 따로 남긴다(ocr_detail_images).
+            # 태거가 그걸 안 보고 잘린 ocr_text 만 읽고 있었다 — 상세 그림은 대개
+            # 「착장 → 사이즈 표 → 소재·세탁」 차례라, 잘리는 자리가 바로 소재다.
+            # 지금은 잘린 기록이 137건뿐이지만(소재를 잃는 것 5벌), 빈 축을 채우는 판이
+            # 표를 찾아도 안 멈추게 바뀌어 글이 길어진다. 그 판을 돌리기 전에 막는다.
+            _raw = o.get("ocr_text") or ""
+            _per = "\n".join(t for t in ((i or {}).get("text") or "" for i in (o.get("images") or [])) if t)
+            otext = denoise_ocr(_per if len(_per) > len(_raw) else _raw)
             btext = brw.get(r["source_url"], "")
             if btext and btext[:200] != desc[:200]:
                 pass          # 브라우저 글은 따로 붙인다 — 원래 글과 겹치면 아래에서 무시된다
