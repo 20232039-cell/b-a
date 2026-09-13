@@ -561,6 +561,16 @@ def load_latest(path: Path) -> dict[int, dict]:
 GARMENTS = {"Tops", "Pants", "Outerwear", "Knitwear", "Shirts", "Denim", "Skirts", "Dresses", ""}
 
 
+def load_rows() -> list[dict]:
+    """products_full.csv 를 줄 그대로 — 매장 옵션(사이즈 선택지)을 보려고 읽는다."""
+    import csv
+    path = ROOT / "data" / "products_full.csv"
+    if not path.exists():
+        return []
+    with path.open(encoding="utf-8-sig") as f:
+        return list(csv.DictReader(f))
+
+
 def load_categories() -> dict[tuple[str, int], str]:
     import csv
     path = ROOT / "data" / "products_full.csv"
@@ -646,6 +656,39 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
                         bad_urls.add(u)
                         break
 
+    # select=thin-table: 표에서 읽어 낸 칸 수가 매장이 파는 사이즈 수보다 적은 옷.
+    # 「표가 한 칸뿐」이라 앱에서 프리사이즈처럼 뜨는데, 정작 매장 옵션에는 S·M·L 이 있다
+    # (2,426벌. 사람 지적 2026-09-13: 「실제로 사이즈표가 있는데도 프리사이즈로 뜬다」).
+    # 사이즈가 「있긴 있어서」 no-size·gaps 어느 갈래에도 안 걸렸다. 그 가운데 2,313벌은
+    # 상세 그림이 있으니, 사이즈별 실측이 그림 안에 적혀 있을 자리다.
+    # 옵션에서 색을 걸러 내고 사이즈로 읽히는 것만 센다 — 옵션은 색과 사이즈가 섞여 온다
+    # (「BURGUNDY | M」·「DARK BROWN | 01_S | 02_M」).
+    thin_urls: set[str] = set()
+    if select == "thin-table":
+        # 매장 옵션에서 사이즈 이름만 끊어 내는 일은 사이저에 정본이 있다
+        # (_size_option_names — 색 칸이 섞여 오는 것, 「[품절]」 표시, 「1(XS)」 꼴까지 본다).
+        # 여기서 정규식을 다시 짜면 둘이 갈라진다.
+        sp5 = CRAWL_DIR.parent / "product_sizes.json"
+        try:
+            from size_from_ocr import _size_option_names
+        except Exception:
+            _size_option_names = None
+        _sizes5 = json.loads(sp5.read_text(encoding="utf-8")) if sp5.exists() else {}
+        if _size_option_names is not None:
+            for _r in load_rows():
+                if _r.get("status") != "ON_SALE":
+                    continue
+                _e = _sizes5.get(_r.get("source_url") or "")
+                if not _e:
+                    continue
+                _cols = max((len(v) for v in (_e.get("sizes") or {}).values()
+                             if isinstance(v, list)), default=0)
+                if _cols < 1:
+                    continue
+                _opt = _size_option_names([o.strip() for o in (_r.get("options") or "").split("|") if o.strip()])
+                if len(_opt) > _cols:
+                    thin_urls.add(_r["source_url"])
+
     gap_urls: set[str] = set()
     if select == "gaps":
         root = CRAWL_DIR.parent
@@ -682,7 +725,7 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
     # 읽어 넣은 것이니 전부 done 안에 있다. 그래서 --redo 없이 돌리면 대상이 58 → 5 로
     # 주저앉는다(2026-09-07 실측: noirer 20 · easy-no-easy 9 · frizmworks 7 이 전부 0 이 됐다).
     # 이 갈래는 다시 읽기가 목적이므로 redo 를 켜고 시작한다.
-    if select in ("bad-size", "capped"):
+    if select in ("bad-size", "capped", "thin-table"):
         redo = True
 
     # --redo: 예전에 「앞 3~5장만」 읽고 끝난 상품은 done 에 들어 있어 12장짜리 재시도에서 아예 빠진다.
@@ -724,7 +767,7 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
                 continue
             # 사이즈 없는 옷만 고르는 판(no-size)에서는 장 수를 따지지 않는다 — 읽는 방법이
             # 바뀌면(2026-09-05 머리줄 낱말 단위 판독) 같은 그림에서 새 글이 나온다.
-            if select in ("no-size", "ocr", "gaps", "bad-size") or (select == "all" and d.get("source_url") in ocr_sized):
+            if select in ("no-size", "ocr", "gaps", "bad-size", "thin-table") or (select == "all" and d.get("source_url") in ocr_sized):
                 done.discard(no)
                 continue
             avail = len([u for u in images_of(d)
@@ -766,11 +809,14 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
         elif select == "capped":
             if no not in capped_nos:
                 continue
+        elif select == "thin-table":
+            if d.get("source_url") not in thin_urls:
+                continue
         elif only_short and len(d.get("description", "")) >= SHORT_TEXT:
             continue
         todo.append(d)
     todo = todo[k::n]
-    want_size = select in ("no-size", "ocr", "gaps", "bad-size", "capped")
+    want_size = select in ("no-size", "ocr", "gaps", "bad-size", "capped", "thin-table")
     log(f"[{slug}] OCR 대상 {len(todo)} (이미 {len(done)}, 조각 {k + 1}/{n})")
     n_img = n_txt = 0
     counters = {"img": 0, "txt": 0, "done": 0, "early": 0}
@@ -850,7 +896,7 @@ def main():
     ap.add_argument("--cdn-delay", type=float, default=0.25, help="공용 이미지 CDN(cafe24img) 에만 쓰는 대기")
     ap.add_argument("--shard", default="1/1", help="k/n — 대상을 n등분해 k번째(1부터)만 (Actions 샤딩)")
     ap.add_argument("--out-dir", help="조각 파일을 쓸 폴더 (crawl/ocr/<slug>.jsonl 대신 <slug>.<k>.jsonl)")
-    ap.add_argument("--select", default="short", choices=["short", "all", "no-size", "ocr", "gaps", "bad-size", "capped"], help="short=설명 짧은 것(기본) · all=전부 · no-size=사이즈 표 없는 옷 · ocr=사이즈를 그림에서 읽은 옷 다시 · gaps=사이즈·소재·색·디테일 중 하나라도 빈 옷 · bad-size=사이즈가 커지는데 값이 작아지는 표만 다시 · capped=옛 6,000자 상한에 잘린 기록만 다시")
+    ap.add_argument("--select", default="short", choices=["short", "all", "no-size", "ocr", "gaps", "bad-size", "capped", "thin-table"], help="short=설명 짧은 것(기본) · all=전부 · no-size=사이즈 표 없는 옷 · ocr=사이즈를 그림에서 읽은 옷 다시 · gaps=사이즈·소재·색·디테일 중 하나라도 빈 옷 · bad-size=사이즈가 커지는데 값이 작아지는 표만 다시 · capped=옛 6,000자 상한에 잘린 기록만 다시 · thin-table=표 칸 수가 매장 사이즈 수보다 적은 옷")
     args = ap.parse_args()
     OCR_DIR.mkdir(parents=True, exist_ok=True)
     k, n = (int(x) for x in args.shard.split("/"))
