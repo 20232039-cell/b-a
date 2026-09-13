@@ -34,7 +34,7 @@ on:
         required: false
         default: ""
       select:
-        description: "short(설명 짧은 것) | no-size(사이즈 표 없는 옷) | gaps(사이즈·소재·색·디테일 중 하나라도 빈 옷) | ocr(그림에서 읽은 옷 다시) | bad-size(사이즈가 커지는데 값이 작아지는 표만) | all"
+        description: "short(설명 짧은 것) | no-size(사이즈 표 없는 옷) | gaps(사이즈·소재·색·디테일 중 하나라도 빈 옷) | ocr(그림에서 읽은 옷 다시) | bad-size(사이즈가 커지는데 값이 작아지는 표만) | capped(옛 6,000자 상한에 잘린 기록 다시) | thin-table(표 칸이 사이즈 수보다 적은 옷) | all"
         required: false
         default: "short"
       redo:
@@ -94,7 +94,30 @@ jobs:
           slugs = os.environ["LIST"].split() or [os.path.basename(p)[:-6] for p in glob.glob("data/crawl/*.jsonl")]
           # 잡 하나가 맡을 그림 수 목표. 머리줄을 낱말 단위로 다시 읽는 판은 장당 1.5초가
           # 5초로 늘어서(2026-09-05), 표를 노리는 판(no-size·ocr)은 조각을 잘게 낸다.
-          PER = 250 if sel in ("no-size", "ocr", "gaps", "thin-table") else 700
+          PER = 250 if sel in ("no-size", "ocr", "gaps", "thin-table", "capped") else 700
+          # select=capped: 옛 6,000자 상한에 잘린 기록만 다시 읽는다. 대상은 창고가 아니라
+          # OCR 기록 쪽에 있으므로(글 길이가 정확히 6,000자이고 그림별 글이 안 남았다),
+          # 브랜드별로 미리 세어 둔다 — 안 그러면 plan 이 상세 그림 있는 상품을 전부 세어
+          # 대상 한 건짜리 브랜드에도 조각 열두 개가 생긴다. 잣대는 판독기와 같아야 한다.
+          capped = {}
+          if sel == "capped":
+              for _b in slugs:
+                  _p = f"data/crawl/ocr/{_b}.jsonl"
+                  if not os.path.exists(_p):
+                      continue
+                  _s = set()
+                  for _l in open(_p, encoding="utf-8"):
+                      if not _l.strip():
+                          continue
+                      try:
+                          _o = json.loads(_l)
+                      except json.JSONDecodeError:
+                          continue
+                      _t = _o.get("ocr_text") or ""
+                      if 5995 <= len(_t) <= 6005 and not any(_i.get("text") for _i in (_o.get("images") or [])):
+                          _s.add(_o.get("product_no"))
+                  if _s:
+                      capped[_b] = _s
           thin = set()
           if sel == "thin-table":
               # 잡을 만들 때부터 대상이 있는 브랜드만 넣는다. 이 갈래를 모르면 판독기가
@@ -150,6 +173,8 @@ jobs:
                   if sel == "gaps" and d.get("source_url") not in gap:
                       continue
                   if sel == "thin-table" and d.get("source_url") not in thin:
+                      continue
+                  if sel == "capped" and d.get("product_no") not in capped.get(b, ()):
                       continue
                   cand = [u for u in d["detail_images"] if not SKIPPED(u.split("?")[0].rsplit("/", 1)[-1])]
                   imgs += min(maxi, len(cand))
