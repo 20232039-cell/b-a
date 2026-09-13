@@ -1001,7 +1001,7 @@ def drop_strays(brand: str, c: str, vs: list[float], med: dict) -> list[float]:
     return keep if any(isinstance(v, (int, float)) for v in keep) else vs
 
 
-def column_count(sizes: dict[str, list]) -> int:
+def column_count(sizes: dict[str, list], names: int = 0) -> int:
     """라벨마다 칸 수가 다를 때, 표를 몇 칸으로 볼지 고른다.
 
     예전에는 가장 짧은 라벨에 맞췄다. 그랬더니 「모델 착용 치수」한 줄이 표 전체를 한 칸으로
@@ -1030,7 +1030,11 @@ def column_count(sizes: dict[str, list]) -> int:
         if keep < len(sizes) - keep:
             continue
         score = n * keep
-        if score > best_score:      # 비기면 먼저 본 작은 n 이 남는다
+        # 비기면 먼저 본 작은 n 이 남는다 — 다만 매장이 스스로 적은 사이즈 이름 수와 맞는
+        # 칸이 있으면 그쪽이다. 「shoulder 4 · sleeve 4 · sleevewidth 3 · length 4」에서
+        # 점수가 12 대 12 로 비겨 세 칸이 남고, XS·S·M·L 네 사이즈 옷의 L 이 통째로 사라졌다
+        # (pushbutton 4벌, 2026-09-13). 매장 표의 한 칸이 짧다고 나머지 칸을 버릴 이유가 없다.
+        if score > best_score or (score == best_score and n == names):
             best, best_score = n, score
     return best
 
@@ -1118,7 +1122,7 @@ def normalize_html(st: dict, brand: str = "", girth_keys: set | None = None,
         c = canon_label(k)
         if c and _n(k) > len(_by_canon.get(c, [])):
             _by_canon[c] = st[k]
-    _want = column_count(_by_canon) if _by_canon else 1
+    _want = column_count(_by_canon, len(st.get("_names") or [])) if _by_canon else 1
     order = sorted(st, key=lambda k: (_n(k) != _want, -_n(k), _spec(k), list(st).index(k)))
     out: dict[str, list[float]] = {}
     for k in order:
@@ -2164,7 +2168,7 @@ def main():
                 continue
             # 사이즈 개수가 라벨마다 다르면(모델 치수 한 줄·OCR 누락) 칸 수를 골라 맞춘다.
             # 짧은 라벨은 뺀다 — 앞칸만 남겨 두면 M 의 치수가 그 옷의 유일한 치수로 적힌다.
-            n = column_count(sizes)
+            n = column_count(sizes, len(names or []))
             # 길이를 맞추고 나서 다시 본다 — 자르고 나면 값이 하나도 안 남는 라벨이 생긴다
             # (noirer 「가슴: [null]」 — 앱 상세에 빈 줄이 선다).
             sizes = {c: v[:n] for c, v in sizes.items() if len(v) >= n}
