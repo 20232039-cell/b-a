@@ -33,6 +33,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import traceback
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -872,6 +873,18 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
     if select in ("bad-size", "capped", "thin-table"):
         redo = True
 
+    # 매장 공용 안내 그림은 읽어도 소용없다 — 결제 아이콘·저작권 안내·교환반품 규정이
+    # 상품마다 붙어 상세 그림의 45%(101,405장 중 46,032장)를 차지한다. 그것들이 「앞
+    # 12장」 예산을 먹어 정작 사이즈 표가 안 읽혔다(2026-09-05: kirsh 에서 글자가 가장
+    # 많은 그림이 「NOTICE 배송안내」였다). 한 브랜드 안에서 열 상품 넘게, 그리고 전체의
+    # 20% 넘게 쓰는 그림은 상품 그림이 아니다 — 색만 다른 형제도 그렇게 많지 않다.
+    use: collections.Counter = collections.Counter()
+    for d in latest.values():
+        for u in set(images_of(d)):
+            use[u] += 1
+    floor = max(10, len(latest) * 0.2)
+    shared = {u for u, c in use.items() if c >= floor}
+
     # --redo: 예전에 「앞 3~5장만」 읽고 끝난 상품은 done 에 들어 있어 12장짜리 재시도에서 아예 빠진다.
     # 사이즈가 아직 없고 읽은 그림이 읽을 수 있는 그림보다 적으면 done 에서 빼 다시 읽는다
     # (2026-09-04: 사이즈 없는 옷 875벌 중 617벌이 이 경우였다 — far-from-what 은 11장 중 2장만 읽었다).
@@ -918,18 +931,6 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
                          if u not in shared and not skip_image(u)])
             if read_n.get(no, 0) < min(max_images, avail):
                 done.discard(no)
-
-    # 매장 공용 안내 그림은 읽어도 소용없다 — 결제 아이콘·저작권 안내·교환반품 규정이
-    # 상품마다 붙어 상세 그림의 45%(101,405장 중 46,032장)를 차지한다. 그것들이 「앞
-    # 12장」 예산을 먹어 정작 사이즈 표가 안 읽혔다(2026-09-05: kirsh 에서 글자가 가장
-    # 많은 그림이 「NOTICE 배송안내」였다). 한 브랜드 안에서 열 상품 넘게, 그리고 전체의
-    # 20% 넘게 쓰는 그림은 상품 그림이 아니다 — 색만 다른 형제도 그렇게 많지 않다.
-    use: collections.Counter = collections.Counter()
-    for d in latest.values():
-        for u in set(images_of(d)):
-            use[u] += 1
-    floor = max(10, len(latest) * 0.2)
-    shared = {u for u, c in use.items() if c >= floor}
 
     todo = []
     for no, d in sorted(latest.items(), key=lambda kv: int(kv[0])):
@@ -1064,14 +1065,23 @@ def main():
         inner = args.procs if len(slugs) == 1 else 1
         outer = 1 if len(slugs) == 1 else args.procs
         futs = [ex.submit(process_brand, s, not args.all, args.max_images, args.delay, log, shard, out_dir, select, inner, args.cdn_delay, args.redo) for s in slugs]
+        failed = 0
         for fut in as_completed(futs):
             try:
                 results.append(fut.result())
             except Exception as e:
+                failed += 1
                 log(f"예외: {e!r}")
+                traceback.print_exception(e)
     tot_p = sum(r["products"] for r in results)
     tot_t = sum(r["with_text"] for r in results)
     log(f"전부 끝 — 상품 {tot_p} · 글 나온 상품 {tot_t} · {round(time.time() - started)}s")
+    # 브랜드가 통째로 예외로 죽었는데 잡이 초록으로 끝나면, 판이 아무것도 안 하고
+    # 성공했다고 보고한다. 실제로 두 번 겪었다 — 2026-09-13 의 capped 판은 잡 30개가
+    # 전부 「성공」했는데 한 벌도 안 읽었다(shared 를 만들기 전에 읽는 NameError 였다).
+    # 자국이 남는 것은 로그 한 줄뿐이라 아무도 안 본다. 죽으면 잡도 빨갛게 죽는다.
+    if failed:
+        raise SystemExit(f"브랜드 {failed}곳이 예외로 죽었다 — 위 자취를 볼 것")
 
 
 if __name__ == "__main__":
