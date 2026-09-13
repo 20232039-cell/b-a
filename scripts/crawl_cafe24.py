@@ -2468,6 +2468,38 @@ def registrable(host: str) -> str:
     return ".".join(p[-2:]) if len(p) >= 2 else host
 
 
+def shop_host(url_or_host: str) -> str:
+    """매장을 가리키는 주소 한 벌 — www·en·m 같은 앞머리만 떼고 나머지는 그대로 둔다.
+
+    registrable() 은 뒤 두 마디를 자르는데, 한국 매장은 거의 다 .co.kr 이라 그것만으로는
+    전부 「co.kr」 한 덩어리가 된다(씨앗 207곳 중 대부분). 매장을 가릴 잣대로는 못 쓴다.
+    """
+    h = url_or_host
+    if "//" in h:
+        h = host_of(h)
+    h = h.lower().strip()
+    for pre in ("www.", "en.", "m.", "kr."):
+        if h.startswith(pre):
+            h = h[len(pre):]
+    return h
+
+
+def seed_host_owner() -> dict[str, str]:
+    """씨앗 매장 주소 → 그 주소의 임자 slug. 별명 매장을 가려낼 때 쓴다."""
+    out: dict[str, str] = {}
+    if not BRANDS_CSV.exists():
+        return out
+    with BRANDS_CSV.open(encoding="utf-8-sig") as f:
+        for r in csv.DictReader(f):
+            h = shop_host(r.get("official_url") or "")
+            if h and h not in out:
+                out[h] = r["slug"]
+    return out
+
+
+SEED_HOST_OWNER = seed_host_owner()
+
+
 def load_manual_items() -> dict[tuple[str, str], dict]:
     """data/manual_items.csv — 사람이 열어 보고 고친 분류.
 
@@ -2612,6 +2644,7 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
     dropped_kidpet = 0
     dropped_demo = 0
     dropped_gone = 0
+    dropped_alias = 0
     gal_of: dict[tuple, set] = {}
     tbl_of: dict[tuple, str] = {}   # 같은 옷인지 가릴 때 실측표를 견준다
     gone = load_dropped()
@@ -2642,6 +2675,20 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
         if stray:
             print(f"[{slug}] 남의 매장에서 온 행을 뺀다: "
                   + ", ".join(f"{h} {host_uses[h]}건" for h in sorted(stray)), file=sys.stderr)
+        # 씨앗의 official_url 이 다른 씨앗 매장의 별명인 경우 — 그 매장 상품을 통째로 한 번 더
+        # 받아 온다. 두 slug 이 같은 source_url 을 갖게 되니 주소를 열쇠로 쓰는 곳이 전부
+        # 부딪힌다(사이즈·태그, 그리고 공용 DB). 한 매장이 제 도메인의 canonical·sitemap 으로
+        # 다른 매장을 가리키면 크롤은 그대로 따라갈 수밖에 없다 — 여기서 걸러야 한다.
+        # 도메인 임자가 이긴다. 임자가 씨앗에 없으면 손대지 않는다(제 매장을 딴 도메인에
+        # 올린 곳이 있어서, 모르면 지우지 않는다).
+        main_host = shop_host(host_uses.most_common(1)[0][0]) if host_uses else ""
+        owner = SEED_HOST_OWNER.get(main_host)
+        if owner and owner != slug:
+            print(f"[{slug}] official_url 이 {main_host}(씨앗의 {owner})의 별명이다 — "
+                  f"{len(latest)}건이 그 매장과 같은 주소라 이번 판에서 통째로 뺀다. "
+                  f"brands_seed 의 official_url 을 확인하라.", file=sys.stderr)
+            dropped_alias += len(latest)
+            continue
         # 값이 통째로 1,000 아래면 그건 룩북이 아니라 외화 매장이다 — xlim 을 en.xlim.link
         # (cafe24 shop6, USD)로 훑은 탓에 921건 중 902건이 「90원」으로 들어와 아래 룩북 문턱에
         # 전멸했다(2026-09-04). 통화가 원이 아닌 매장은 걸러 낼 게 아니라 다시 받아야 한다.
@@ -2782,7 +2829,8 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
         w = csv.DictWriter(f, fieldnames=CSV_FIELDS)
         w.writeheader()
         w.writerows(rows)
-    return len(rows), {"per_brand": per_brand, "dropped_dupe_image": dropped_dupe, "dropped_no_image": dropped_noimg, "dropped_junk_name": dropped_junk, "dropped_kids_pet": dropped_kidpet, "dropped_demo_shop": dropped_demo, "dropped_gone": dropped_gone, "dropped_rerun": dropped_rerun}
+    return len(rows), {"per_brand": per_brand, "dropped_dupe_image": dropped_dupe, "dropped_no_image": dropped_noimg, "dropped_junk_name": dropped_junk, "dropped_kids_pet": dropped_kidpet, "dropped_demo_shop": dropped_demo, "dropped_gone": dropped_gone, "dropped_rerun": dropped_rerun,
+            "dropped_alias_shop": dropped_alias}
 
 
 _URL_STEM = re.compile(r"^https?://[^/]+(/.*?)/?(\d+)/?$")
