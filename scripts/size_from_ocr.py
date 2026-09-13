@@ -433,11 +433,16 @@ def parse_matrix(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] |
         low = ln.lower()
         if not re.search(r"size|사이즈|\(00\)|\(07\)|cm", low) and len(LABEL_RX.findall(ln)) < 2:
             continue
-        # 헤더에서 라벨을 순서대로
+        # 헤더에서 라벨을 순서대로. 같은 정식 라벨로 떨어지는 머리말이 둘이면 뒤엣것을
+        # 버리는데, 그게 무엇이었는지는 남겨 둔다 — 아래 「충돌」 검사가 쓴다.
         labels = []
+        _raw_of: dict[str, set] = {}
         for m in LABEL_RX.finditer(re.sub(r"[|ㅣ]", " ", ln)):
             c = ALIAS.get(re.sub(r"\s+", "", m.group(0)).lower())
-            if c and c not in labels:
+            if not c:
+                continue
+            _raw_of.setdefault(c, set()).add(re.sub(r"\s+", "", m.group(0)).lower())
+            if c not in labels:
                 labels.append(c)
         if len(labels) < 2:
             continue
@@ -458,15 +463,32 @@ def parse_matrix(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] |
             htok.pop(0)
         hslots = [canon_label(t) for t in htok]
         last = max((x for x, c in enumerate(hslots) if c), default=-1)
-        if any(c is None for c in hslots[:last]):
+        # 서로 다른 머리말이 같은 정식 라벨로 접히면서 값 줄의 숫자 칸이 고유 라벨보다
+        # 많으면, 열 하나가 조용히 사라진 것이다. 「가슴둘레 어깨 팔기장 총 기장 /
+        # M 51 43 62 81」에서 팔기장이 안에 든 「기장」에 걸려 총장이 되고 진짜 총 기장이
+        # 중복으로 버려져, 코트 총장이 62cm(실제 81)로 앱에 섰다(2026-09-13, 16벌).
+        # 별칭을 고쳐 그 16벌은 막았지만, 같은 구조는 어휘를 아무리 고쳐도 또 생긴다.
+        # 그래서 이 꼴이면 라벨을 세어 맞추지 말고 자리로 맞추는 갈래에도 물어본다 —
+        # 아래 판정은 사이즈를 더 많이 얻는 쪽을 쓰므로, 잘 읽던 표가 죽지는 않는다.
+        _clash = any(len(v) >= 2 for v in _raw_of.values()) and \
+            max((len(re.findall(NUM_CELL, re.sub(r"[|ㅣ:;=_]", " ", x)))
+                 for x in lines[i + 1:i + 6] if x.strip()), default=0) > len(labels)
+        _slots_ok = False
+        if _clash or any(c is None for c in hslots[:last]):
             # 자리로 맞추는 갈래에도 물어보고, 사이즈를 더 많이 얻는 쪽을 쓴다(비기면 자리 쪽).
             # 무조건 넘기면 mardi-mercredi 289벌·blayer 199벌처럼 잘 읽던 표가 죽고,
             # 안 물어보면 siyazu 처럼 값이 한 칸씩 밀린다.
             alt = parse_slots(lines[i:])
             if alt and len(alt[1]) >= 2:
+                _slots_ok = True
                 sc = (len(alt[0]), len(alt[1]))
                 if sc >= best_score:
                     best, best_score = alt, sc
+        if _clash and not _slots_ok:
+            # 자리로도 못 맞추는 충돌 — 이 머리줄은 쓰지 않는다. 라벨 수만큼만 값을
+            # 가져가면 사라진 열 뒤의 값이 앞 라벨에 붙는다(팔기장 62 가 총장이 된 그 꼴).
+            # 값을 못 얻더라도 남의 이름으로 적지는 않는다.
+            continue
         labels = pick_labels(ln, labels, lines[i + 1:i + 6])
         names, cols = [], {c: [] for c in labels}
         pending: list[tuple[int, list, list]] = []
