@@ -79,6 +79,27 @@ SET_NAME = r"(?:[A-Za-z가-힣][A-Za-z가-힣.\-]{0,11}(?:\s+[A-Za-z가-힣][A-Z
 OTHER_GARMENT = re.compile(r"(?:나시|이너|아우터|inner|outer|반팔|긴팔|상의|하의)\s*$", re.I)
 
 
+_BAD_LINES: Counter = Counter()
+
+
+def iter_jsonl(p):
+    """줄 하나가 깨졌다고 판 전체를 버리지 않는다 — 그 줄만 건너뛰고 몇 줄인지 남긴다.
+
+    2026-09-13: 새 매장 13판이 전부 생성물 재생성에서 죽었다. 창고 어딘가에 중간에 끊긴
+    줄 하나가 있었고(JSONDecodeError: Unterminated string), 그 한 줄 때문에 CSV·사이즈·
+    태그가 통째로 안 만들어졌다 — 매장 221곳치 수집이 앱까지 못 갔다. 크롤러는 같은 자리를
+    이미 try 로 감싸고 있었는데 여기만 맨몸이었다.
+    조용히 삼키지는 않는다. 끝에 몇 줄을 건너뛰었는지 찍어서, 진짜 깨진 창고면 눈에 띄게 한다.
+    """
+    for l in p.read_text(encoding="utf-8").splitlines():
+        if not l.strip():
+            continue
+        try:
+            yield json.loads(l)
+        except json.JSONDecodeError:
+            _BAD_LINES[p.name] += 1
+
+
 def canon_label(s: str) -> str | None:
     key = re.sub(r"[\s()（）:：]", "", s).lower()
     if key in ALIAS:
@@ -932,10 +953,7 @@ def brand_label_median(crawl_dir) -> dict[tuple[str, str], float]:
     for p in sorted(crawl_dir.glob("*.jsonl")):
         if p.name.startswith("_"):
             continue
-        for l in p.read_text(encoding="utf-8").splitlines():
-            if not l.strip():
-                continue
-            d = json.loads(l)
+        for d in iter_jsonl(p):
             st = d.get("size_table")
             if not isinstance(st, dict):
                 continue
@@ -1137,10 +1155,7 @@ def brand_girth(crawl_dir) -> set[tuple[str, str]]:
     for p in sorted(crawl_dir.glob("*.jsonl")):
         if p.name.startswith("_"):
             continue
-        for l in p.read_text(encoding="utf-8").splitlines():
-            if not l.strip():
-                continue
-            d = json.loads(l)
+        for d in iter_jsonl(p):
             st = d.get("size_table")
             if not isinstance(st, dict):
                 continue
@@ -1167,10 +1182,7 @@ def shop_wide_tables(crawl_dir, rows: dict) -> set[tuple[str, str]]:
     for p in sorted(crawl_dir.glob("*.jsonl")):
         if p.name.startswith("_"):
             continue
-        for l in p.read_text(encoding="utf-8").splitlines():
-            if not l.strip():
-                continue
-            d = json.loads(l)
+        for d in iter_jsonl(p):
             st = d.get("size_table")
             if not (isinstance(st, dict) and st):
                 continue
@@ -2011,19 +2023,15 @@ def main():
     rows = {(r["brand_slug"], r["product_no"]): r for r in csv.DictReader(open(DATA / "products_full.csv", encoding="utf-8-sig"))}
     ocr: dict[tuple, str] = {}
     for p in OCR.glob("*.jsonl"):
-        for l in p.read_text(encoding="utf-8").splitlines():
-            if l.strip():
-                d = json.loads(l)
-                ocr[(d["brand_slug"], str(d["product_no"]))] = d.get("ocr_text") or ""
+        for d in iter_jsonl(p):
+            ocr[(d["brand_slug"], str(d["product_no"]))] = d.get("ocr_text") or ""
     # 브라우저로 거둔 것 — 자바스크립트가 그리는 표는 여기밖에 없다(diafvine).
     brw: dict[str, dict] = {}
     if BROWSER.exists():
         for p2 in BROWSER.glob("*.jsonl"):
-            for l in p2.read_text(encoding="utf-8").splitlines():
-                if l.strip():
-                    d2 = json.loads(l)
-                    if d2.get("source_url"):
-                        brw[d2["source_url"]] = d2
+            for d2 in iter_jsonl(p2):
+                if d2.get("source_url"):
+                    brw[d2["source_url"]] = d2
     if brw:
         print(f"브라우저 기록 {len(brw)}건")
     girth_keys = brand_girth(CRAWL)
@@ -2042,10 +2050,7 @@ def main():
     for p in sorted(CRAWL.glob("*.jsonl")):
         if p.name.startswith("_"):
             continue
-        for l in p.read_text(encoding="utf-8").splitlines():
-            if not l.strip():
-                continue
-            d = json.loads(l)
+        for d in iter_jsonl(p):
             k = (d["brand_slug"], str(d["product_no"]))
             r = rows.get(k)
             if not r:
@@ -2186,6 +2191,9 @@ def main():
     if half:
         print("같은 라인에 절반 값이 있어 둘레를 단면으로 접음: "
               + " · ".join(f"{k} {v}" for k, v in sorted(half.items())))
+    if _BAD_LINES:
+        print("** 창고에 읽히지 않는 줄이 있다 — 그 줄만 건너뛰었다: "
+              + " · ".join(f"{k} {v}줄" for k, v in sorted(_BAD_LINES.items())))
     pieces, colors = drop_piece_tables(out)
     if pieces:
         print(f"칸 이름이 옷 이름인 표(세트·팩) {pieces}벌을 뺐다 — 사이즈가 아니다")
