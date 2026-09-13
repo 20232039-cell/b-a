@@ -1639,6 +1639,13 @@ def extract_size_table(html_text: str) -> dict[str, list[float]]:
         mat = extract_size_matrix(t)
         if len(mat) > len(rows):
             rows = mat
+    # 붙여 쓴 표는 칸 수로 이긴다 — 글자 파서는 이 꼴에서 언제나 첫 줄만 읽어 한 칸을 준다.
+    run = extract_size_runon(t)
+    if run:
+        have = max((len(v) for k, v in rows.items() if k != "_names"), default=0)
+        want = max((len(v) for k, v in run.items() if k != "_names"), default=0)
+        if want > have:
+            rows = run
     return rows
 
 
@@ -1661,6 +1668,57 @@ _NUM = r"\d{1,3}(?:\.\d{1,2})?"
 # 값으로 세면 그 줄이 통째로 버려지거나(size {}) 라벨이 한 칸씩 밀린다(기장 95·어깨 116cm).
 _ROW_LEAD = r"(?:\s*(?:size)?\s*(?:small|medium|large|x-?small|x-?large|free)?\s*(?:\([^)]{0,12}\))?\s*[:：\-|]?\s*(?:\d{1,2}\s*[-~]\s*\d{1,2}\s+)?)"
 _KNOWN = re.compile(r"^(?:" + SIZE_LABELS[1:-1] + r"|crotch|inseam|rise|arm|암홀|밑위|가슴둘레|허리둘레|밑단둘레|어깨너비|소매길이|가슴단면)", re.I)
+
+
+_RUNON = re.compile(
+    r"(?<![0-9A-Za-z가-힣])([0-9A-Za-z가-힣]{1,6})\s*[_:]\s*"
+    r"((?:(?:" + SIZE_LABELS[1:-1] + r")\s*\d{1,3}(?:\.\d{1,2})?\s*)+)")
+_RUNON_PAIR = re.compile(SIZE_LABELS + r"\s*(\d{1,3}(?:\.\d{1,2})?)")
+
+
+def extract_size_runon(t: str) -> dict[str, list[float]]:
+    """사이즈 이름 뒤에 라벨과 값을 붙여 쓴 표 — 「XS_총장85화장82가슴56.5밑단63.7」.
+
+    표(<table>)도 아니고 그림도 아니다. 상세 화면의 접힌 칸(「DETAIL & SIZE」 토글) 안에
+    <ul> 로 들어 있고, 줄바꿈이 <br> 이라 태그를 벗기면 다섯 줄이 한 줄로 붙는다.
+    그래서 글자 파서가 맨 앞 XS 한 줄만 읽고 끝냈다 — 사이즈 다섯인 옷이 한 칸이 되어
+    앱에서 프리사이즈로 떴다(사람 지적 2026-09-13: 「표 아마 사진말고 토글 열면 나오는
+    방식도 많을거야」). 창고 글에 이 꼴이 든 판매중 옷이 2,323벌이다.
+
+    줄이 둘 이상이고 라벨이 둘 이상일 때만 받는다 — 한 줄짜리는 기존 파서가 이미 읽는다.
+    """
+    rows: list[tuple[str, dict[str, float]]] = []
+    for m in _RUNON.finditer(t):
+        vals: dict[str, float] = {}
+        for pm in _RUNON_PAIR.finditer(m.group(2)):
+            lab = re.sub(r"\s+", "", pm.group(1)).lower()
+            v = float(pm.group(2))
+            if 3 <= v <= 200 and lab not in vals:
+                vals[lab] = v
+        if len(vals) >= 2:
+            rows.append((m.group(1).strip(), vals))
+    # 같은 칸이 두 번 실린 페이지가 있다(모바일·데스크톱 두 벌). 이름이 되풀이되면 첫 벌만 쓴다 —
+    # 안 그러면 사이즈 다섯짜리가 열 칸이 되고, 이름이 겹쳐 _names 도 통째로 버려진다.
+    first: dict[str, dict[str, float]] = {}
+    order: list[str] = []
+    for nm, vals in rows:
+        if nm not in first:
+            first[nm] = vals
+            order.append(nm)
+    rows = [(nm, first[nm]) for nm in order]
+    if len(rows) < 2:
+        return {}
+    # 모든 줄에 다 있는 라벨만 쓴다 — 줄마다 칸 수가 다르면 값이 옆으로 밀린다
+    common = set(rows[0][1])
+    for _, v in rows[1:]:
+        common &= set(v)
+    if len(common) < 2:
+        return {}
+    out: dict[str, list[float]] = {lab: [v[lab] for _, v in rows] for lab in common}
+    names = [n for n, _ in rows]
+    if len(set(names)) == len(names):
+        out["_names"] = names
+    return out
 
 
 def extract_size_from_tables(soup) -> dict[str, list[float]]:
