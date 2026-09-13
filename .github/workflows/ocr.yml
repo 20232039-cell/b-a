@@ -231,7 +231,11 @@ jobs:
           python scripts/ocr_detail_images.py --brands "${{ matrix.brand }}" \
             --max-images "${{ inputs.max_images }}" --procs 4 --delay "$D" --cdn-delay "$C" $ALL \
             --shard "${{ matrix.shard }}/$N" --out-dir _parts --select "${{ inputs.select || 'short' }}"
+      # 조각이 시간 상한에 걸려 취소되면 이 단계가 건너뛰어져, 한 줄씩 append·flush 해 둔
+      # 읽은 OCR 글이 러너와 함께 통째로 버려진다(2026-09-13, 한 조각이 300분을 읽고 0을 남겼다).
+      # 부분 결과도 그 자체로 온전한 기록이라 합치면 그만큼 이득이다 — 잡은 그대로 빨갛게 둔다.
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: ocr-${{ matrix.brand }}-${{ matrix.shard }}
           path: work/_parts/*.jsonl
