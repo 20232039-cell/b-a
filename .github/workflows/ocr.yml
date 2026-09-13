@@ -91,7 +91,10 @@ jobs:
               return len(stem) <= 24 and bool(ASSET_WORD.search(stem))
           maxi = int(os.environ.get("MAXI") or 5)
           sel = os.environ.get("SEL") or "short"
-          slugs = os.environ["LIST"].split() or [os.path.basename(p)[:-6] for p in glob.glob("data/crawl/*.jsonl")]
+          # 「_」로 시작하는 파일은 상품 창고가 아니다(_weekly_log 등) — 셸 쪽은 이미 거르는데
+          # 이 대비 경로만 안 걸러서, LIST 가 비면 product_no 없는 줄에서 plan 이 죽는다.
+          slugs = os.environ["LIST"].split() or [os.path.basename(p)[:-6] for p in glob.glob("data/crawl/*.jsonl")
+                                                 if not os.path.basename(p).startswith("_")]
           # 잡 하나가 맡을 그림 수 목표. 머리줄을 낱말 단위로 다시 읽는 판은 장당 1.5초가
           # 5초로 늘어서(2026-09-05), 표를 노리는 판(no-size·ocr)은 조각을 잘게 낸다.
           PER = 250 if sel in ("no-size", "ocr", "gaps", "thin-table", "capped") else 700

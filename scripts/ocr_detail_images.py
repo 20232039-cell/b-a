@@ -961,7 +961,12 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
             continue
         todo.append(d)
     todo = todo[k::n]
-    want_size = select in ("no-size", "ocr", "gaps", "bad-size", "capped", "thin-table")
+    # 표를 얻으면 남은 그림을 안 읽고 멈추는 갈래. 사이즈**만** 노리는 판에서만 켠다.
+    # gaps 는 사이즈·소재·색·디테일 가운데 빈 것을 채우러 가는 판인데 여기 끼어 있었다 —
+    # 소재를 채우러 가 놓고 사이즈 표를 보는 순간 멈춰, 뒤에 오는 소재·케어 글을 못 읽었다.
+    # 상세 그림은 대개 「착장 → 표 → 소재·세탁」 차례라 그 뒤가 통째로 날아간다
+    # (사람 지적 2026-09-13: 「OCR 돌릴거면 안에 디테일이나 소재 같은것도 같이 수집해」).
+    want_size = select in ("no-size", "ocr", "bad-size", "capped", "thin-table")
     log(f"[{slug}] OCR 대상 {len(todo)} (이미 {len(done)}, 조각 {k + 1}/{n})")
     n_img = n_txt = 0
     counters = {"img": 0, "txt": 0, "done": 0, "early": 0}

@@ -80,6 +80,8 @@ OTHER_GARMENT = re.compile(r"(?:나시|이너|아우터|inner|outer|반팔|긴�
 
 
 _BAD_LINES: Counter = Counter()
+# (원본 칸 이름, 정식 라벨) → [범위에 든 값, 범위 밖이라 버린 값]. 끝에 한 번 찍는다.
+_COL_DROP: dict[tuple[str, str], list[int]] = {}
 
 
 def iter_jsonl(p):
@@ -1155,7 +1157,17 @@ def normalize_html(st: dict, brand: str = "", girth_keys: set | None = None,
         if bad_label(vals if isinstance(vals, list) else []):
             continue
         girth = "둘레" in k or "circum" in k.lower() or (girth_keys is not None and (brand, c) in girth_keys)
-        vs = [v for v in (fix_value(c, str(x), girth) for x in vals) if v is not None]
+        _fv = [fix_value(c, str(x), girth) for x in vals]
+        # 한 열의 값이 거의 다 상식 범위 밖이면, 값이 이상한 게 아니라 **별칭이 틀린** 것이다.
+        # 멀쩡한 라벨은 버림률이 0~5%인데 「shoulder*1/2+arm → 어깨」는 82%였다 —
+        # 그건 어깨가 아니라 화장(어깨→소매끝)이었고, 83~92cm 를 어깨라고 적고 있었다
+        # (2026-09-13, 창고 전수에서 이 잣대 하나로 찾았다). 아침의 팔기장과 같은 집안이다.
+        # 여기서 세어 두고 끝에 한 번 찍는다 — 새 매장이 들어오면 그때 눈에 띄라고.
+        _tally = _COL_DROP.setdefault((re.sub(r"\s+", " ", str(k)).strip().lower(), c), [0, 0])
+        for _x, _y in zip(vals, _fv):
+            if isinstance(_x, (int, float)) or (isinstance(_x, str) and _x.strip()):
+                _tally[1 if _y is None else 0] += 1
+        vs = [v for v in _fv if v is not None]
         vs = drop_strays(brand, c, vs, med or {})
         if vs:
             out[c] = vs
@@ -2271,6 +2283,13 @@ def main():
     print(f"사이즈 있는 상품 {len(out)} / {len(rows)} ({len(out)/len(rows):.0%}) — html {src['html']} · ocr {src['ocr']} → {OUT}")
     lab = Counter(c for e in out.values() for c in e["sizes"])
     print("정식 라벨 분포:", dict(lab.most_common()))
+    suspect = sorted(((d, k, c, ok) for (k, c), (ok, d) in _COL_DROP.items()
+                      if d >= 20 and d > ok * 2), reverse=True)
+    if suspect:
+        print("\n** 별칭이 의심스러운 칸 — 값의 절반 넘게가 라벨의 상식 범위 밖이다:")
+        for d, k, c, ok in suspect[:15]:
+            print(f"   버림 {d:5} · 살림 {ok:5}  {k!r} → {c}")
+        print("   (한 열이 통째로 범위를 벗어나면 값이 아니라 이름이 틀린 것이다 — size_labels.json 을 볼 것)")
     if args.report:
         print("\n브랜드별 (전체 / html / ocr):")
         for b in sorted(per_brand_tot, key=lambda b: -(per_brand_ocr[b])):
