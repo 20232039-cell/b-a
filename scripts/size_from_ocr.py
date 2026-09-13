@@ -1536,8 +1536,18 @@ def names_from_options(out: dict, rows_by_url: dict) -> int:
         dec = [lab for lab, v in e["sizes"].items()
                if len(v[:cols]) == cols and all(isinstance(x, (int, float)) for x in v[:cols])
                and any(v[i + 1] < v[i] - 1.0 for i in range(cols - 1))]
-        if dec and len(inc) >= 2 and len(dec) < len(inc):
-            for lab in dec:
+        # 한 치수에 25cm 넘게 뛰는 라벨도 같은 눈으로 본다. 아래에서 이걸 만나면 표 전체의
+        # 이름을 포기하는데, 뛰는 라벨은 대개 그 한 줄이 잘못 읽힌 것이다 —
+        # 「총장 108·109·110·110·140」(140 은 111 을 잘못 읽음). 그 한 줄 때문에 멀쩡한
+        # 다섯 줄이 사이즈 이름을 통째로 잃고, 앱에서는 고를 수 없는 표가 된다.
+        # 줄어드는 라벨과 같은 잣대로 — 성한 라벨이 둘 이상이고 이상한 쪽이 더 적을 때만 뺀다.
+        jump = [lab for lab, v in e["sizes"].items()
+                if len(v[:cols]) == cols and all(isinstance(x, (int, float)) for x in v[:cols])
+                and any(v[i + 1] > v[i] + 25.0 for i in range(cols - 1))]
+        bad = set(dec) | set(jump)
+        good = [lab for lab in inc if lab not in bad]
+        if bad and len(good) >= 2 and len(bad) < len(good):
+            for lab in bad:
                 del e["sizes"][lab]
         for v in e["sizes"].values():
             vv = v[:cols]
