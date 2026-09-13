@@ -1670,10 +1670,18 @@ _ROW_LEAD = r"(?:\s*(?:size)?\s*(?:small|medium|large|x-?small|x-?large|free)?\s
 _KNOWN = re.compile(r"^(?:" + SIZE_LABELS[1:-1] + r"|crotch|inseam|rise|arm|암홀|밑위|가슴둘레|허리둘레|밑단둘레|어깨너비|소매길이|가슴단면)", re.I)
 
 
+# 사이즈 이름과 표 사이의 꼴이 매장마다 다르다 — 실제로 본 것만 넷이다:
+#   XS_총장85화장82…            붙여 쓰기
+#   28 : 허리단면 38 / 밑위 28.5  콜론 + 슬래시
+#   28 - 총기장 105.5 허리 37.5   붙임표
+#   [1] 총장 64 / 가슴단면 40     대괄호 이름 + 공백
+# 값 뒤에 단위(cm)를, 라벨 뒤에 측정 기준을 괄호로 다는 곳도 있다
+# (「S - 총장 62cm 소매길이(래글런) 73cm」).
 _RUNON = re.compile(
-    r"(?<![0-9A-Za-z가-힣])([0-9A-Za-z가-힣]{1,6})\s*[_:]\s*"
-    r"((?:(?:" + SIZE_LABELS[1:-1] + r")\s*\d{1,3}(?:\.\d{1,2})?[\s/·,]*)+)")
-_RUNON_PAIR = re.compile(SIZE_LABELS + r"\s*(\d{1,3}(?:\.\d{1,2})?)")
+    r"(?<![0-9A-Za-z가-힣])\[?\s*([0-9A-Za-z가-힣]{1,6})\s*\]?\s*[_:\-]?\s*"
+    r"((?:(?:" + SIZE_LABELS[1:-1] + r")\s*(?:[(（][^)）]{1,12}[)）])?\s*"
+    r"\d{1,3}(?:\.\d{1,2})?\s*(?:cm|CM|센티)?[\s/·,]*)+)")
+_RUNON_PAIR = re.compile(SIZE_LABELS + r"\s*(?:[(（][^)）]{1,12}[)）])?\s*(\d{1,3}(?:\.\d{1,2})?)")
 
 
 def extract_size_runon(t: str) -> dict[str, list[float]]:
