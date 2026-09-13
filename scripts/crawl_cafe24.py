@@ -1501,7 +1501,7 @@ def _fix_url(u: str, base: str) -> str:
 # 영문 하의 라벨 「LEGOPENING」·「OUT SEAM」·「BOTTOM HEM」은 여기 없어서 표에서 그 줄이 통째로 빠졌다 —
 # 밑단·총장이 없는 바지 표가 6개 매장 538벌(2026-09-11, 사람이 앱 화면에서 발견). 정식 라벨로의 대응은
 # data/size_labels.json 이 맡는다(leg opening→밑단, out seam→총장).
-SIZE_LABELS = (r"(총\s*장|총\s*기장|기장|어깨\s*너비|어깨|가슴\s*단면|가슴|소매\s*길이|소매|화장|암홀|허리\s*단면|허리|밑위|"
+SIZE_LABELS = (r"(총\s*장|총\s*길이|총\s*기장|기장|어깨\s*너비|어깨|가슴\s*단면|가슴|소매\s*길이|소매|화장|암홀|허리\s*단면|허리|밑위|"
                r"허벅지\s*단면|허벅지|밑단\s*단면|밑단|엉덩이|힙|sleeve\s*length|total\s*length|shoulder\s*width|chest\s*width|"
                r"leg\s*opening|out\s*seam|bottom\s*hem|bottom\s*width|hem\s*width|"
                r"front\s*rise|back\s*rise|팔\s*길이|"
@@ -1685,12 +1685,40 @@ def extract_size_from_tables(soup) -> dict[str, list[float]]:
             known = [i for i, l in enumerate(labels) if _KNOWN.match(l)]
             if len(known) < 2:
                 continue
+            # 머리줄이 라벨과 **첫 사이즈의 값**을 한 칸에 같이 담은 표가 있다:
+            #     <td>Size(cm)<br>00</td><td>어깨<br>57</td><td>가슴<br>62</td>
+            #     <td>01</td>            <td>59.5</td>     <td>64</td>
+            # get_text 는 「어깨 57」로 주는데 라벨을 만들며 공백을 지워 「어깨57」이 된다.
+            # _KNOWN 이 앞머리만 보므로 라벨로는 통과하고, 57(첫 사이즈 실측)은 라벨에 먹힌다.
+            # 그래서 사이즈가 셋인 옷이 둘로 줄고 첫 칸 실측이 통째로 사라졌다 — 1,303벌
+            # (2026-09-13. 사람 지적: 「실제로 사이즈표가 있는데도 프리사이즈로 뜬다」).
+            # 라벨 칸이 **전부** 그 꼴일 때만 믿는다 — 라벨 끝에 숫자가 붙는 매장도 있어서다.
+            inline: list[float | None] = [None] * len(head)
+            split = 0
+            for i in known:
+                m = re.fullmatch(r"(.*?)\s+(\d{1,3}(?:\.\d{1,2})?)", (head[i] or "").strip())
+                if not m or not m.group(1).strip():
+                    continue
+                base = re.sub(r"[().\s]", "", m.group(1)).lower()
+                v = float(m.group(2))
+                if _KNOWN.match(base) and 3 <= v <= 200:
+                    labels[i], inline[i] = base, v
+                    split += 1
+            if split != len(known):
+                inline = [None] * len(head)
+
             cols: dict[str, list[float]] = {}
             names: list[str] = []
             # 라벨이 아닌 칸 가운데 첫 칸이 사이즈 이름이다(「S」·「1 size 95」·「M(110)」).
             # 여태 버리고 있어서, 값이 여러 벌인 상품 9,419건이 「어느 게 M 인지」를 몰랐다.
             # 비교 기능은 사이즈별 실측을 나란히 놓아야 해서 이 이름이 꼭 필요하다(2026-09-05).
             name_col = next((i for i in range(len(head)) if i not in known), None)
+            if any(v is not None for v in inline):
+                for i in known:
+                    cols.setdefault(labels[i], []).append(inline[i])
+                # 이름 칸도 같은 꼴이다 — 「Size(cm) 00」의 뒷토막이 첫 사이즈 이름이다
+                parts = (head[name_col] or "").strip().split() if name_col is not None else []
+                names.append(parts[-1][:20] if len(parts) >= 2 else "")
             for r in rows[hi + 1:hi + 10]:
                 if len(r) != len(head):
                     continue
