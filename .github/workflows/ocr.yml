@@ -94,7 +94,33 @@ jobs:
           slugs = os.environ["LIST"].split() or [os.path.basename(p)[:-6] for p in glob.glob("data/crawl/*.jsonl")]
           # 잡 하나가 맡을 그림 수 목표. 머리줄을 낱말 단위로 다시 읽는 판은 장당 1.5초가
           # 5초로 늘어서(2026-09-05), 표를 노리는 판(no-size·ocr)은 조각을 잘게 낸다.
-          PER = 250 if sel in ("no-size", "ocr", "gaps") else 700
+          PER = 250 if sel in ("no-size", "ocr", "gaps", "thin-table") else 700
+          thin = set()
+          if sel == "thin-table":
+              # 잡을 만들 때부터 대상이 있는 브랜드만 넣는다. 이 갈래를 모르면 판독기가
+              # 걸러 낼 것을 plan 이 다 세어, 대상이 없는 브랜드에도 잡이 생기고 헛돈다.
+              # 잣대는 판독기와 같아야 한다 — 사이저의 정본을 그대로 불러 쓴다.
+              import sys as _sys
+              _sys.path.insert(0, "scripts")
+              from size_from_ocr import _size_option_names
+              import csv as _csv
+              _sz = json.load(open("data/product_sizes.json", encoding="utf-8")) \
+                    if os.path.exists("data/product_sizes.json") else {}
+              if os.path.exists("data/products_full.csv"):
+                  with open("data/products_full.csv", encoding="utf-8-sig") as _f:
+                      for _r in _csv.DictReader(_f):
+                          if _r.get("status") != "ON_SALE":
+                              continue
+                          _e = _sz.get(_r.get("source_url") or "")
+                          if not _e:
+                              continue
+                          _c = max((len(v) for v in (_e.get("sizes") or {}).values()
+                                    if isinstance(v, list)), default=0)
+                          if _c < 1:
+                              continue
+                          _o = _size_option_names([x.strip() for x in (_r.get("options") or "").split("|") if x.strip()])
+                          if len(_o) > _c:
+                              thin.add(_r["source_url"])
           gap = set()
           if sel == "gaps":
               have = set(json.load(open("data/product_sizes.json", encoding="utf-8"))) \
@@ -122,6 +148,8 @@ jobs:
                   if sel == "no-size" and d.get("size_table"):
                       continue
                   if sel == "gaps" and d.get("source_url") not in gap:
+                      continue
+                  if sel == "thin-table" and d.get("source_url") not in thin:
                       continue
                   cand = [u for u in d["detail_images"] if not SKIPPED(u.split("?")[0].rsplit("/", 1)[-1])]
                   imgs += min(maxi, len(cand))
