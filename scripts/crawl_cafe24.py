@@ -1501,8 +1501,8 @@ def _fix_url(u: str, base: str) -> str:
 # 영문 하의 라벨 「LEGOPENING」·「OUT SEAM」·「BOTTOM HEM」은 여기 없어서 표에서 그 줄이 통째로 빠졌다 —
 # 밑단·총장이 없는 바지 표가 6개 매장 538벌(2026-09-11, 사람이 앱 화면에서 발견). 정식 라벨로의 대응은
 # data/size_labels.json 이 맡는다(leg opening→밑단, out seam→총장).
-SIZE_LABELS = (r"(총\s*장|총\s*길이|총\s*기장|기장|어깨\s*너비|어깨|가슴\s*단면|가슴|소매\s*길이|소매|화장|암홀|허리\s*단면|허리|밑위|"
-               r"허벅지\s*단면|허벅지|밑단\s*단면|밑단|엉덩이|힙|sleeve\s*length|total\s*length|shoulder\s*width|chest\s*width|"
+SIZE_LABELS = (r"(총\s*장|총\s*길이|총\s*기장|기장|어깨\s*너비|어깨\s*단면|어깨|가슴\s*단면|가슴|소매\s*길이|소매|화장|암홀|허리\s*단면|허리|밑위|팔\s*기장|팔\s*통|"
+               r"허벅지\s*단면|허벅지|밑단\s*단면|밑단|엉덩이\s*단면|엉덩이|힙|sleeve\s*length|total\s*length|shoulder\s*width|chest\s*width|"
                r"leg\s*opening|out\s*seam|bottom\s*hem|bottom\s*width|hem\s*width|"
                r"front\s*rise|back\s*rise|팔\s*길이|"
                r"length|shoulder|chest|sleeve|waist|hip|thigh|hem|rise|inseam)")
@@ -1672,12 +1672,15 @@ _KNOWN = re.compile(r"^(?:" + SIZE_LABELS[1:-1] + r"|crotch|inseam|rise|arm|암�
 
 _RUNON = re.compile(
     r"(?<![0-9A-Za-z가-힣])([0-9A-Za-z가-힣]{1,6})\s*[_:]\s*"
-    r"((?:(?:" + SIZE_LABELS[1:-1] + r")\s*\d{1,3}(?:\.\d{1,2})?\s*)+)")
+    r"((?:(?:" + SIZE_LABELS[1:-1] + r")\s*\d{1,3}(?:\.\d{1,2})?[\s/·,]*)+)")
 _RUNON_PAIR = re.compile(SIZE_LABELS + r"\s*(\d{1,3}(?:\.\d{1,2})?)")
 
 
 def extract_size_runon(t: str) -> dict[str, list[float]]:
     """사이즈 이름 뒤에 라벨과 값을 붙여 쓴 표 — 「XS_총장85화장82가슴56.5밑단63.7」.
+
+    라벨과 값 사이를 슬래시로 끊는 매장도 같은 꼴이다 —
+    「28 : 허리단면 38 / 밑위 28.5 / 허벅지단면 30 / 밑단단면 27 / 총장 45」.
 
     표(<table>)도 아니고 그림도 아니다. 상세 화면의 접힌 칸(「DETAIL & SIZE」 토글) 안에
     <ul> 로 들어 있고, 줄바꿈이 <br> 이라 태그를 벗기면 다섯 줄이 한 줄로 붙는다.
