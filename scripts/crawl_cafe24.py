@@ -931,6 +931,28 @@ DECLARED_KIND = re.compile(
     r"(?:으로|이며|이고)?\s*(?:입니다|예요|이에요)")
 
 
+def clean_name_for_kind(name: str) -> str:
+    """갈래를 정하기 전에 상품명에서 꾸밈을 뗀다 — 이 손질을 거친 이름으로만 판단한다.
+
+    · 맨 뒤 괄호는 색·소재를 적는 자리다. 「NEWSBOY CAP (DENIM)」이 데님이 뒤에 있다는
+      이유로 하의가 됐다(2026-09-05).
+    · 옷 낱말이 있으면 oxford 를 지운다 — 옥스포드 셔츠는 구두가 아니다.
+
+    따로 떼어 둔 까닭: 검사 쪽(verify_data)이 이 손질 없이 raw 이름에 match_acc 를 걸어,
+    「WIDE UTILITY SHIRT / BLUE STRIPE OXFORD」를 구두라고 39번 외쳤다(2026-09-15).
+    잣대가 둘이면 반드시 어긋난다.
+    """
+    name = strip_trailing_color(_TRAIL_PAREN.sub("", name or ""))
+    if GARMENT_WORD.search(name):
+        name = FABRIC_NOT_SHOE.sub(" ", name)
+    return name
+
+
+def acc_of(name: str) -> str:
+    """손질한 이름으로 본 잡화 종류(없으면 빈 문자열)."""
+    return match_acc(clean_name_for_kind(name))
+
+
 def classify_category(name: str, category_names: list[str], description: str = "",
                       options: list | None = None) -> str:
     if any(PET_CATEGORY.match(c or "") for c in category_names):
@@ -940,13 +962,9 @@ def classify_category(name: str, category_names: list[str], description: str = "
         return "kids"
     if SHOE_FALSE.search(name):
         return "bottoms"
-    # 이름 맨 뒤 괄호는 색·소재를 적는 자리다 — 머리 낱말로 세면 안 된다.
-    # 「NEWSBOY CAP (DENIM)」이 데님이 뒤에 있다는 이유로 하의가 됐다(2026-09-05).
-    name = strip_trailing_color(_TRAIL_PAREN.sub("", name))
+    name = clean_name_for_kind(name)
     # 잡화 세분류가 먼저다 — 옷 어휘와 겹치는 낱말(니트 스카프·플리스 베레·데님 캡)이 있고,
     # 상품명은 「무엇인지」를 뒤에 적으므로 뒤에 걸린 쪽이 머리 낱말이다.
-    if GARMENT_WORD.search(name):
-        name = FABRIC_NOT_SHOE.sub(" ", name)   # 옥스포드 셔츠는 구두가 아니다
     acc = match_acc(name)
     if acc:
         return ACC_TO_CATEGORY[acc]

@@ -25,7 +25,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from crawl_cafe24 import classify_category, match_acc      # noqa: E402
+from crawl_cafe24 import classify_category, acc_of         # noqa: E402
+from crawl_cafe24 import JUNK_NAME as CRAWL_JUNK, not_a_product   # noqa: E402
 from coverage import is_apparel                            # noqa: E402
 
 # 카테고리마다 「이 라벨이 있어야 말이 된다」 — 하의 표에 어깨, 상의 표에 밑위는 서로 다른
@@ -45,7 +46,11 @@ SANE = {"총장": (20, 175), "어깨": (25, 85), "가슴": (25, 100), "허리": 
         # afterpray 링거 티셔츠 34.5~36.5 · etmon Raglan String Dress 31~31.5.
         # 뒷목 중심에서 잰 반팔은 실제로 그만큼이다(2026-09-15 전수 확인).
         "화장": (25, 110)}
-JUNK_NAME = re.compile(r"개인\s*결제|결제창|test|테스트|샘플|sample|배송비|추가금|적립금|"
+# 「test」를 낱말 경계 없이 찾고 있었다 — passer 「NMPD SHIELD - USED IN PRO**TEST**」와
+# ronron 「SOF**TEST** DREAM CAT LONG SLEEVE」가 상품이 아닌 행으로 섰다(2026-09-15).
+# 「sample」도 뺀다: ava-molli 의 [SAMPLE] 35벌은 9만~22만원에 실제로 파는 옷이다
+# (샘플 세일). 이름에 sample 이 들었다고 상품이 아닌 게 아니다.
+JUNK_NAME = re.compile(r"개인\s*결제|결제창|\btest\b|테스트|배송비|추가금|적립금|"
                        r"^[¥₩\W]{2,}$|documentation|campaign film|스탭스냅", re.I)
 
 
@@ -107,7 +112,10 @@ def main() -> None:
         per_brand_price[slug].append(int(d.get("price") or 0))
 
         # 1. 상품이 아닌 행이 상품으로 올라와 있다
-        if JUNK_NAME.search(name) or len(name.strip()) < 2:
+        # 수집기가 이미 이름만 보고 걸러 내는 행(build_csv)은 앱에 안 올라간다 — 여기서
+        # 또 세면 338건이 쌓여 아무도 안 본다. **수집기를 빠져나간 것만** 센다.
+        if (JUNK_NAME.search(name) or len(name.strip()) < 2) and not (
+                CRAWL_JUNK.search(name) or not_a_product(name)):
             fails["상품이 아닌 행"].append((slug, name, url))
 
         # 2. 사진이 없다 — 앱이 보여줄 수 없다
@@ -165,8 +173,12 @@ def main() -> None:
                 break
 
         # 9. 이름은 잡화인데 옷으로 세고 있다(또는 그 반대)
-        acc = match_acc(name)
-        if acc and is_apparel(d):
+        # 수집기와 **같은 손질**을 거친 이름으로 본다(acc_of). raw 이름에 걸면
+        # 「WIDE UTILITY SHIRT / BLUE STRIPE OXFORD」가 구두가 되어 39번 헛울렸다.
+        # 앱 목록에 아예 안 올라가는 kids 는 세지 않는다 — 148벌이 여기 쌓여 있었다
+        # (KIDS BEANIE·KIDS BACKPACK·KIDS UGG BOOTS…). 둘 다 2026-09-15 확인.
+        acc = acc_of(name)
+        if acc and is_apparel(d) and code != "kids":
             fails["잡화 이름인데 의류로 셈"].append((slug, f"{name} → {acc}", url))
 
     # 9-2. 색만 다른 같은 옷인데 치수가 다르다 — 같은 옷이니 실측도 같아야 한다
