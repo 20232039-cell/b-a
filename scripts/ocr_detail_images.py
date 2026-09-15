@@ -38,7 +38,7 @@ import tempfile
 import threading
 import traceback
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
 from urllib.parse import unquote_to_bytes, urlparse
 
@@ -1064,6 +1064,13 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
     return {"slug": slug, "products": len(todo), "images": n_img, "with_text": n_txt}
 
 
+def _plan_one(slug: str, only_short: bool, max_images: int, select: str,
+              cdn_delay: float | None, redo: bool) -> dict:
+    """--plan 의 일꾼. 프로세스로 돌리므로 바깥 변수를 붙잡지 않는다(log 가 닫힘이라 못 절인다)."""
+    return process_brand(slug, only_short, max_images, 0.0,
+                         lambda m: None, (0, 1), None, select, 1, cdn_delay, redo, True)
+
+
 def plan(slugs: list[str], args, log) -> None:
     """Actions 의 조각 나누기 — 판독기와 **같은 코드**로 대상을 세어 matrix 를 낸다.
 
@@ -1076,9 +1083,13 @@ def plan(slugs: list[str], args, log) -> None:
     """
     select = "all" if args.all else args.select
     counts: dict[str, int] = {}
-    with ThreadPoolExecutor(max_workers=max(1, args.procs)) as ex:
-        futs = {ex.submit(process_brand, s, not args.all, args.max_images, args.delay, log,
-                          (0, 1), None, select, 1, args.cdn_delay, args.redo, True): s
+    # 스레드가 아니라 프로세스로 센다 — 하는 일이 거의 전부 json 파싱이라 GIL 에 막혀,
+    # 384곳을 --procs 4 스레드로 세는 데 18분이 걸렸다. plan 은 OCR 전체를 막는 자리다.
+    # 프로세스로 바꾸니 같은 입력에 5분 20초.
+    ex_cls = ProcessPoolExecutor if args.procs > 1 else ThreadPoolExecutor
+    with ex_cls(max_workers=max(1, args.procs)) as ex:
+        futs = {ex.submit(_plan_one, s, not args.all, args.max_images, select,
+                          args.cdn_delay, args.redo): s
                 for s in slugs}
         failed = 0
         for fut in as_completed(futs):
@@ -1093,14 +1104,51 @@ def plan(slugs: list[str], args, log) -> None:
                 counts[r["brand"]] = r["images"]
     if failed:
         raise SystemExit(f"브랜드 {failed}곳이 일정 짜기에서 죽었다 — 위 자취를 볼 것")
-    inc = []
-    for b in sorted(counts):
-        n = max(1, min(args.max_shards, math.ceil(counts[b] / max(1, args.per_shard))))
-        for k in range(1, n + 1):
-            inc.append({"brand": b, "shard": k, "shards": n})
-    log(f"잡 {len(inc)} · 브랜드 {len(counts)} · 그림 {sum(counts.values())}")
+
+    # GitHub 의 matrix 상한은 256잡이다. 넘기면 ocr 잡이 **통째로** 안 뜬다 — 오늘 고친
+    # 「초록인데 아무 일도 안 함」과 같은 꼴이다(전수 gaps 를 재니 322잡이 나왔다).
+    # 먼저 조각을 굵게 해 상한 안에 넣어 보고, 그래도 안 되면 그림이 많은 매장부터 넣는다.
+    # 남은 매장은 조용히 사라지지 않는다 — 로그와 job summary 에 이름을 다 적고, 대상을
+    # 고르는 잣대가 상태를 보므로(gaps·no-size 는 「아직 빈 것」) 다음 판이 집어 간다.
+    per = max(1, args.per_shard)
+
+    def build(per_shard):
+        out = []
+        for b in sorted(counts):
+            n = max(1, min(args.max_shards, math.ceil(counts[b] / per_shard)))
+            for k in range(1, n + 1):
+                out.append({"brand": b, "shard": k, "shards": n})
+        return out
+
+    inc = build(per)
+    while len(inc) > args.max_jobs and per < 10 ** 6:
+        per = int(per * 1.5) + 1
+        inc = build(per)
+    if per != args.per_shard:
+        log(f"조각 크기를 {args.per_shard} → {per}장으로 키웠다 (matrix 상한 {args.max_jobs}잡)")
+    left = []
+    if len(inc) > args.max_jobs:
+        keep, used = [], 0
+        for b in sorted(counts, key=lambda x: -counts[x]):
+            n = max(1, min(args.max_shards, math.ceil(counts[b] / per)))
+            if used + n > args.max_jobs:
+                left.append(b)
+                continue
+            used += n
+            keep += [{"brand": b, "shard": k, "shards": n} for k in range(1, n + 1)]
+        inc = sorted(keep, key=lambda e: (e["brand"], e["shard"]))
+        log(f"!! matrix 상한 {args.max_jobs}잡에 걸려 {len(left)}곳을 이번 판에서 뺐다 — "
+            f"다음 판이 집어 간다: {' '.join(sorted(left))}")
+    log(f"잡 {len(inc)} · 브랜드 {len({e['brand'] for e in inc})} · 그림 {sum(counts.values())}")
     for b in sorted(counts, key=lambda x: -counts[x])[:10]:
         log(f"  {b} {counts[b]}장")
+    sm = os.environ.get("GITHUB_STEP_SUMMARY")
+    if sm:
+        with open(sm, "a", encoding="utf-8") as f:
+            f.write(f"### 일정 — 잡 {len(inc)} · 브랜드 {len({e['brand'] for e in inc})} "
+                    f"· 그림 {sum(counts.values())} · 조각 {per}장\n")
+            if left:
+                f.write(f"**다음 판으로 미룬 매장 {len(left)}곳**: {' '.join(sorted(left))}\n")
     if not inc and not args.allow_empty:
         raise SystemExit(
             "읽을 것이 하나도 없다 — 잡을 만들지 않고 죽는다.\n"
@@ -1128,6 +1176,8 @@ def main():
                     help="그림을 받지 않고 「무엇을 읽을지」만 세어 Actions matrix(JSON)를 낸다")
     ap.add_argument("--per-shard", type=int, default=250, help="--plan: 조각 하나가 맡을 그림 수 목표")
     ap.add_argument("--max-shards", type=int, default=12, help="--plan: 브랜드당 조각 수 상한")
+    ap.add_argument("--max-jobs", type=int, default=256,
+                    help="--plan: matrix 잡 수 상한 (GitHub 은 256잡을 넘기면 잡을 아예 안 만든다)")
     ap.add_argument("--allow-empty", action="store_true", help="--plan: 대상이 0이어도 죽지 않는다")
     ap.add_argument("--select", default="short", choices=["short", "all", "no-size", "ocr", "gaps", "bad-size", "capped", "thin-table"], help="short=설명 짧은 것(기본) · all=전부 · no-size=사이즈 표 없는 옷 · ocr=사이즈를 그림에서 읽은 옷 다시 · gaps=사이즈·소재·색·디테일 중 하나라도 빈 옷 · bad-size=사이즈가 커지는데 값이 작아지는 표만 다시 · capped=옛 6,000자 상한에 잘린 기록만 다시 · thin-table=표 칸 수가 매장 사이즈 수보다 적은 옷")
     args = ap.parse_args()
@@ -1145,7 +1195,12 @@ def main():
             print(f"{time.strftime('%H:%M:%S')} {msg}", flush=True)
 
     if args.plan:
-        plan(slugs, args, log)
+        # 일정 로그는 stderr 로 — stdout 은 matrix JSON 만 나와야 파이프로 바로 받는다.
+        def plog(msg):
+            with lock:
+                print(f"{time.strftime('%H:%M:%S')} {msg}", file=sys.stderr, flush=True)
+
+        plan(slugs, args, plog)
         return
 
     started = time.time()
