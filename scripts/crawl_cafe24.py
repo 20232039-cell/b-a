@@ -923,7 +923,16 @@ def strip_trailing_color(name: str) -> str:
     return s
 
 
-def classify_category(name: str, category_names: list[str], description: str = "") -> str:
+SHOE_SIZE_OPT = re.compile(r"^\s*(2[2-9][0-9]|3[0-2][0-9])\s*(?:\(|mm|$)")
+DECLARED_BAG = {"백팩", "가방", "토트백", "숄더백", "크로스백", "파우치", "클러치", "에코백"}
+# 매장이 제품 종류를 못박는 문장 — 「…크로스백입니다」. 이름·카테고리가 쓸모없을 때의 마지막 단서다.
+DECLARED_KIND = re.compile(
+    r"(백팩|가방|토트백|숄더백|크로스백|파우치|클러치|에코백|슈즈|스니커즈|운동화|로퍼|부츠|샌들|슬리퍼|구두)"
+    r"(?:으로|이며|이고)?\s*(?:입니다|예요|이에요)")
+
+
+def classify_category(name: str, category_names: list[str], description: str = "",
+                      options: list | None = None) -> str:
     if any(PET_CATEGORY.match(c or "") for c in category_names):
         return "pet"
     if not KIDS_FALSE.search(name) and (
@@ -941,9 +950,29 @@ def classify_category(name: str, category_names: list[str], description: str = "
     acc = match_acc(name)
     if acc:
         return ACC_TO_CATEGORY[acc]
+    # 매장이 설명글에서 **제품 종류를 못박은 문장**은 이름 추측보다 낫다.
+    # 「코트 데일리 캔버스」는 코트가 아니라 court 스니커즈인데 이름의 「코트」가 먼저 걸려
+    # 아우터로 섰고, 설명글은 「가벼운 스니커즈입니다」라고 적혀 있었다(covernat).
+    # 「삭 보 블랙」(Sac Beau)은 한글 이름에 단서가 없고 카테고리도 「Shop」 하나뿐인데
+    # 「스몰 사이즈 백팩입니다」라고 적혀 있었다(lememe). 둘 다 사람이 짚어 줬다(2026-09-15).
+    # 「유니크한 쉐입이 특징인 스몰 사이즈 백팩입니다」 — 이름이 「삭 보 블랙」(Sac Beau)이라
+    # 한글로는 단서가 없고 카테고리도 「Shop」 하나뿐이라, 가방이 상의로 섰다(lememe,
+    # 사람 지적 2026-09-15). cayl 「commute pack」 24벌도 같은 꼴로 상의였다.
+    # 「~입니다」로 끝나는 단정문만 본다 — 「가방과 함께 연출하면」 같은 문장은 안 걸린다.
+    declared = DECLARED_KIND.search(description or "")
+    # 「자켓과 에코백입니다」처럼 덤으로 딸린 세트는 그 물건이 주인공이 아니다 — 앞에
+    # 이음씨가 붙으면 안 본다.
+    if declared and not re.search(r"(?:과|와|랑|하고)\s*$", (description or "")[:declared.start()][-4:]):
+        return "bags" if declared.group(1) in DECLARED_BAG else "shoes"
     item = match_head(name, ITEM_TYPE_VOCAB)
     if item in ITEM_TO_CATEGORY:
         return ITEM_TO_CATEGORY[item]
+    # 옵션이 신발 치수면 신발이다 — 「260(41) 270(42) 280(43)」. 옷 옵션에는 220~320 이
+    # 줄줄이 서지 않는다(atelier-de-lumen 「MEN'S WOVEN FLIP」이 하의로 섰다, 사람 지적
+    # 2026-09-15). 카테고리 이름이 매장 이름 하나뿐인 곳에서 이름만으로는 못 가린다.
+    shoe_opt = [o for o in (options or []) if isinstance(o, str) and SHOE_SIZE_OPT.match(o)]
+    if len(shoe_opt) >= 2 and len(shoe_opt) >= len(options or []) * 0.6:
+        return "shoes"
     # 굿즈 낱말은 옷 낱말 뒤에 본다 — 「Toy Puff T-Shirt」는 장난감이 아니라 티셔츠다.
     if HEAD_MISC.search(name):
         return "other"
@@ -2844,7 +2873,8 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
             # (lmood 「<span>화란 세미오버 가디건</span> <span>BLACK</span>」, 2026-09-07).
             # 갈래를 정하기 전에 한 번 더 턴다 — 앱에 태그가 그대로 뜨고 있었다.
             d["name"] = _strip_tags(d["name"])
-            code = classify_category(d["name"], d.get("category_names", []), d.get("description", ""))
+            code = classify_category(d["name"], d.get("category_names", []), d.get("description", ""),
+                                     d.get("options"))
             fix = manual_items.get((slug, str(d["product_no"])))
             if fix and fix.get("분류"):
                 code = fix["분류"]      # 사람이 열어 보고 고친 분류가 이긴다
