@@ -25,8 +25,10 @@ from __future__ import annotations
 
 import argparse
 import collections
+import functools
 import io
 import base64
+import math
 import json
 import os
 import re
@@ -729,7 +731,10 @@ def load_rows() -> list[dict]:
         return list(csv.DictReader(f))
 
 
+@functools.lru_cache(maxsize=1)
 def load_categories() -> dict[tuple[str, int], str]:
+    # 브랜드마다 부르는데 12만 줄짜리 csv 를 매번 다시 읽고 있었다. 잡 하나가 브랜드
+    # 하나였을 땐 티가 안 났지만, --plan 은 200곳을 한 판에 세어 200번 읽는다.
     import csv
     path = ROOT / "data" / "products_full.csv"
     if not path.exists():
@@ -766,10 +771,16 @@ def images_of(d: dict) -> list[str]:
 
 def process_brand(slug: str, only_short: bool, max_images: int, delay: float, log,
                   shard: tuple[int, int] = (0, 1), out_dir: Path | None = None, select: str = "short",
-                  workers: int = 1, cdn_delay: float | None = None, redo: bool = False) -> dict:
+                  workers: int = 1, cdn_delay: float | None = None, redo: bool = False,
+                  plan_only: bool = False) -> dict:
     """shard=(k, n): 대상을 product_no 순으로 n등분해 k번째만 본다 — kirsh(1,800건)처럼 큰 브랜드를
     러너 여럿에 나눌 때. out_dir 를 주면 crawl/ocr/<slug>.jsonl 대신 out_dir/<slug>.<k>.jsonl 조각으로 쓴다
-    (Actions 의 collect 가 조각을 합친다). 이미 끝난 상품 판단은 항상 crawl/ocr/<slug>.jsonl 기준."""
+    (Actions 의 collect 가 조각을 합친다). 이미 끝난 상품 판단은 항상 crawl/ocr/<slug>.jsonl 기준.
+
+    plan_only=True 면 그림을 한 장도 받지 않고 「무엇을 읽을지」만 세어 돌려준다. Actions 의
+    plan 잡이 조각 수를 정할 때 쓴다 — 예전엔 plan 이 워크플로 안에 제 잣대를 따로 들고 있었고,
+    그 잣대가 판독기와 어긋나 갤러리만 있는 매장 3,557벌이 통째로 일정에 못 올랐다(2026-09-15).
+    잣대가 한 벌뿐이면 다시 어긋날 수 없다."""
     src = CRAWL_DIR / f"{slug}.jsonl"
     main = OCR_DIR / f"{slug}.jsonl"
     k, n = shard
@@ -974,6 +985,11 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
             continue
         todo.append(d)
     todo = todo[k::n]
+    if plan_only:
+        imgs = sum(min(max_images, len([u for u in images_of(d)
+                                        if u not in shared and not skip_image(u)]))
+                   for d in todo)
+        return {"brand": slug, "products": len(todo), "images": imgs, "with_text": 0}
     # 표를 얻으면 남은 그림을 안 읽고 멈추는 갈래. 사이즈**만** 노리는 판에서만 켠다.
     # gaps 는 사이즈·소재·색·디테일 가운데 빈 것을 채우러 가는 판인데 여기 끼어 있었다 —
     # 소재를 채우러 가 놓고 사이즈 표를 보는 순간 멈춰, 뒤에 오는 소재·케어 글을 못 읽었다.
@@ -1048,6 +1064,55 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
     return {"slug": slug, "products": len(todo), "images": n_img, "with_text": n_txt}
 
 
+def plan(slugs: list[str], args, log) -> None:
+    """Actions 의 조각 나누기 — 판독기와 **같은 코드**로 대상을 세어 matrix 를 낸다.
+
+    그림을 한 장도 받지 않는다(plan_only). 예전엔 이 잣대가 ocr.yml 안에 베껴져 있었고,
+    베낀 쪽이 낡아 세 번 사고가 났다. 마지막은 「상세 그림이 없으면 갤러리를 읽는다」를
+    판독기만 알고 plan 은 몰라, 읽을 수 있는 3,557벌이 통째로 일정에 못 오른 일이다(2026-09-15).
+
+    matrix 가 비면 죽는다 — 「읽을 것이 없다」와 「잣대가 고장 났다」는 밖에서 구별이 안 되고,
+    지금까지 우리를 물어 온 쪽은 늘 뒤엣것이었다. 정말로 빌 수 있는 판이면 --allow-empty 를 준다.
+    """
+    select = "all" if args.all else args.select
+    counts: dict[str, int] = {}
+    with ThreadPoolExecutor(max_workers=max(1, args.procs)) as ex:
+        futs = {ex.submit(process_brand, s, not args.all, args.max_images, args.delay, log,
+                          (0, 1), None, select, 1, args.cdn_delay, args.redo, True): s
+                for s in slugs}
+        failed = 0
+        for fut in as_completed(futs):
+            try:
+                r = fut.result()
+            except Exception as e:
+                failed += 1
+                log(f"예외 [{futs[fut]}]: {e!r}")
+                traceback.print_exception(e)
+                continue
+            if r["images"]:
+                counts[r["brand"]] = r["images"]
+    if failed:
+        raise SystemExit(f"브랜드 {failed}곳이 일정 짜기에서 죽었다 — 위 자취를 볼 것")
+    inc = []
+    for b in sorted(counts):
+        n = max(1, min(args.max_shards, math.ceil(counts[b] / max(1, args.per_shard))))
+        for k in range(1, n + 1):
+            inc.append({"brand": b, "shard": k, "shards": n})
+    log(f"잡 {len(inc)} · 브랜드 {len(counts)} · 그림 {sum(counts.values())}")
+    for b in sorted(counts, key=lambda x: -counts[x])[:10]:
+        log(f"  {b} {counts[b]}장")
+    if not inc and not args.allow_empty:
+        raise SystemExit(
+            "읽을 것이 하나도 없다 — 잡을 만들지 않고 죽는다.\n"
+            "정말 다 읽은 것이면 --allow-empty 를, 아니면 잣대(select·brands)를 볼 것.")
+    out = os.environ.get("GITHUB_OUTPUT")
+    payload = json.dumps({"include": inc}, ensure_ascii=False)
+    if out:
+        with open(out, "a", encoding="utf-8") as f:
+            f.write(f"matrix={payload}\n")
+    print(payload, flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--brands", nargs="*")
@@ -1059,6 +1124,11 @@ def main():
     ap.add_argument("--cdn-delay", type=float, default=0.25, help="공용 이미지 CDN(cafe24img) 에만 쓰는 대기")
     ap.add_argument("--shard", default="1/1", help="k/n — 대상을 n등분해 k번째(1부터)만 (Actions 샤딩)")
     ap.add_argument("--out-dir", help="조각 파일을 쓸 폴더 (crawl/ocr/<slug>.jsonl 대신 <slug>.<k>.jsonl)")
+    ap.add_argument("--plan", action="store_true",
+                    help="그림을 받지 않고 「무엇을 읽을지」만 세어 Actions matrix(JSON)를 낸다")
+    ap.add_argument("--per-shard", type=int, default=250, help="--plan: 조각 하나가 맡을 그림 수 목표")
+    ap.add_argument("--max-shards", type=int, default=12, help="--plan: 브랜드당 조각 수 상한")
+    ap.add_argument("--allow-empty", action="store_true", help="--plan: 대상이 0이어도 죽지 않는다")
     ap.add_argument("--select", default="short", choices=["short", "all", "no-size", "ocr", "gaps", "bad-size", "capped", "thin-table"], help="short=설명 짧은 것(기본) · all=전부 · no-size=사이즈 표 없는 옷 · ocr=사이즈를 그림에서 읽은 옷 다시 · gaps=사이즈·소재·색·디테일 중 하나라도 빈 옷 · bad-size=사이즈가 커지는데 값이 작아지는 표만 다시 · capped=옛 6,000자 상한에 잘린 기록만 다시 · thin-table=표 칸 수가 매장 사이즈 수보다 적은 옷")
     args = ap.parse_args()
     OCR_DIR.mkdir(parents=True, exist_ok=True)
@@ -1073,6 +1143,10 @@ def main():
     def log(msg):
         with lock:
             print(f"{time.strftime('%H:%M:%S')} {msg}", flush=True)
+
+    if args.plan:
+        plan(slugs, args, log)
+        return
 
     started = time.time()
     results = []

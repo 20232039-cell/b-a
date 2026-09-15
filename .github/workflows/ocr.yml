@@ -66,137 +66,35 @@ jobs:
         uses: ./.github/actions/data-repo
         with:
           token: ${{ secrets.DATA_TOKEN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: 판독기가 쓰는 꾸러미(일정 짜기에도 같은 파일을 읽어 들인다)
+        run: pip install -q requests pillow
+      # 조각 나누기의 잣대는 **판독기 자신**이 들고 있다(ocr_detail_images --plan).
+      # 예전엔 이 자리에 같은 잣대를 베낀 파이썬이 있었고, 베낀 쪽이 낡아 세 번 사고가 났다.
+      # 마지막은 「상세 그림이 없으면 갤러리를 읽는다」를 판독기만 알고 여기는 몰라서,
+      # 갤러리만 있는 매장 3,557벌이 통째로 빠졌는데 판은 초록으로 끝난 일이다(2026-09-15).
+      # 잣대가 한 벌뿐이면 다시 어긋날 수 없다. 대상이 0이면 --plan 이 죽는다.
       - id: plan
         shell: bash
+        env:
+          BRANDS: ${{ inputs.brands }}
+          SEL: ${{ inputs.select || 'short' }}
+          MAXI: ${{ inputs.max_images }}
         run: |
-          if [ -n "${{ inputs.brands }}" ]; then
-            list="${{ inputs.brands }}"
-          else
-            list=$(ls data/crawl/*.jsonl | xargs -n1 basename | sed 's/\.jsonl$//' | grep -v '^_' | tr '\n' ' ')
-          fi
-          # 조각 수를 브랜드마다 「읽을 그림 수」로 정한다. 예전엔 모든 브랜드를 똑같이 n등분해서,
-          # 프리즘웍스 한 잡이 2,200장을 혼자 들고 전체 시간을 정했다(2026-09-04).
-          matrix=$(MAXI="${{ inputs.max_images }}" SEL="${{ inputs.select || 'short' }}" LIST="$list" python3 - <<'PY'
-          import json, os, re, glob, math
-          # 판독기와 같은 잣대 — 상품 이름에 든 logo·icon 때문에 상세 그림을 통째로 세지 않던 함정
-          SKIP_NAME = re.compile(r"shipping|delivery|notice|exchange|refund|return|banner|event|coupon|배송|공지|교환|반품", re.I)
-          SIZE_WORD = re.compile(r"size|chart|guide|measure|사이즈|실측|치수", re.I)
-          ASSET_WORD = re.compile(r"(?:^|[/_.\-])(?:ico|icon|btn|logo|blank|spacer|badge|arrow)s?(?:[0-9]|[/_.\-]|$)", re.I)
-          def SKIPPED(name):
-              if SKIP_NAME.search(name):
-                  return True
-              stem = re.sub(r"\.[a-z0-9]{2,4}$", "", name, flags=re.I)
-              if SIZE_WORD.search(stem):
-                  return False
-              return len(stem) <= 24 and bool(ASSET_WORD.search(stem))
-          maxi = int(os.environ.get("MAXI") or 5)
-          sel = os.environ.get("SEL") or "short"
-          # 「_」로 시작하는 파일은 상품 창고가 아니다(_weekly_log 등) — 셸 쪽은 이미 거르는데
-          # 이 대비 경로만 안 걸러서, LIST 가 비면 product_no 없는 줄에서 plan 이 죽는다.
-          slugs = os.environ["LIST"].split() or [os.path.basename(p)[:-6] for p in glob.glob("data/crawl/*.jsonl")
-                                                 if not os.path.basename(p).startswith("_")]
-          # 잡 하나가 맡을 그림 수 목표. 머리줄을 낱말 단위로 다시 읽는 판은 장당 1.5초가
-          # 5초로 늘어서(2026-09-05), 표를 노리는 판(no-size·ocr)은 조각을 잘게 낸다.
-          PER = 250 if sel in ("no-size", "ocr", "gaps", "thin-table", "capped") else 700
-          # select=capped: 옛 6,000자 상한에 잘린 기록만 다시 읽는다. 대상은 창고가 아니라
-          # OCR 기록 쪽에 있으므로(글 길이가 정확히 6,000자이고 그림별 글이 안 남았다),
-          # 브랜드별로 미리 세어 둔다 — 안 그러면 plan 이 상세 그림 있는 상품을 전부 세어
-          # 대상 한 건짜리 브랜드에도 조각 열두 개가 생긴다. 잣대는 판독기와 같아야 한다.
-          capped = {}
-          if sel == "capped":
-              for _b in slugs:
-                  _p = f"data/crawl/ocr/{_b}.jsonl"
-                  if not os.path.exists(_p):
-                      continue
-                  _s = set()
-                  for _l in open(_p, encoding="utf-8"):
-                      if not _l.strip():
-                          continue
-                      try:
-                          _o = json.loads(_l)
-                      except json.JSONDecodeError:
-                          continue
-                      _t = _o.get("ocr_text") or ""
-                      if 5995 <= len(_t) <= 6005 and not any(_i.get("text") for _i in (_o.get("images") or [])):
-                          _s.add(_o.get("product_no"))
-                  if _s:
-                      capped[_b] = _s
-          thin = set()
-          if sel == "thin-table":
-              # 잡을 만들 때부터 대상이 있는 브랜드만 넣는다. 이 갈래를 모르면 판독기가
-              # 걸러 낼 것을 plan 이 다 세어, 대상이 없는 브랜드에도 잡이 생기고 헛돈다.
-              # 잣대는 판독기와 같아야 한다 — 사이저의 정본을 그대로 불러 쓴다.
-              import sys as _sys
-              _sys.path.insert(0, "scripts")
-              from size_from_ocr import _size_option_names
-              import csv as _csv
-              _sz = json.load(open("data/product_sizes.json", encoding="utf-8")) \
-                    if os.path.exists("data/product_sizes.json") else {}
-              if os.path.exists("data/products_full.csv"):
-                  with open("data/products_full.csv", encoding="utf-8-sig") as _f:
-                      for _r in _csv.DictReader(_f):
-                          if _r.get("status") != "ON_SALE":
-                              continue
-                          _e = _sz.get(_r.get("source_url") or "")
-                          if not _e:
-                              continue
-                          _c = max((len(v) for v in (_e.get("sizes") or {}).values()
-                                    if isinstance(v, list)), default=0)
-                          if _c < 1:
-                              continue
-                          _o = _size_option_names([x.strip() for x in (_r.get("options") or "").split("|") if x.strip()])
-                          if len(_o) > _c:
-                              thin.add(_r["source_url"])
-          gap = set()
-          if sel == "gaps":
-              have = set(json.load(open("data/product_sizes.json", encoding="utf-8"))) \
-                     if os.path.exists("data/product_sizes.json") else set()
-              tg = json.load(open("data/product_tags_full.json", encoding="utf-8")) \
-                   if os.path.exists("data/product_tags_full.json") else {}
-              for u, pr in tg.items():
-                  t = (pr or {}).get("tags") or {}
-                  if (u not in have or not t.get("material") or not t.get("color")
-                          or not (t.get("design_element") or t.get("construction") or t.get("hardware"))):
-                      gap.add(u)
-          inc = []
-          for b in slugs:
-              path = f"data/crawl/{b}.jsonl"
-              if not os.path.exists(path):
-                  continue
-              latest = {}
-              for l in open(path, encoding="utf-8"):
-                  if l.strip():
-                      d = json.loads(l); latest[d["product_no"]] = d
-              imgs = 0
-              for d in latest.values():
-                  # 상세 그림이 없으면 갤러리를 쓴다 — **판독기가 그렇게 한다**
-                  # (ocr_detail_images: detail_images or gallery). plan 만 detail_images 만 보고
-                  # 건너뛰어, 갤러리밖에 없는 매장은 조각이 아예 안 만들어졌다. 띄워도 plan 이
-                  # 「대상 0」을 내놓고 collect 로 직행한다 — 판매중 옷 3,557벌(사이즈 없는 것
-                  # 1,417벌)이 읽을 수 있는데 일정에 못 올랐다(2026-09-15).
-                  _imgs = d.get("detail_images") or d.get("gallery") or []
-                  if (d.get("price") or 0) <= 1000 or not _imgs:
-                      continue
-                  if sel == "no-size" and d.get("size_table"):
-                      continue
-                  if sel == "gaps" and d.get("source_url") not in gap:
-                      continue
-                  if sel == "thin-table" and d.get("source_url") not in thin:
-                      continue
-                  if sel == "capped" and d.get("product_no") not in capped.get(b, ()):
-                      continue
-                  cand = [u for u in _imgs if not SKIPPED(u.split("?")[0].rsplit("/", 1)[-1])]
-                  imgs += min(maxi, len(cand))
-              if not imgs:
-                  continue
-              n = max(1, min(12, math.ceil(imgs / PER)))
-              for k in range(1, n + 1):
-                  inc.append({"brand": b, "shard": k, "shards": n})
-          print(json.dumps({"include": inc}))
-          PY
-          )
-          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
-          echo "$matrix" | python3 -c "import json,sys; m=json.load(sys.stdin)['include']; print('잡', len(m), '· 브랜드', len({e['brand'] for e in m}))"
+          ARGS=()
+          if [ -n "$BRANDS" ]; then ARGS+=(--brands $BRANDS); fi
+          if [ "${{ inputs.all }}" = "true" ]; then ARGS+=(--all); fi
+          if [ "${{ inputs.redo }}" = "true" ]; then ARGS+=(--redo); fi
+          # 표를 노리는 판(no-size·ocr…)은 머리줄을 낱말 단위로 다시 읽어 장당 5초가 든다 —
+          # 조각을 잘게 낸다. 설명글만 훑는 판은 장당 1.5초라 크게 묶어도 된다(2026-09-05).
+          case "$SEL" in
+            no-size|ocr|gaps|thin-table|capped) PER=250 ;;
+            *) PER=700 ;;
+          esac
+          python3 scripts/ocr_detail_images.py --plan --per-shard "$PER" \
+            --max-images "$MAXI" --select "$SEL" --procs 4 "${ARGS[@]}"
 
   ocr:
     needs: plan
