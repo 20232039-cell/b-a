@@ -79,7 +79,10 @@ jobs:
             --shard "${{ matrix.shard }}/${{ matrix.shards }}" \
             --delay 0.5 $REDO $LIM
           mv data/brand_contacts.csv "brand_contacts.${{ matrix.shard }}.csv"
+      # 조각이 시간 상한에 걸려 취소되면 이 단계가 건너뛰어져, 이미 모아 둔 결과가
+      # 러너와 함께 버려진다 — 부분 결과도 그 자체로 온전한 기록이라 합치면 그만큼 이득이다.
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: sites-${{ matrix.shard }}
           path: work/brand_contacts.*.csv

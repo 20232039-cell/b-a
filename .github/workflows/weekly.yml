@@ -106,7 +106,12 @@ jobs:
       - name: 묶음 ${{ matrix.bucket }} 목록 스캔 (상품 ${{ matrix.load }})
         run: |
           python scripts/weekly_update.py --brands ${{ matrix.brands }} --workers 8 --no-csv
+      # 스캔이 시간 상한에 걸려 취소되면 이 단계와 업로드가 건너뛰어져, **이미 끝난 매장**의
+      # 갱신까지 러너와 함께 버려진다(2026-09-13 에 OCR 조각이 그래서 5시간을 읽고 0을 남겼다).
+      # 매장은 하나씩 마무리되고, 목록이 덜 걷힌 매장은 weekly_update 의 가드레일이 상태 변경을
+      # 보류하므로(「목록 N < 판매중 M×비율」), 덜 끝난 판의 결과를 합쳐도 품절·삭제가 번지지 않는다.
       - name: 이 묶음이 맡은 파일만 골라 담기
+        if: always()
         shell: bash
         run: |
           mkdir -p _parts
@@ -116,6 +121,7 @@ jobs:
           cp data/crawl/_weekly_log.jsonl "_parts/_weekly_log.b${{ matrix.bucket }}.log" 2>/dev/null || true
           ls _parts | wc -l
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: weekly-b${{ matrix.bucket }}
           path: work/_parts/*
