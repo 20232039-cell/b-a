@@ -71,6 +71,27 @@ def main() -> None:
     per_brand_price: dict[str, list] = collections.defaultdict(list)
     n_live = 0
 
+    # 0. 창고 파일이 스스로 안 읽힌다 — 상품 기록이 조각나 사라진 것
+    # str.splitlines() 는 U+0085(NEL)·U+2028·U+2029 도 줄바꿈으로 세는데 json.dumps 는
+    # 그것들을 그대로 흘린다. 우리 코드는 두 가지 읽기(줄 순회 · splitlines)를 섞어 쓰므로,
+    # 그런 글자가 든 줄은 쪽에 따라 보이기도 하고 사라지기도 한다 — 가장 나쁜 종류의 고장이다.
+    # 2026-09-15 wiggle-wiggle 에서 잡았다(그림 주소에 잘못 디코드된 자모, 상품 한 벌 증발).
+    for f in sorted(glob.glob(str(DATA / "crawl" / "*.jsonl"))) + \
+             sorted(glob.glob(str(DATA / "crawl" / "ocr" / "*.jsonl"))):
+        txt = open(f, encoding="utf-8").read()
+        n_line, n_nl = len(txt.splitlines()), txt.count("\n")
+        broken = 0
+        for line in txt.splitlines():
+            if not line.strip():
+                continue
+            try:
+                json.loads(line)
+            except Exception:
+                broken += 1
+        if broken or n_line != n_nl:
+            fails["창고 파일의 줄이 깨졌다"].append(
+                (os.path.basename(f)[:-6], f"안 읽히는 줄 {broken} · splitlines {n_line} vs 줄바꿈 {n_nl}", f))
+
     for slug, d in latest_rows():
         name = d.get("name") or ""
         url = d.get("source_url") or ""

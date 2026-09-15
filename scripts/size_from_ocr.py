@@ -1134,53 +1134,82 @@ FLOOR_10 = {"총장", "가슴", "어깨", "허리", "허벅지", "밑위", "뒤�
 def blank_lone_jump(sizes: dict[str, list]) -> dict[str, list]:
     """한 라벨만 유독 한 칸 크게 뛰면 그 칸을 비운다.
 
-    같은 표 안의 사이즈는 칸마다 1~3cm 씩 고르게 커진다. 한 라벨이 그 걸음의 여섯 배를
-    한 번에 뛰는데 **다른 라벨은 고르다면**, 사이즈가 달라진 게 아니라 그 칸 하나가 틀린 것이다:
+    같은 표 안의 사이즈는 칸마다 1~3cm 씩 고르게 커진다. 한 라벨이 **다른 라벨들의
+    걸음**보다 여섯 배를 한 번에 뛴다면, 사이즈가 달라진 게 아니라 그 칸 하나가 틀린 것이다:
 
         어깨 [58, 61, 63, 65] · 가슴 [56, 60, 62, 64] · 총장 [58, 70, 72, 74]
                                                             ↑ 68 을 58 로 읽었다
-        총장 [61, 63, 65, 67] · 어깨 [50, 52, 54, 67]
-                                                ↑ 총장의 67 이 새어 들어왔다
+        허리 [38,40,43] · 허벅지 [36,36,37.5] · 밑위 [35,36,37] · 엉덩이 [32.9, 56.5, 59.5]
+                                                                        ↑ 52.9 를 32.9 로
+
+    기준 걸음은 **다른 라벨들에서** 가져온다. 예전엔 그 라벨 제 걸음의 중앙값을 썼는데,
+    값이 셋뿐이면 걸음이 둘이라 중앙값이 「튄 걸음과 멀쩡한 걸음의 한가운데」가 되어
+    제가 저를 가려 줬다(alvinclo 엉덩이 [32.9,56.5,59.5] — median(23.6, 3.0)=13.3,
+    여섯 배는 79.8 이라 아무것도 안 걸렸다, 2026-09-15).
 
     **라벨이 다 같이 뛰면 건드리지 않는다** — 그건 진짜 치수 차이다. S 만 여성 핏인
-    유니섹스 표가 그렇고(사람 지적 2026-09-15: 「s만 동떨어진건 여성 사이즈여서 그런가봐」,
-    어깨 36.5·총장 52 는 실제 여성 치수대였다), 상·하의가 한 표에 든 세트도 그렇다.
+    유니섹스 표가 그렇고(사람 지적 2026-09-15: 「s만 동떨어진건 여성 사이즈여서 그런가봐」),
+    상·하의가 한 표에 든 세트도 그렇다.
 
-    뛰는 자리가 가운데면 앞뒤 어느 쪽이 틀렸는지 알 수 없어(두 무리일 수도 있다) 둔다.
-    맨 앞·맨 뒤만 고친다. 창고 전수에서 처음 61 · 끝 21 · 가운데 23 이었다(2026-09-15).
-    비율로 보는 drop_strays 는 이 꼴을 못 잡는다 — [58,70,72,74]는 1.28배라 통과한다.
+    뛰는 자리가 가운데면 앞뒤 어느 쪽이 틀렸는지 알 수 없어 둔다. 맨 앞·맨 뒤만 고친다.
+    **값이 둘뿐이면 라벨째 버린다** — 맨 앞이기도 하고 맨 뒤이기도 해서 어느 쪽이 틀렸는지
+    가릴 길이 없다. 브랜드 중앙값으로 갈라 봤더니 1993studio 총장 [53.8, 95.8] 은 맞히고
+    [51.0, 93.5] 는 틀렸다(둘 다 중앙값 72.5 에서 21cm 언저리). 반반 맞히는 잣대는
+    없는 것만 못하다 — 없는 치수보다 틀린 치수가 나쁘다.
     """
     idx = {c: [i for i, x in enumerate(v) if isinstance(x, (int, float))] for c, v in sizes.items()}
-    usable = {c: [sizes[c][i] for i in ii] for c, ii in idx.items() if len(ii) >= 3}
+    usable = {c: [sizes[c][i] for i in ii] for c, ii in idx.items() if len(ii) >= 2}
     if len(usable) < 2:
         return sizes
-    marks: dict[str, list[int]] = {}
+    steps_of = {}
     for c, vs in usable.items():
-        steps = [round(vs[i + 1] - vs[i], 2) for i in range(len(vs) - 1)]
-        if any(st < 0 for st in steps):
+        st = [round(vs[i + 1] - vs[i], 2) for i in range(len(vs) - 1)]
+        if any(x < 0 for x in st):
             continue                      # 오르내리는 것은 bad_label 이 본다
-        pos = [st for st in steps if st > 0]
-        if len(pos) < 2:
-            continue
-        m = statistics.median(pos)
-        if m <= 0:
-            continue
-        big = [i for i, st in enumerate(steps) if st >= m * 6 and st >= 8]
-        if big:
-            marks[c] = big
-    if len(marks) != 1:
-        return sizes                      # 아무도 안 뛰거나, 다 같이 뛴다
-    c, big = next(iter(marks.items()))
+        steps_of[c] = st
+    if len(steps_of) < 2:
+        return sizes
+    # 기준 걸음 — **표 전체**의 걸음에서 가져온다. 튄 걸음 하나가 섞여도 중앙값은 안 흔들린다.
+    # 제 걸음만 보면 값이 셋뿐일 때 중앙값이 「튄 걸음과 멀쩡한 걸음의 한가운데」가 되어
+    # 제가 저를 가려 준다(alvinclo 엉덩이 [32.9,56.5,59.5] — median(23.6,3)=13.3).
+    allpos = [x for st in steps_of.values() for x in st if x > 0]
+    if len(allpos) < 3:
+        return sizes
+    ref = statistics.median(allpos)
+    if ref <= 0:
+        return sizes
+    strong = {c: [i for i, x in enumerate(st) if x >= ref * 6 and x >= 8]
+              for c, st in steps_of.items()}
+    strong = {c: v for c, v in strong.items() if v}
+    if len(strong) != 1:
+        return sizes
+    c, big = next(iter(strong.items()))
     if len(big) != 1:
         return sizes
-    vs = usable[c]
     i = big[0]
+    # **같은 자리에서 다른 라벨도 함께 뛰면** 그건 진짜 치수 차이다 — 건드리지 않는다.
+    # S 만 여성 핏인 유니섹스 표가 그렇다(사람 지적 2026-09-15: 「s만 동떨어진건 여성
+    # 사이즈여서 그런가봐」 — 어깨 36.5·총장 52 는 실제 여성 치수대였다). 함께 뛰는지는
+    # 무르게 본다(기준의 세 배·5cm) — 같이 뛰는 라벨의 걸음이 늘 똑같이 크진 않다.
+    for d, st in steps_of.items():
+        if d == c or i >= len(st):
+            continue
+        if st[i] >= ref * 3 and st[i] >= 5:
+            return sizes
+    vs = usable[c]
+    if len(vs) == 2:
+        # 맨 앞이기도 하고 맨 뒤이기도 하다 — 어느 쪽이 틀렸는지 가릴 길이 없다.
+        # 브랜드 중앙값으로 갈라 봤더니 1993studio 총장 [53.8,95.8] 은 맞히고
+        # [51.0,93.5] 는 틀렸다(둘 다 중앙값 72.5 에서 21cm 언저리). 반반 맞히는 잣대는
+        # 없느니만 못하다 — 없는 치수보다 틀린 치수가 나쁘다. 라벨째 버린다.
+        out = {k: x for k, x in sizes.items() if k != c}
+        return out or sizes
     if i == 0:
         pos_in_vs = 0
     elif i == len(vs) - 2:
         pos_in_vs = len(vs) - 1
     else:
-        return sizes
+        return sizes                      # 가운데 — 앞뒤 어느 쪽이 틀렸는지 모른다
     out = dict(sizes)
     v = list(sizes[c])
     v[idx[c][pos_in_vs]] = None

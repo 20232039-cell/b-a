@@ -61,6 +61,20 @@ _ASSET_WORD = re.compile(r"(?:^|[/_.\-])(?:ico|icon|btn|logo|blank|spacer|badge|
 _SIZE_WORD = re.compile(r"size|chart|guide|measure|사이즈|실측|치수", re.I)
 
 
+# 파이썬 str.splitlines() 는 U+0085(NEL)·U+2028·U+2029 도 줄바꿈으로 센다. json.dumps 는
+# ensure_ascii=False 면 그것들을 그대로 흘리므로, 그런 글자가 든 줄은 **읽는 쪽에서
+# 조각나고 통째로 버려진다** — 아무 소리 없이. 2026-09-15 에 wiggle-wiggle 에서 잡았다:
+# 매장이 준 그림 주소에 잘못 디코드된 한글 자모가 섞여 0x85 바이트가 U+0085 로 들어갔고,
+# 상품 한 벌이 조각 셋으로 흩어져 사라졌다. 쓸 때 escape 해 둔다 — 읽는 쪽 서른두 자리를
+# 전부 고치는 것보다 한 자리를 막는 쪽이 확실하다.
+_LINE_SEPS = str.maketrans({"\u0085": "\\u0085", "\u2028": "\\u2028", "\u2029": "\\u2029"})
+
+
+def jsonl_line(obj) -> str:
+    """JSONL 한 줄 — 줄바꿈으로 세어지는 글자를 escape 해서 낸다."""
+    return json.dumps(obj, ensure_ascii=False).translate(_LINE_SEPS)
+
+
 def skip_image(url: str) -> bool:
     name = re.sub(r"\?.*$", "", url).rsplit("/", 1)[-1]
     if SKIP_NAME.search(name):
@@ -1052,7 +1066,8 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
                     counters["txt"] += 1
                 if counters["done"] % 100 == 0:
                     log(f"[{slug}] … {counters['done']}/{len(todo)} · 글 나온 상품 {counters['txt']} · 표 얻고 조기 종료 {counters['early']}")
-            return json.dumps({"brand_slug": slug, "product_no": d["product_no"], "ocr_text": ocr_text, "images": imgs}, ensure_ascii=False)
+            return jsonl_line({"brand_slug": slug, "product_no": d["product_no"],
+                               "ocr_text": ocr_text, "images": imgs})
 
     with out.open("a", encoding="utf-8") as f:
         with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
