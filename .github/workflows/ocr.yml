@@ -169,7 +169,13 @@ jobs:
                       d = json.loads(l); latest[d["product_no"]] = d
               imgs = 0
               for d in latest.values():
-                  if (d.get("price") or 0) <= 1000 or not d.get("detail_images"):
+                  # 상세 그림이 없으면 갤러리를 쓴다 — **판독기가 그렇게 한다**
+                  # (ocr_detail_images: detail_images or gallery). plan 만 detail_images 만 보고
+                  # 건너뛰어, 갤러리밖에 없는 매장은 조각이 아예 안 만들어졌다. 띄워도 plan 이
+                  # 「대상 0」을 내놓고 collect 로 직행한다 — 판매중 옷 3,557벌(사이즈 없는 것
+                  # 1,417벌)이 읽을 수 있는데 일정에 못 올랐다(2026-09-15).
+                  _imgs = d.get("detail_images") or d.get("gallery") or []
+                  if (d.get("price") or 0) <= 1000 or not _imgs:
                       continue
                   if sel == "no-size" and d.get("size_table"):
                       continue
@@ -179,7 +185,7 @@ jobs:
                       continue
                   if sel == "capped" and d.get("product_no") not in capped.get(b, ()):
                       continue
-                  cand = [u for u in d["detail_images"] if not SKIPPED(u.split("?")[0].rsplit("/", 1)[-1])]
+                  cand = [u for u in _imgs if not SKIPPED(u.split("?")[0].rsplit("/", 1)[-1])]
                   imgs += min(maxi, len(cand))
               if not imgs:
                   continue
