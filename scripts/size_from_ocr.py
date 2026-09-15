@@ -110,6 +110,13 @@ def iter_jsonl(p):
 
 def canon_label(s: str) -> str | None:
     key = re.sub(r"[\s()（）:：]", "", s).lower()
+    # 「화장」이 든 라벨은 무조건 화장이다. 뒷목 중심에서 소매끝까지를 가리키는 한 낱말이고,
+    # 다른 치수 이름에는 이 말이 안 들어간다. 그런데 라벨을 찾는 자리는 왼쪽부터 보므로
+    # 「소매화장」에서 앞의 「소매」가 먼저 걸려 소매길이가 됐다 — 20cm 넘게 다른 치수다.
+    # 전수로 재니 소매화장 81 · 소매길이화장 11 · 어깨화장 1 (2026-09-15, rough-side
+    # 「소매화장 86/88/90」이 소매길이로 서 있었다). 화장품·화장실은 뺀다.
+    if "화장" in key:
+        return None if re.search(r"화장[품실대]", key) else "화장"
     if key in ALIAS:
         return ALIAS[key]
     m = LABEL_RX.search(s)
@@ -1129,6 +1136,40 @@ def brand_label_median(crawl_dir) -> dict[tuple[str, str], float]:
 
 
 FLOOR_10 = {"총장", "가슴", "어깨", "허리", "허벅지", "밑위", "뒤밑위", "엉덩이", "암홀", "화장"}
+
+
+def sleeve_to_hwajang(sizes: dict[str, list]) -> dict[str, list]:
+    """소매길이가 통째로 80cm 를 넘으면 그건 화장이다 — 라벨을 고쳐 단다.
+
+    어깨선에서 소매끝까지는 사람 팔 길이를 못 넘는다(어른 60~65cm). 어깨가 내려온 옷은
+    솔기가 아래로 내려가므로 그 자리에서 잰 소매는 오히려 **짧아진다**. 그러니 80cm 넘는
+    「소매」는 뒷목 중심에서 잰 것, 즉 화장이다. 래글런은 어깨 솔기가 없어 매장이 그렇게
+    잴 수밖에 없는데, 적기는 그냥 「소매」라고 적는다:
+
+        horlisun  Sugarpine **Raglan** Sweatshirt  총장 66~70 · 가슴 60~66 · 소매 85.5~90.5
+        heritagefloss 8070 PL BLOUSON            length 70~73 · chest 64~66.5 · sleeve 85~89
+        phyps     H-Tech Wind Shield Track        sleeve 79
+        1993studio 스몰 로고 윈드브레이커            총장 72.5 · 가슴 73 · 소매 83
+
+    화장과 소매길이는 20cm 넘게 다른 치수라(size_labels.json 머리말), 화장을 소매길이 자리에
+    두면 같은 옷끼리 대는 순간 엉뚱한 옷이 딸려 나온다.
+
+    **값이 하나라도 80 아래면 손대지 않는다** — 섞인 표는 한 칸이 잘못 읽힌 것일 수 있고,
+    그건 blank_lone_jump 이 볼 일이다. 이미 화장 줄이 있는 표도 두 줄이 겹치므로 둔다
+    (전수 10만 벌에서 다섯 벌뿐).
+
+    반대쪽(화장이 40 아래)은 **고치지 않는다**. 열어 보니 반팔 래글런이었다 —
+    covernat 「우먼 스트라이프 하프 니트」 화장 28~29.5 · afterpray 링거 티셔츠 34.5~36.5.
+    뒷목에서 잰 반팔은 실제로 그만큼이다. 검사 쪽 범위를 넓히는 게 맞다.
+    """
+    sl = sizes.get("소매길이")
+    if not sl or "화장" in sizes:
+        return sizes
+    nums = [v for v in sl if isinstance(v, (int, float))]
+    if not nums or min(nums) < 80:
+        return sizes
+    out = {("화장" if c == "소매길이" else c): v for c, v in sizes.items()}
+    return out
 
 
 def blank_lone_jump(sizes: dict[str, list]) -> dict[str, list]:
@@ -2429,7 +2470,7 @@ def main():
             # 뒤에서 매장 옵션·형제에게서 다시 채운다.
             if names:
                 names = names[:n] if len(names) >= n else None
-            sizes = blank_lone_jump(sizes)
+            sizes = blank_lone_jump(sleeve_to_hwajang(sizes))
             out[r["source_url"]] = {"brand_slug": k[0], "source": source, "size_names": names, "sizes": sizes}
             src[source] += 1
             (per_brand_html if source in ("html", "browser") else per_brand_ocr)[k[0]] += 1
