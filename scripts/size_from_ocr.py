@@ -972,6 +972,11 @@ def drop_inches(st: dict[str, list]) -> dict[str, list]:
 
 
 def from_ocr(text: str) -> tuple[list[str] | None, dict[str, list[float]]]:
+    names, cols = _from_ocr(text)
+    return names, drop_model_body(text, cols)
+
+
+def _from_ocr(text: str) -> tuple[list[str] | None, dict[str, list[float]]]:
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     for cand in (lines, resegment(text)):
         mat = parse_matrix(cand)
@@ -1014,6 +1019,49 @@ def from_ocr(text: str) -> tuple[list[str] | None, dict[str, list[float]]]:
         if len(tclean) >= 2 and len(tclean) > len(rows_out):
             return trans[0], tclean
     return None, rows_out
+
+
+_MODEL_H = re.compile(r"(?:height|키)\s*\D{0,3}(\d{3})\s*cm", re.I)
+_MODEL_PART = re.compile(r"\b(bust|waist|hip|가슴|허리|엉덩이)\s*\D{0,3}(\d{2,3}(?:\.\d)?)\s*cm", re.I)
+_MODEL_KO = {"bust": "가슴", "waist": "허리", "hip": "엉덩이",
+             "가슴": "가슴", "허리": "허리", "엉덩이": "엉덩이"}
+
+
+def drop_model_body(text: str, st: dict[str, list]) -> dict[str, list]:
+    """모델의 몸 치수를 옷 치수로 적은 것을 뺀다.
+
+    상세 그림에는 사이즈표 아래에 모델 정보가 붙는다:
+
+        ULYANA
+        Height 173cm  Bust 80cm  Waist 62cm  Hip 89cm
+
+    표에 허리 칸이 없는 옷인데 이 62 가 「허리」로 들어갔다(crank, 2026-09-15에 그림을
+    눈으로 대조하다 찾았다 — 표는 Total length 32·Chest 39·Hem 37.5 뿐이었다).
+    62 는 허리 범위 안이고 값도 하나뿐이라 어떤 검사에도 안 걸린다. 그림을 봐야 보인다.
+
+    「키가 적힌 한 줄 안에 가슴/허리/엉덩이가 둘 이상」일 때만 그 줄을 모델 정보로 보고,
+    그 라벨의 값이 **하나뿐이고** 그 줄의 수와 같으면 뺀다. 옷 단면은 몸 둘레의 절반이라
+    이 값들은 애초에 두 배로 적혀 있다. 창고 전수에서 118벌이었다(가슴 54·허리 64).
+    """
+    body: dict[str, set] = {}
+    for ln in (text or "").splitlines():
+        if not _MODEL_H.search(ln):
+            continue
+        ps = _MODEL_PART.findall(ln)
+        if len(ps) >= 2:
+            for w, v in ps:
+                body.setdefault(_MODEL_KO[w.lower()], set()).add(float(v))
+    if not body:
+        return st
+    out = dict(st)
+    for lab, nums in body.items():
+        v = out.get(lab)
+        if not v:
+            continue
+        real = [x for x in v if isinstance(x, (int, float))]
+        if len(real) == 1 and real[0] in nums:
+            del out[lab]
+    return out
 
 
 def clean_ocr(st: dict[str, list]) -> dict[str, list]:
@@ -1081,6 +1129,63 @@ def brand_label_median(crawl_dir) -> dict[tuple[str, str], float]:
 
 
 FLOOR_10 = {"총장", "가슴", "어깨", "허리", "허벅지", "밑위", "뒤밑위", "엉덩이", "암홀", "화장"}
+
+
+def blank_lone_jump(sizes: dict[str, list]) -> dict[str, list]:
+    """한 라벨만 유독 한 칸 크게 뛰면 그 칸을 비운다.
+
+    같은 표 안의 사이즈는 칸마다 1~3cm 씩 고르게 커진다. 한 라벨이 그 걸음의 여섯 배를
+    한 번에 뛰는데 **다른 라벨은 고르다면**, 사이즈가 달라진 게 아니라 그 칸 하나가 틀린 것이다:
+
+        어깨 [58, 61, 63, 65] · 가슴 [56, 60, 62, 64] · 총장 [58, 70, 72, 74]
+                                                            ↑ 68 을 58 로 읽었다
+        총장 [61, 63, 65, 67] · 어깨 [50, 52, 54, 67]
+                                                ↑ 총장의 67 이 새어 들어왔다
+
+    **라벨이 다 같이 뛰면 건드리지 않는다** — 그건 진짜 치수 차이다. S 만 여성 핏인
+    유니섹스 표가 그렇고(사람 지적 2026-09-15: 「s만 동떨어진건 여성 사이즈여서 그런가봐」,
+    어깨 36.5·총장 52 는 실제 여성 치수대였다), 상·하의가 한 표에 든 세트도 그렇다.
+
+    뛰는 자리가 가운데면 앞뒤 어느 쪽이 틀렸는지 알 수 없어(두 무리일 수도 있다) 둔다.
+    맨 앞·맨 뒤만 고친다. 창고 전수에서 처음 61 · 끝 21 · 가운데 23 이었다(2026-09-15).
+    비율로 보는 drop_strays 는 이 꼴을 못 잡는다 — [58,70,72,74]는 1.28배라 통과한다.
+    """
+    idx = {c: [i for i, x in enumerate(v) if isinstance(x, (int, float))] for c, v in sizes.items()}
+    usable = {c: [sizes[c][i] for i in ii] for c, ii in idx.items() if len(ii) >= 3}
+    if len(usable) < 2:
+        return sizes
+    marks: dict[str, list[int]] = {}
+    for c, vs in usable.items():
+        steps = [round(vs[i + 1] - vs[i], 2) for i in range(len(vs) - 1)]
+        if any(st < 0 for st in steps):
+            continue                      # 오르내리는 것은 bad_label 이 본다
+        pos = [st for st in steps if st > 0]
+        if len(pos) < 2:
+            continue
+        m = statistics.median(pos)
+        if m <= 0:
+            continue
+        big = [i for i, st in enumerate(steps) if st >= m * 6 and st >= 8]
+        if big:
+            marks[c] = big
+    if len(marks) != 1:
+        return sizes                      # 아무도 안 뛰거나, 다 같이 뛴다
+    c, big = next(iter(marks.items()))
+    if len(big) != 1:
+        return sizes
+    vs = usable[c]
+    i = big[0]
+    if i == 0:
+        pos_in_vs = 0
+    elif i == len(vs) - 2:
+        pos_in_vs = len(vs) - 1
+    else:
+        return sizes
+    out = dict(sizes)
+    v = list(sizes[c])
+    v[idx[c][pos_in_vs]] = None
+    out[c] = v
+    return out
 
 
 def drop_strays(brand: str, c: str, vs: list[float], med: dict) -> list[float]:
@@ -2295,6 +2400,7 @@ def main():
             # 뒤에서 매장 옵션·형제에게서 다시 채운다.
             if names:
                 names = names[:n] if len(names) >= n else None
+            sizes = blank_lone_jump(sizes)
             out[r["source_url"]] = {"brand_slug": k[0], "source": source, "size_names": names, "sizes": sizes}
             src[source] += 1
             (per_brand_html if source in ("html", "browser") else per_brand_ocr)[k[0]] += 1

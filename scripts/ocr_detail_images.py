@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import collections
 import io
+import base64
 import json
 import os
 import re
@@ -37,7 +38,7 @@ import traceback
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote_to_bytes, urlparse
 
 import requests
 from PIL import Image
@@ -106,6 +107,18 @@ def size_fallbacks(url: str) -> list[str]:
 
 
 def _get_once(url: str, delay: float, cdn_delay: float | None) -> bytes | None:
+    # 주소가 아니라 그림 자체가 글로 박혀 있는 경우 — 「data:image/jpeg;base64,...」.
+    # 매장이 상세컷을 HTML 안에 넣어 두면 detail_images 에 이 꼴로 들어온다. requests 에
+    # 넘기면 예외로 죽어 그 상품은 글을 한 자도 못 얻는다(2026-09-15, 판매중 옷 194벌이
+    # 그래서 사이즈가 비어 있었다 — plac 111·munn 74). 받아 올 것 없이 그 자리에서 푼다.
+    if url.startswith("data:"):
+        head, _, body = url.partition(",")
+        if not body or "image" not in head:
+            return None
+        try:
+            return base64.b64decode(body) if "base64" in head else unquote_to_bytes(body)
+        except Exception:
+            return None
     host = urlparse(url).netloc
     if cdn_delay is not None and is_cdn(host):
         delay = cdn_delay
