@@ -231,7 +231,16 @@ def compile_alias(alias: str) -> re.Pattern:
     if re.fullmatch(r"[a-z0-9 /\-]+", alias.lower()):
         # 복수형 s 를 받는다 — 「Archive Long Sleeves」가 「long sleeve」에 안 걸려
         # 상품명에 sleeve 723 · long 616 이 미등록으로 남아 있었다(2026-09-05).
-        return re.compile(rf"(?<![a-z0-9]){a}s?(?![a-z0-9])")
+        #
+        # 낱말 **뒤에 바로 붙은 숫자**도 받는다. 매장이 혼용률을 붙여 적는다:
+        #     FABRIC POLYESTER95% SPAN5%          (etmon)
+        #     FABRIC: COTTON100%                  (lekim)
+        #     [ Fabric ] POLYESTER100             (mooneed)
+        # 띄어 쓴 「COTTON 100%」는 되는데 붙여 쓴 것만 안 돼서, 소재가 빈 옷 6,275벌 중
+        # 613벌이 **글에 버젓이 적혀 있는데** 비어 있었다(2026-09-15 전수).
+        # 네 글자 미만 별칭은 그대로 둔다 — 짧은 말에 숫자가 붙는 건 대개 딴 것이다.
+        tail = r"(?![a-z])" if len(alias) >= 4 else r"(?![a-z0-9])"
+        return re.compile(rf"(?<![a-z0-9]){a}s?{tail}")
     return re.compile(a)
 
 
