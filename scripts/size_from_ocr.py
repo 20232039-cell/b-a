@@ -65,7 +65,13 @@ NUM = r"\d{1,3}(?:[.,]\d)?"
 # (2026-09-05 실측: 이 한 줄 때문에 23건이 걸려 있었다).
 NUM_CELL = r"\d{1,5}(?:[.,]\d{1,2})?"
 # 사이즈 이름은 느슨하게 — OCR 이 「002」를 「OOM」으로 읽는다(kirsh). 헤더(정식 라벨 ≥2)와 숫자 개수 일치가 지킨다
-SIZE_NAME = r"(?:xxs|xs|s|m|l|xl|xxl|2xl|3xl|free|f|one\s*size|os|[A-Za-z0-9]{1,4})"
+# 「M/40」처럼 글자와 숫자를 빗금으로 잇는 사이즈 이름이 흔한데 네 글자 제한에 걸려
+# 값 줄이 통째로 안 잡혔다 — 머리줄은 멀쩡히 읽히는데 아래 행을 하나도 못 받아
+# 표가 버려진다(2026-09-15, 창고에서 197벌). 숫자끼리의 빗금(「35/19」= 겉/안)은
+# 값 줄을 다듬는 자리에서 이미 앞쪽만 남기고 접히므로 여기 걸릴 일이 없다.
+# OCR 이 사이즈 이름의 첫 글자를 기호로 흘리기도 한다 — 「S/38」이 「$/38」로 온다.
+# 빗금 뒤에 숫자가 오는 자리는 사이즈 이름 말고 올 것이 없어 받아도 안전하다.
+SIZE_NAME = r"(?:[A-Za-z$§₩]{1,3}/\d{1,3}|xxs|xs|s|m|l|xl|xxl|2xl|3xl|free|f|one\s*size|os|[A-Za-z0-9]{1,4})"
 # 세트 상품은 사이즈 자리에 옷 이름이 들어간다 — kirsh 「볼레로 튜브탑 세트」는 표가 둘이고
 # 줄 머리가 「Tube Top」·「Bolero」다(사람이 화면으로 보여 줌, 2026-09-05). 네 글자 제한에
 # 걸려 통째로 버려지고 있었다. 머리줄에 정식 라벨이 둘 이상이고 칸 수가 정확히 맞을 때만
@@ -689,6 +695,69 @@ def parse_matrix(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] |
     return names, sizes
 
 
+_TRANS_NUM = re.compile(r"\d{1,3}(?:[.,]\d{1,2})?")
+
+
+def parse_transposed(lines: list[str]) -> tuple[None, dict[str, list[float]]] | None:
+    """라벨이 세로로 서고 값이 그 오른쪽에 눕는 표.
+
+        총장   | 63  64   65  66
+        어깨   | 485 50   515 53
+        가슴   | 55  575  60  625
+        소매길이 | 62  63   64  65
+
+    사이즈 이름 줄이 없어 머리줄을 찾는 갈래가 전부 헛돈다(parse_label_run 은 라벨이
+    **잇달아** 붙어야 머리줄로 삼는데 여기선 라벨마다 값이 끼어 있다). 2026-09-15 에
+    창고를 훑다 144벌이 이 꼴로 빠져 있는 것을 찾았다 — 값도 라벨도 멀쩡한데 꼴만 낯설었다.
+
+    잘못 걸리지 않도록 네 가지를 함께 요구한다: 라벨이 **줄 맨 앞**일 것 · 그 줄에 수가
+    둘 이상일 것 · 그런 줄이 둘 이상이고 **수의 개수가 모두 같을** 것 · 라벨을 뺀 자리에
+    글자가 거의 없을 것(안내 문장이 걸리지 않게). 사이즈 이름은 알 수 없으니 None 이다.
+    """
+    rows: list[tuple[str, list[str]]] = []
+    for ln in lines:
+        # 줄 전체를 먼저 본다(「총장 | 63 64 65 66」 — 세로선은 라벨과 값 사이의 구분일 뿐).
+        # 그것이 안 되면 세로선으로 쪼갠 칸을 하나씩 본다 — 한 줄에 앞 라벨의 꼬리와 다음
+        # 라벨이 함께 오는 표가 있다(「Length) | Hip 50cm 52cm」, siyazu).
+        cands = [re.sub(r"[|ㅣ]", " ", ln or "")]
+        if "|" in (ln or "") or "ㅣ" in (ln or ""):
+            cands += re.split(r"[|ㅣ]", ln or "")
+        for cand in cands:
+            s_ = re.sub(r"[:：=]", " ", cand).strip()
+            m = LABEL_RX.match(s_)
+            if not m:
+                continue
+            lab = canon_label(m.group(0))
+            if not lab:
+                continue
+            rest = s_[m.end():]
+            # 단위와 구분 기호를 걷어낸 뒤에도 글자가 남으면 표가 아니라 문장이다
+            bare = re.sub(r"[\d.,\s/~\-]|cm|CM|em|inch|in\b", "", rest)
+            if len(bare) > 2:
+                continue
+            vals = _TRANS_NUM.findall(rest)
+            if len(vals) < 2:
+                continue
+            rows.append((lab, vals))
+            break
+    if len(rows) < 2 or len({lab for lab, _ in rows}) < 2:
+        return None
+    n = len(rows[0][1])
+    if n < 2 or any(len(v) != n for _, v in rows):
+        return None
+    out: dict[str, list[float]] = {}
+    for lab, vals in rows:
+        if lab in out:
+            continue
+        # OCR 이 소수점을 자주 흘린다 — 「어깨 485 50 515 53」은 48.5·50·51.5·53 이다.
+        # 그대로 두면 오르내리는 값으로 보여 bad_label 이 줄째로 버린다(실제로 어깨·가슴이
+        # 그래서 빠졌다). 이미 쓰고 있는 값 교정 규칙을 여기서도 태운다.
+        fixed = [fix_value(lab, v) for v in vals]
+        out[lab] = [v if v is not None else float(raw.replace(",", "."))
+                    for v, raw in zip(fixed, vals)]
+    return None, out
+
+
 def parse_label_run(text: str) -> tuple[list[str], dict[str, list[float]]] | None:
     """줄 단위로 먼저 보고, 한 줄에 다 뭉친 글은 통째로 본다.
 
@@ -931,7 +1000,20 @@ def from_ocr(text: str) -> tuple[list[str] | None, dict[str, list[float]]]:
         clean = clean_ocr(run[1])
         if len(clean) >= 2:
             return run[0], clean
-    return None, clean_ocr(parse_rows(text))
+    # 라벨이 세로로 서는 표 — 「총장 | 63 64 65 66」(parse_transposed 주석).
+    # **맨 끝**이다. 앞 차례에 두었더니 더 잘 읽던 갈래를 가로채, 얻은 645벌 옆에서
+    # 251벌이 라벨을 잃었다(siyazu 107·blr 37·andersson-bell 33 — 총장·허리가 통째로
+    # 빠졌다). 이 꼴은 다른 갈래가 하나도 못 읽을 때만 쓸모가 있다(2026-09-15 실측).
+    rows_out = clean_ocr(parse_rows(text))
+    trans = parse_transposed(lines)
+    if trans:
+        tclean = clean_ocr(trans[1])
+        # 라벨을 더 많이 얻는 쪽을 쓴다. 비기면 원래 쓰던 갈래(parse_rows)를 남긴다 —
+        # 무조건 새 갈래를 쓰게 했더니 siyazu 「Length) | Hip 50cm 52cm」처럼 한 줄에
+        # 두 칸이 얹힌 표에서 엉덩이가 빠졌다(2026-09-15, 107벌).
+        if len(tclean) >= 2 and len(tclean) > len(rows_out):
+            return trans[0], tclean
+    return None, rows_out
 
 
 def clean_ocr(st: dict[str, list]) -> dict[str, list]:
