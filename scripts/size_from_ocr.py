@@ -791,8 +791,40 @@ def parse_transposed(lines: list[str]) -> tuple[None, dict[str, list[float]]] | 
     if len(rows) < 2 or len({lab for lab, _ in rows}) < 2:
         return None
     n = len(rows[0][1])
-    if n < 2 or any(len(v) != n for _, v in rows):
+    if n < 2:
         return None
+    if any(len(v) != n for _, v in rows):
+        # 칸 수가 어긋나는 줄이 있다. 예전에는 표를 통째로 버렸는데, OCR 이 칸 하나를 글자로
+        # 흘리면(「허리 | 385 39.75 Al 42.25 …」의 Al 은 41) 그 줄만 한 칸 모자라게 잡혀
+        # 아홉 줄짜리 표가 두 줄 때문에 날아간다(2026-09-16, 한 매장 87벌).
+        # 그래서 가장 흔한 칸 수를 기준 삼아 어긋난 줄만 뺀다 — 다만 **남는 줄의 값이 모두
+        # 그 라벨의 정상 범위 안일 때만**. 이 조건이 없으면 OCR 이 라벨을 흩뿌려 놓은 난장판
+        # (「가슴둘레 소매통」 같은 조각들)이 가짜 표로 엮여, 가슴 119·밑단 122 처럼 단면 자리에
+        # 둘레 값이 들어앉는다(같은 날 실측: 한 매장 14벌이 그 꼴로 새로 생겼다).
+        # 칸 수가 처음부터 다 같은 표는 이 자리에 오지 않으므로 잘 읽던 표는 그대로다.
+        cnt = Counter(len(v) for _, v in rows)
+        n = max(cnt, key=lambda k: (cnt[k], k))
+        if n < 2 or cnt[n] < 2:
+            return None
+        rows = [(lab, v) for lab, v in rows if len(v) == n]
+        if len({lab for lab, _ in rows}) < 2:
+            return None
+        def _sane(lab, vals):
+            lo, hi = RANGES.get(lab, (0, 10 ** 6))
+            for raw in vals:
+                x = fix_value(lab, raw)
+                if x is None:
+                    try:
+                        x = float(str(raw).replace(",", "."))
+                    except ValueError:
+                        return False
+                if not (lo <= x <= hi):
+                    return False
+            return True
+
+        rows = [(lab, v) for lab, v in rows if _sane(lab, v)]
+        if len({lab for lab, _ in rows}) < 2:
+            return None
     out: dict[str, list[float]] = {}
     for lab, vals in rows:
         if lab in out:
