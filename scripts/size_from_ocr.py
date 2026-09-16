@@ -341,6 +341,47 @@ def join_multiword(line: str) -> str:
     return _MULTIWORD_RX.sub(lambda m: re.sub(r"\s+", "", m.group(0)), line)
 
 
+# 표 머리줄의 칸 번호 표식. 매장이 도식에 ①②③ 을 달고 머리줄에도 같은 번호를 붙이는데,
+# OCR 은 그 동그라미를 「0)」·「@」·「(3)」·「6)」·「©」 따위로 흘려 쓴다. 자리를 세는
+# 갈래(parse_slots)는 토막 수로 값과 짝을 짓는 터라, 이 부스러기 하나하나가 가짜 칸이
+# 되어 머리줄 15칸 대 값 8칸이 된다 — 표가 멀쩡한데 통째로 버려진다
+# (ronron 「Size 0) 머깨 @ 가슴 (3) 밑단 _ @) 팔길이 6) 팔통 @ 암홀」, 창고에서 661벌).
+#
+# 그런데 이것을 읽기 첫 판에 넣으면 **이미 잘 읽던 표가 움직인다**. 머리줄에서 칸 하나가
+# 사라지면 값 줄과의 칸 수 관계가 바뀌어, 사이즈 이름 칸을 기준으로 한 칸씩 밀린 자리에
+# 값이 적힌다(2026-09-16 실측: acover 「(cm) 총장 어깨너비 가슴단면 소매길이 / FREE 51 24 34」
+# 이 총장 51·어깨 24 대신 어깨 51·소매길이 34 가 됐다 — 없는 치수보다 틀린 치수가 나쁘다).
+# 그래서 **아무 갈래도 표를 못 얻었을 때만** 표식을 떼고 한 번 더 읽는다. 이미 읽히는
+# 표는 손도 대지 않으므로 이 고침이 무엇을 망가뜨릴 여지가 없다.
+#
+# 맨숫자(「3」)는 떼지 않는다. 아동복 표의 연령·신장 칸이 그 꼴이라 함께 떼면 자리가 밀린다.
+_MARK_TOK = re.compile(r"^(?![0-9]+$)(?:[_.·•*=]|[(\[（]?[0-9①-⑳⓪@©®]{1,2}[)\]）]?)$")
+# 같은 되물음에서 단위 칸의 오독도 함께 뗀다 — OCR 이 「cm」을 em·cem·crn 으로 흘려 쓰고
+# (「(em)」), 「사이즈」와 붙여 쓴 것(「Sizecm」·「SIZE(CM)」)도 정식 단위 칸으로 안 잡힌다.
+# 창고 머리줄 916개에 (em) 44 · Sizecm 40 · SIZE(CM) 24. 이것도 첫 판에 넣으면 잘 읽던
+# 표가 밀리므로(위 주석) 되물음 안에서만 뗀다.
+_FAKE_UNIT = re.compile(r"^(?:[(\[]?(?:em|cem|crn)[)\]]?|(?:size|사이즈|단위)\s*[(\[]?(?:cm|em|cem|crn)[)\]]?)$", re.I)
+
+
+def strip_header_markers(text: str) -> str:
+    """머리줄처럼 보이는 줄에서만 칸 번호 표식을 뺀다.
+
+    값 줄은 건드리지 않는다 — 값 줄의 「-」는 「이 칸은 비었다」는 뜻이라 빼면 자리가 밀린다.
+    """
+    out, hit = [], False
+    for ln in text.splitlines():
+        labs = {ALIAS.get(re.sub(r"\s+", "", m.group(0)).lower()) for m in LABEL_RX.finditer(ln)}
+        labs.discard(None)
+        if len(labs) >= 2:
+            toks = [t for t in ln.split()
+                    if t and not _MARK_TOK.match(t) and not _FAKE_UNIT.match(t)]
+            if len(toks) != len(ln.split()):
+                hit = True
+            ln = " ".join(toks)
+        out.append(ln)
+    return "\n".join(out) if hit else text
+
+
 def parse_slots(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] | None:
     """머리줄의 칸 「자리」로 값을 맞춘다 — 라벨 하나가 깨져도 나머지가 산다.
 
@@ -980,6 +1021,13 @@ def drop_inches(st: dict[str, list]) -> dict[str, list]:
 
 def from_ocr(text: str) -> tuple[list[str] | None, dict[str, list[float]]]:
     names, cols = _from_ocr(text)
+    if not cols:
+        # 하나도 못 얻었을 때만 — 머리줄의 칸 번호 표식을 떼고 한 번 더(strip_header_markers 주석)
+        stripped = strip_header_markers(text)
+        if stripped is not text:
+            n2, c2 = _from_ocr(stripped)
+            if c2:
+                names, cols = n2, c2
     return names, drop_model_body(text, cols)
 
 
