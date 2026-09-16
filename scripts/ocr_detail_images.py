@@ -970,13 +970,36 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
             if read_n.get(no, 0) < min(max_images, avail):
                 done.discard(no)
 
+    # 매장 공용 안내표는 「표가 있다」로 치지 않는다. 재생성 쪽(size_from_ocr.shop_wide_tables)은
+    # 같은 표가 **열 벌 이상 × 품목 셋 이상** 나오면 매장 공용으로 보고 버리는데, 여기 되읽기
+    # 쪽에서는 그냥 「표가 있다」고 보아 대상에서 빼고 있었다. 그래서 그 상품들은 사이즈도
+    # 안 생기고 그림도 다시 안 읽는 자리에 갇힌다 — 두 자리의 잣대가 달라서 생긴 사각지대다
+    # (2026-09-16 실측 462벌. 한 매장은 499벌 전부가 똑같은 한 줄짜리 표였다).
+    # 잣대를 재생성 쪽과 똑같이 맞춘다.
+    _st_seen: dict[str, list] = {}
+    for no, d in latest.items():
+        st = d.get("size_table")
+        if not (isinstance(st, dict) and st):
+            continue
+        key = json.dumps(st, sort_keys=True, ensure_ascii=False)
+        e = _st_seen.setdefault(key, [0, set()])
+        e[0] += 1
+        c = cats.get((slug, int(no)), "")
+        if c:
+            e[1].add(c)
+    shop_wide_st = {k for k, (n, cs) in _st_seen.items() if n >= 10 and len(cs) >= 3}
+
     todo = []
     for no, d in sorted(latest.items(), key=lambda kv: int(kv[0])):
         if no in done or (d.get("price") or 0) <= 1000 or not images_of(d):
             continue
         if select == "no-size":
             # 사이즈 표 없는 옷만 — 설명 길이와 무관. 사이즈 수집률을 올리는 2차 OCR(사람 결정 2026-09-03)
-            if d.get("size_table") or cats.get((slug, int(no)), "") not in GARMENTS:
+            st = d.get("size_table")
+            if isinstance(st, dict) and st and \
+                    json.dumps(st, sort_keys=True, ensure_ascii=False) in shop_wide_st:
+                st = None          # 매장 공용 안내표 — 재생성 쪽도 버린다
+            if st or cats.get((slug, int(no)), "") not in GARMENTS:
                 continue
         elif select == "ocr":
             if d.get("source_url") not in ocr_sized or cats.get((slug, int(no)), "") not in GARMENTS:
