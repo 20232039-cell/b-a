@@ -159,6 +159,34 @@ jobs:
         uses: ./.github/actions/data-repo
         with:
           token: ${{ secrets.DATA_TOKEN }}
+      # 판독기·태거는 **이 저장소의** scripts 다(data-repo 액션이 work/scripts 를 덮어쓴다).
+      # workflow_dispatch 는 그 scripts 를 **띄운 시각의 SHA 로 못박는다**. 그래서 긴 판이
+      # 도는 동안 판독기를 고쳐 밀어도 그 판은 옛 코드로 재생성하고, 밖에서는 티가 안 난다.
+      # 2026-09-16 에 그 꼴을 겪었다 — 254잡 여섯 시간을 읽고 collect 가 옛 판독기로 돌아,
+      # 그날 밤 고친 넷(화장 1,638벌 · 튀는 칸 218 · JSONL · 소재)이 하나도 안 들어갔다.
+      # 로그 한 줄로는 아무도 안 보므로 job summary 에도 적는다.
+      - name: 스크립트가 최신인지 — 옛 코드로 재생성하면 조용히 틀린다
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: |
+          git fetch -q origin "${{ github.event.repository.default_branch }}"
+          head=$(git rev-parse FETCH_HEAD)
+          mine="${{ github.sha }}"
+          if [ "$head" = "$mine" ]; then
+            echo "스크립트 최신 — ${mine:0:7}"
+            exit 0
+          fi
+          n=$(git rev-list --count "$mine..$head" 2>/dev/null || echo "?")
+          {
+            echo "### ⚠ 옛 스크립트로 재생성했다"
+            echo ""
+            echo "이 판은 \`${mine:0:7}\` 로 못박혀 있는데 기본 가지는 \`${head:0:7}\` 이다 — **커밋 $n 개 뒤처짐**."
+            echo ""
+            git log --oneline "$mine..$head" 2>/dev/null | sed 's/^/- /'
+            echo ""
+            echo "판독기를 고쳤다면 **현재 기본 가지로 한 판 더 띄워 재생성**해야 반영된다."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::warning::스크립트가 $n 커밋 뒤처진 채로 재생성한다 (${mine:0:7} < ${head:0:7})"
       - uses: actions/download-artifact@v4
         with:
           pattern: ocr-*
