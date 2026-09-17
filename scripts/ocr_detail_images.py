@@ -1352,7 +1352,12 @@ def main():
                     help="그림을 받지 않고 「무엇을 읽을지」만 세어 Actions matrix(JSON)를 낸다")
     ap.add_argument("--per-shard", type=int, default=250, help="--plan: 조각 하나가 맡을 그림 수 목표")
     ap.add_argument("--max-shards", type=int, default=12, help="--plan: 브랜드당 조각 수 상한")
-    ap.add_argument("--max-jobs", type=int, default=256,
+    # 2026-09-17: 269조각짜리 정기 판 하나가 **끝나지도 죽지도 않은 채** 아홉 시간을 버티며
+    # concurrency 자물쇠를 쥐고 있었다. 그 뒤로 띄운 OCR 판은 전부 조각 0개로 멈춰 있었고
+    # (취소해도 다시 in_progress 로 돌아왔다), 사람이 웹에서 강제 취소를 해도 안 죽었다.
+    # 덩치가 클수록 이 꼴이 나기 쉽고, 한 번 나면 그 자물쇠를 쓰는 판이 전부 막힌다.
+    # 조각은 60개까지만 낸다 — 조각당 그림이 늘어 한 조각이 길어질 뿐, 총 시간은 비슷하다.
+    ap.add_argument("--max-jobs", type=int, default=60,
                     help="--plan: matrix 잡 수 상한 (GitHub 은 256잡을 넘기면 잡을 아예 안 만든다)")
     ap.add_argument("--allow-empty", action="store_true", help="--plan: 대상이 0이어도 죽지 않는다")
     ap.add_argument("--select", default="short", choices=["short", "all", "no-size", "ocr", "gaps", "bad-size", "capped", "thin-table"], help="short=설명 짧은 것(기본) · all=전부 · no-size=사이즈 표 없는 옷 · ocr=사이즈를 그림에서 읽은 옷 다시 · gaps=사이즈·소재·색·디테일 중 하나라도 빈 옷 · bad-size=사이즈가 커지는데 값이 작아지는 표만 다시 · capped=옛 6,000자 상한에 잘린 기록만 다시 · thin-table=표 칸 수가 매장 사이즈 수보다 적은 옷")

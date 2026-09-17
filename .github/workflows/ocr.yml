@@ -48,8 +48,12 @@ env:
 permissions:
   contents: read
 
+# 자물쇠를 **부르는 쪽**으로 가른다. 2026-09-17 에 정기 판(fill-gaps)의 나선 OCR 이 끝나지도
+# 죽지도 않은 채 아홉 시간을 버티며 자물쇠를 쥐었고, 그동안 손으로 띄운 판은 조각 0개로
+# 멈춰 있었다(취소해도 다시 in_progress 로 돌아왔다). 하나가 얼어도 다른 쪽은 돌게 한다.
+# 둘이 겹쳐 돌아도 collect 의 푸시는 rebase 후 3회 재시도라 견딘다.
 concurrency:
-  group: ocr-${{ github.ref }}
+  group: ocr-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
