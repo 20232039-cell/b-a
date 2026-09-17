@@ -651,6 +651,75 @@ def add_cell_grid(joined: str, data: bytes, orig: bytes) -> str:
     return (grid + "\n" + joined) if grid else joined
 
 
+def erase_rules(im, dark: int = 110, row_frac: float = 0.30, col_frac: float = 0.18):
+    """표의 괘선을 흰색으로 지운다. (지운 그림, 지운 줄 수)를 돌려준다.
+
+    **괘선이 tesseract 를 통째로 막는다**(2026-09-17 실측). 어느 매장의 사이즈표를
+    사람 눈으로는 또렷이 읽는데 글자가 하나도 안 나왔다. 칸 하나만 오려 내면
+    「78cm」이 단번에 읽힌다 — 세로 괘선이 줄 찾기를 망가뜨려 psm 6 이 줄을 통째로
+    버리는 것이다:
+
+        표 그대로            → 「OUR SHAPE」 한 줄이 전부
+        칸 하나만 오려서     → 「78cm」
+        괘선만 지우고 통째로 → 「A (BODY LENGTH) 78cm 80cm / B (SHOULDER) 52cm …」
+
+    한 줄의 「어두운 비율」은 im.resize((1, H)) 로 구한다 — 줄 평균이 한 픽셀이 된다.
+    넘파이 없이 PIL 만으로 하려는 것이다(러너에 넘파이를 안 깐다). 괘선은 폭 1~3px 라
+    그 둘레까지 함께 지우고, 글자 획은 그보다 두꺼워 살아남는다.
+    """
+    from PIL import Image, ImageDraw
+    w, h = im.size
+    bw = im.point(lambda p: 0 if p < dark else 255)
+    rows = list(bw.resize((1, h), Image.BOX).getdata())
+    cols = list(bw.resize((w, 1), Image.BOX).getdata())
+    d = ImageDraw.Draw(im)
+    nr = nc = 0
+    for y, v in enumerate(rows):
+        if (255 - v) / 255 > row_frac:
+            d.rectangle([0, y - 1, w, y + 1], fill=255)
+            nr += 1
+    for x, v in enumerate(cols):
+        if (255 - v) / 255 > col_frac:
+            d.rectangle([x - 1, 0, x + 1, h], fill=255)
+            nc += 1
+    return im, nr, nc
+
+
+def ocr_deruled(data: bytes) -> str:
+    """괘선을 지우고 한 번 더 읽는다. 괘선이 없는 그림이면 아무것도 안 한다."""
+    try:
+        from PIL import Image as _I
+        import io as _io
+        im = _I.open(_io.BytesIO(data)).convert("L")
+        cleaned, nr, nc = erase_rules(im.copy())
+        # **세로 괘선**이 있어야 표다. 가로로 어두운 띠는 사진에도 흔해서 가로만 세면
+        # 그림 열에 여덟 반이 걸린다(2026-09-17 실측: 40장 가운데 34장). 세로로 길게
+        # 이어진 어두운 줄은 사진에 거의 없다.
+        if nc < 2 or nr < 3:
+            return ""
+        if cleaned.width < MIN_W:
+            cleaned = cleaned.resize((cleaned.width * 2, cleaned.height * 2), _I.LANCZOS)
+        buf = _io.BytesIO()
+        cleaned.save(buf, format="PNG")
+    except Exception:
+        return ""
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=True) as f:
+        f.write(buf.getvalue())
+        f.flush()
+        try:
+            out = subprocess.run(
+                ["tesseract", f.name, "-", "-l", "kor+eng", "--psm", "6"],
+                capture_output=True, text=True, timeout=120,
+                env={**os.environ, "OMP_THREAD_LIMIT": "1"},
+            ).stdout
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return ""
+    txt = re.sub(r"[ \t]+", " ", out)
+    txt = re.sub(r"\n{2,}", "\n", txt).strip()
+    lines = [ln for ln in txt.splitlines() if len(re.sub(r"[^가-힣A-Za-z0-9]", "", ln)) >= 2]
+    return "\n".join(lines)
+
+
 def ocr_bytes(data: bytes) -> str:
     """tesseract 로 한 장. --psm 6(균일 블록)이 상품 상세의 세로 긴 이미지에 가장 안정적이었다."""
     orig = data
@@ -672,7 +741,7 @@ def ocr_bytes(data: bytes) -> str:
             words = re.findall(r"[가-힣]{2,}|[A-Za-z]{3,}", joined)
             if len(words) < 3:
                 return ""
-            return add_cell_grid(joined, data, orig)
+            return _with_deruled(add_cell_grid(joined, data, orig), data)
     except Exception:
         pass
     with tempfile.NamedTemporaryFile(suffix=".img", delete=True) as f:
@@ -706,7 +775,24 @@ def ocr_bytes(data: bytes) -> str:
     words = re.findall(r"[가-힣]{2,}|[A-Za-z]{3,}", joined)
     if len(words) < 3:
         return ""
-    return add_cell_grid(joined, data, orig)
+    return _with_deruled(add_cell_grid(joined, data, orig), data)
+
+
+def _with_deruled(joined: str, data: bytes) -> str:
+    """표가 안 잡혔을 때만 괘선을 지우고 한 번 더 읽어 **앞에 붙인다**.
+
+    이미 표가 잡힌 그림은 건드리지 않으므로 망가뜨릴 여지가 구조적으로 없다.
+    붙이기만 하고 원문은 그대로 두는 것도 같은 이유다 — 파서가 출처를 골라 쓴다.
+    """
+    try:
+        if _has_size_table(joined):
+            return joined
+        extra = ocr_deruled(data)
+        if extra and _has_size_table(extra):
+            return extra + "\n" + joined
+    except Exception:
+        pass
+    return joined
 
 
 def _has_size_table(text: str) -> bool:
@@ -754,7 +840,12 @@ def merge_extra_size_images(slug: str, latest: dict[int, dict]) -> int:
             d = latest.get(b.get("product_no"))
             if not urls or not d:
                 continue
-            have = list(d.get("detail_images") or [])
+            # **갤러리를 지우지 않는다.** images_of 는 detail_images 가 비었을 때만 갤러리를
+            # 보는데, 여기서 detail_images 에 새 그림만 넣으면 그 상품이 읽을 그림이 갑자기
+            # 한 장으로 줄어든다. 그러면 「이미 여섯 장 읽었으니 다시 안 읽어도 된다」가 되어
+            # 되읽기 대상에서 빠진다 — 2026-09-17 판 41 에서 그 일이 났다(cayl·99-is·munn·
+            # juntae-kim 이 한 벌도 안 움직였다. 이 매장들은 상세 그림이 없어 갤러리를 읽는다).
+            have = list(d.get("detail_images") or []) or list(d.get("gallery") or [])
             d["detail_images"] = urls + [u for u in have if u not in urls]
             n += 1
     return n
