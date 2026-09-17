@@ -734,8 +734,9 @@ def merge_extra_size_images(slug: str, latest: dict[int, dict]) -> int:
     """
     n = 0
     # sizeguide: 카페24 사이즈가이드 창을 주소로 받아 둔 것(fetch_sizeguide.py)
+    # pagesize: 상품 페이지의 사이즈 머리말 뒤에서 거둔 것(같은 스크립트, --source page)
     # browser: 브라우저로 토글을 눌러 받아 둔 것(browser_collect.py)
-    for sub in ("sizeguide", "browser"):
+    for sub in ("sizeguide", "pagesize", "browser"):
         bp = CRAWL_DIR / sub / f"{slug}.jsonl"
         if not bp.exists():
             continue

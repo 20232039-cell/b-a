@@ -37,15 +37,21 @@ import requests
 ROOT = Path(__file__).resolve().parent.parent
 DATA, CRAWL = ROOT / "data", ROOT / "data" / "crawl"
 OUT = CRAWL / "sizeguide"
+OUT_PAGE = CRAWL / "pagesize"
 HDR = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
                      "(KHTML, like Gecko) Chrome/128.0 Safari/537.36"}
 GARMENTS = {"Tops", "Pants", "Outerwear", "Knitwear", "Shirts", "Denim",
             "Skirts", "Dresses", "Suiting"}
 IMG = re.compile(r'<img[^>]+?(?:ec-data-src|data-src|src)="([^"]+)"', re.I)
+# 상품 페이지 안에서 사이즈표가 붙는 머리말. 아코디언·탭이라도 내용은 대개 서버 HTML 에
+# 있고 CSS 로 숨겨져 있을 뿐이다 — 그러면 브라우저가 필요 없다(2026-09-17 실측: 한 매장의
+# SIZE CHART 칸이 그랬다. 8벌 중 7벌에 그림이 있었다).
+HEAD = re.compile(r"size\s*chart|size\s*guide|size\s*info|사이즈\s*차트|사이즈\s*가이드"
+                  r"|사이즈\s*정보|사이즈\s*표|measurement|실측|size\s*&?\s*fit", re.I)
 # 읽을 값어치가 없는 그림 — 아이콘·꾸밈, 그리고 남의 집 추적 화소(빈 1×1 이라 OCR 낭비다).
 SKIP = re.compile(r"\.(?:svg|gif|ico)(?:\?|$)|/icon|/btn|blank\.|spacer|1x1"
                   r"|facebook\.com|google|doubleclick|analytics|criteo|kakao"
-                  r"|naver\.com/|daum|tiktok|pinterest|channel\.io|cafe24img\.com/pc/", re.I)
+                  r"|naver\.com/|daum|tiktok|pinterest|channel\.io|icons8|bidswitch|cre\.ma|cafe24img\.com/pc/", re.I)
 
 
 def images_in(html: str, base: str) -> list[str]:
@@ -58,6 +64,28 @@ def images_in(html: str, base: str) -> list[str]:
         if full not in out:
             out.append(full)
     return out
+
+
+def images_after_heading(html: str, base: str) -> list[str]:
+    """사이즈 머리말 바로 뒤에 오는 그림. 머리말마다 2,500자까지만 본다 — 더 멀리 보면
+    다음 칸(배송·교환 안내)의 그림까지 딸려 온다."""
+    out: list[str] = []
+    for m in HEAD.finditer(html):
+        seg = html[m.end():m.end() + 2500]
+        n = 0
+        for im in IMG.finditer(seg):
+            u = im.group(1).strip()
+            # 카페24 갤러리 썸네일(/product/big|medium|small/)은 상품 사진이다. 이미 갤러리로
+            # 들어와 있고 사이즈표가 아니라서, 읽을 목록 맨 앞자리를 먹으면 손해다.
+            if not u or SKIP.search(u) or re.search(r"/product/(?:big|medium|small|tiny)/", u, re.I):
+                continue
+            full = urljoin(base, u)
+            if full not in out:
+                out.append(full)
+            n += 1
+            if n >= 3:        # 머리말 하나에 셋까지 — 그 뒤는 다음 칸의 그림일 공산이 크다
+                break
+    return out[:6]
 
 
 def load_targets(brand: str, only_missing: bool, cats: dict, sized: set) -> list[dict]:
@@ -83,15 +111,18 @@ def load_targets(brand: str, only_missing: bool, cats: dict, sized: set) -> list
     return out
 
 
-def fetch_brand(brand: str, recs: list[dict], delay: float, workers: int, limit: int) -> dict:
+def fetch_brand(brand: str, recs: list[dict], delay: float, workers: int, limit: int,
+                source: str = "sizeguide") -> dict:
+    """source=sizeguide: 카페24 사이즈가이드 창 · source=page: 상품 페이지의 사이즈 머리말 뒤"""
     if not recs:
         return {"brand": brand, "products": 0, "with_img": 0, "images": 0, "shop_wide": 0}
     m = re.match(r"(https?://[^/]+)", recs[0]["source_url"])
     if not m:
         return {"brand": brand, "products": 0, "with_img": 0, "images": 0, "shop_wide": 0}
     base = m.group(1)
+    outdir = OUT if source == "sizeguide" else OUT_PAGE
     done: set[int] = set()
-    dst = OUT / f"{brand}.jsonl"
+    dst = outdir / f"{brand}.jsonl"
     if dst.exists():
         for l in dst.read_text(encoding="utf-8").splitlines():
             if l.strip():
@@ -104,13 +135,17 @@ def fetch_brand(brand: str, recs: list[dict], delay: float, workers: int, limit:
     sess.headers.update(HDR)
 
     def one(d):
-        url = f"{base}/product/sizeguide.html?product_no={d['product_no']}"
+        if source == "sizeguide":
+            url = f"{base}/product/sizeguide.html?product_no={d['product_no']}"
+        else:
+            url = d["source_url"]
         for attempt in range(3):
             try:
-                r = sess.get(url, timeout=20)
+                r = sess.get(url, timeout=25)
                 if r.status_code != 200:
                     return None
-                return d, images_in(r.text, base)
+                return d, (images_in(r.text, base) if source == "sizeguide"
+                           else images_after_heading(r.text, base))
             except Exception:
                 time.sleep(1.5 * (attempt + 1))
         return None
@@ -129,7 +164,7 @@ def fetch_brand(brand: str, recs: list[dict], delay: float, workers: int, limit:
     floor = max(10, len(got) * 0.5)
     shop_wide = {u for u, c in use.items() if c >= floor}
 
-    OUT.mkdir(parents=True, exist_ok=True)
+    outdir.mkdir(parents=True, exist_ok=True)
     n_img = 0
     with dst.open("a", encoding="utf-8") as fh:
         for d, urls in got:
@@ -155,6 +190,8 @@ def main():
     ap.add_argument("--limit", type=int, default=100000, help="매장마다 최대 상품 수")
     ap.add_argument("--delay", type=float, default=0.05)
     ap.add_argument("--workers", type=int, default=6)
+    ap.add_argument("--source", choices=["sizeguide", "page", "both"], default="sizeguide",
+                    help="sizeguide: 카페24 사이즈가이드 창 · page: 상품 페이지의 사이즈 머리말 뒤")
     args = ap.parse_args()
 
     cats = {}
@@ -188,17 +225,20 @@ def main():
     else:
         ap.error("--brands 나 --all-missing 가운데 하나는 있어야 한다")
 
+    sources = ["sizeguide", "page"] if args.source == "both" else [args.source]
     tot = collections.Counter()
     for b in brands:
         recs = load_targets(b, args.only_missing, cats, sized)
-        r = fetch_brand(b, recs, args.delay, args.workers, args.limit)
-        if r["products"]:
-            print(f"  {b:26s} {r['products']:5d}벌 물어봄 · 그림 나온 상품 {r['with_img']:5d}"
-                  f" · 그림 {r['images']:5d}장"
-                  + (f" · 공용으로 버린 그림 {r['shop_wide']}종" if r["shop_wide"] else ""),
-                  flush=True)
-        for k in ("products", "with_img", "images"):
-            tot[k] += r[k]
+        for src in sources:
+            r = fetch_brand(b, recs, args.delay, args.workers, args.limit, src)
+            if r["products"]:
+                tag = "사이즈가이드 창" if src == "sizeguide" else "머리말 뒤"
+                print(f"  {b:26s} [{tag}] {r['products']:5d}벌 물어봄 · 그림 나온 상품 "
+                      f"{r['with_img']:5d} · 그림 {r['images']:5d}장"
+                      + (f" · 공용으로 버린 그림 {r['shop_wide']}종" if r["shop_wide"] else ""),
+                      flush=True)
+            for k in ("products", "with_img", "images"):
+                tot[k] += r[k]
     print(f"\n합: {tot['products']}벌 물어봄 · 그림 나온 상품 {tot['with_img']}벌 · 그림 {tot['images']}장")
 
 

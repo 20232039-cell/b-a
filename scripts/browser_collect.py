@@ -30,10 +30,18 @@ SIZE_WORD = re.compile(r"어깨|가슴|총장|소매|밑단|허리|허벅지|밑
 PHOTO = re.compile(r"/web/product/|/detailimg/|/product/.*\.(?:jpg|jpeg|png|webp)", re.I)
 # 눌러서 나타난 그림 가운데 읽을 만한 것. 아이콘·꾸밈 그림에 OCR 예산을 쓰지 않는다.
 _SKIP_IMG = re.compile(r"\.(?:svg|gif|ico)(?:\?|$)|/icon|/btn|/banner|blank\.|spacer|"
-                       r"1x1|loading|placeholder|data:image", re.I)
+                       r"1x1|loading|placeholder|data:image|"
+                       # 광고·추적 화소와 외부 리뷰 위젯의 견본 그림. 「눌러서 나온 그림」에
+                       # 섞여 들어왔다(2026-09-17 실측: 한 매장 22장 중 사이즈표 0장).
+                       r"facebook\.com|google|doubleclick|analytics|criteo|kakao|"
+                       r"naver\.com/|daum|tiktok|pinterest|channel\.io|bidswitch|"
+                       r"cre\.ma|icons8|/sync\?|cafe24img\.com/pc/", re.I)
 
 
-def keep_size_image(u: str) -> bool:
+def keep_size_image(u: str, page_host: str = "") -> bool:
+    """남의 집이라고 무조건 버리면 안 된다 — 사이즈표를 다른 업체 그림 창고에 올려 두는
+    매장이 있다(2026-09-17 실측: 한 매장은 8벌 모두 바깥 호스트였다). 그래서 집이 아니라
+    **무엇인지**로 거른다: 광고·추적·위젯 견본은 위 목록으로 떨구고, 나머지는 받는다."""
     return bool(u) and not u.startswith("data:") and not _SKIP_IMG.search(u)
 
 
