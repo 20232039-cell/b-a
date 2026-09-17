@@ -131,11 +131,36 @@ TOGGLE_WORDS = (
     r"item\s*details?", r"상세\s*정보", r"상세\s*보기", r"details?", r"spec",
 )
 _TOGGLE_RX = [re.compile(w, re.I) for w in TOGGLE_WORDS]
-# 누를 만한 그릇. 버튼·링크·탭만 보면 놓친다 — 매장 토글은 dt·th 이거나 class 에
-# toggle·accordion·guide 가 든 div 인 경우가 많다.
-CLICK_SEL = ("a, button, summary, [role=tab], [role=button], [onclick], dt, th, "
-             "[class*=toggle], [class*=accordion], [class*=tab], [class*=guide], "
-             "[class*=sizeguide], [class*=size_guide], [class*=size-guide]")
+# 무엇을 「누를 수 있는 것」으로 볼까. 버튼·링크·탭만 보면 놓친다 — 매장 토글은 dt·th·li
+# 이거나 class 에 toggle·accordion 이 든 div 인 경우가 많고, 어떤 것은 태그로는 아무 표시가
+# 없고 **손가락 커서**로만 「눌러도 된다」고 말한다(2026-09-17 실측: 한 매장의 「Size Info」가
+# li.menu-title 이었다). 그래서 커서까지 본다. 브라우저 안에서 한 번에 훑고 표를 붙여 둔다.
+_FIND_TOGGLES = """(pats) => {
+  const rx = pats.map(p => new RegExp(p, 'i'));
+  let n = 0;
+  for (const e of document.querySelectorAll('*')) {
+    if (n > 60) break;
+    delete e.dataset.ccrToggle;
+    const t = (e.innerText || e.textContent || '').replace(/\\s+/g, ' ').trim();
+    // 글이 길면 토글이 아니라 그 안의 본문이다. 안내 「문단」을 눌러 봐야 아무 일도
+    // 안 일어나고 예산만 먹는다(2026-09-05 그 매장의 「…버튼을 클릭하시면」 문단).
+    if (!t || t.length > 40) continue;
+    let pri = -1;
+    for (let i = 0; i < rx.length; i++) if (rx[i].test(t)) { pri = i; break; }
+    if (pri < 0) continue;
+    const tag = e.tagName.toLowerCase();
+    const cls = String(e.className || '');
+    const clickable =
+      ['a', 'button', 'summary', 'dt', 'th', 'label'].includes(tag)
+      || e.hasAttribute('onclick') || e.hasAttribute('role')
+      || /toggle|accordion|accodi|tab|guide|btn|menu-title/i.test(cls)
+      || getComputedStyle(e).cursor === 'pointer';
+    if (!clickable) continue;
+    e.dataset.ccrToggle = String(pri);
+    n++;
+  }
+  return n;
+}"""
 
 
 def _img_srcs(page) -> list[str]:
@@ -162,24 +187,33 @@ def _toggle_candidates(page) -> list[tuple[object, str]]:
     found: list[tuple[int, object, str]] = []
     for fr in list(page.frames):
         try:
-            els = fr.query_selector_all(CLICK_SEL)
+            fr.evaluate(_FIND_TOGGLES, list(TOGGLE_WORDS))
+            els = fr.query_selector_all("[data-ccr-toggle]")
         except Exception:
             continue
-        for el in els[:400]:
+        for el in els:
             try:
+                pri = int(el.get_attribute("data-ccr-toggle") or "99")
                 t = " ".join((el.inner_text() or "").split())
             except Exception:
                 continue
-            # 글이 길면 토글이 아니라 그 안의 본문이다. 안내 「문단」을 눌러 봐야
-            # 아무 일도 없고, 예산만 먹는다(2026-09-05 badblood).
-            if not t or len(t) > 40:
-                continue
-            for i, rx in enumerate(_TOGGLE_RX):
-                if rx.search(t):
-                    found.append((i, el, t.lower()))
-                    break
+            if t:
+                found.append((pri, el, t.lower()))
     found.sort(key=lambda x: x[0])
     return [(el, key) for _, el, key in found]
+
+
+
+def _scroll_through(page) -> None:
+    """끝까지 내렸다 올린다 — 게으른 그림·표·토글이 그려지게."""
+    try:
+        for _ in range(6):
+            page.evaluate("window.scrollBy(0, document.body.scrollHeight/5)")
+            page.wait_for_timeout(450)
+        page.evaluate("window.scrollTo(0, 0)")
+        page.wait_for_timeout(300)
+    except Exception:
+        pass
 
 
 def open_details(page) -> list[str]:
@@ -194,9 +228,23 @@ def open_details(page) -> list[str]:
     링크·탭만 눌렀으며 (3) **열린 뒤에 나타난 그림을 담지 않았다**. 표가 그림으로 된
     매장은 눌러도 소용이 없었던 이유가 이 셋이다.
     """
-    before = set(_img_srcs(page))
     url0 = page.url
+    # 먼저 한 번 끝까지 내린다 — 토글 자체가 게으르게 그려지는 매장이 있다(2026-09-17
+    # 실측: 한 매장의 「Size Info」는 굴리기 전에는 문서에 아예 없었다). 누를 것을 찾기
+    # 전에 내려야 한다.
+    _scroll_through(page)
+    before = set(_img_srcs(page))
     seen: set[str] = set()
+    got: list[str] = []
+
+    def take(urls, force=False):
+        # force: 접힌 칸 **속**에서 찾은 그림. 아코디언은 내용을 문서에 두고 숨길 뿐이라
+        # 누르기 전에도 보이므로 「새로 생겼나」로 걸러 내면 안 된다 — 걸러 냈더니 한
+        # 매장의 사이즈표가 통째로 빠졌다(2026-09-17 실측).
+        for u in urls:
+            if u and u not in got and (force or u not in before):
+                got.append(u)
+
     for _ in range(14):
         pick = None
         for el, key in _toggle_candidates(page):
@@ -211,9 +259,34 @@ def open_details(page) -> list[str]:
             if not el.is_visible():
                 continue
             el.click(timeout=1500)
-            page.wait_for_timeout(600)
+            page.wait_for_timeout(900)
         except Exception:
             continue
+        # ① 누른 것이 사이즈가이드 **창으로 가는 링크**였으면, 그 창의 그림이 곧 표다.
+        #    여기서 받아야 한다 — 되돌아간 뒤에 세면 이미 사라지고 없다.
+        if page.url != url0:
+            take(_img_srcs(page))
+        # ② 접혀 있던 칸이 **이미 문서 안에 있던** 경우. 아코디언은 내용을 숨겨 둘 뿐이라
+        #    눌러도 그림이 늘지 않는다(2026-09-17 실측: 한 매장의 SIZE CHART 칸이 그랬다).
+        #    그래서 누른 것의 바로 옆·부모 칸 안을 따로 본다. 칸이 너무 크면(그림 여덟 장
+        #    넘으면) 상품 사진까지 긁게 되므로 쓰지 않는다.
+        panel = []
+        try:
+            panel = el.evaluate("""e => {
+              const pick = x => {
+                if (!x) return [];
+                const g = [...x.querySelectorAll('img')]
+                  .map(i => i.currentSrc || i.getAttribute('src')
+                          || i.getAttribute('data-src') || i.getAttribute('data-original'))
+                  .filter(Boolean);
+                return g.length <= 8 ? g : [];
+              };
+              return [...pick(e.nextElementSibling), ...pick(e.parentElement)];
+            }""")
+        except Exception:
+            panel = []
+        if page.url == url0:
+            take(panel, force=True)
         # 누른 것이 다른 페이지로 가는 링크였으면 되돌아온다 — 안 그러면 남은 토글도,
         # 지금까지 연 것도 통째로 잃는다.
         if page.url != url0:
@@ -222,14 +295,8 @@ def open_details(page) -> list[str]:
                 page.wait_for_timeout(1200)
             except Exception:
                 break
-    try:
-        for _ in range(6):
-            page.evaluate("window.scrollBy(0, document.body.scrollHeight/5)")
-            page.wait_for_timeout(450)
-        page.evaluate("window.scrollTo(0, 0)")
-    except Exception:
-        pass
-    return [s for s in _img_srcs(page) if s not in before]
+    _scroll_through(page)
+    return got
 
 
 LOOKWORD = re.compile(r"룩북|룩\b|컬렉션|코디|스타일링|LOOKBOOK|COLLECTION|EDITORIAL|STYLING|LOOK", re.I)
