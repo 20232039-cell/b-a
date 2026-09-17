@@ -160,9 +160,11 @@ def fetch_brand(brand: str, recs: list[dict], delay: float, workers: int, limit:
     # 매장 공용 안내 그림은 버린다 — 사이즈 환산표·세탁 안내가 상품마다 똑같이 붙는데,
     # 읽어 봐야 그 상품의 치수가 아니다. 다른 자리에서 쓰는 잣대와 같게 열 벌을 넘기면
     # 공용으로 본다.
+    # 열 벌 넘게 겹치는 그림은 그 상품의 치수가 아니다 — 다른 자리에서 쓰는 잣대와 같게
+    # 맞춘다. 처음엔 「절반 넘게」로 느슨하게 잡았다가, 한 매장의 브랜드 소개 그림 석 장이
+    # 136벌 가운데 50벌쯤에 붙어 그대로 통과했다(2026-09-17 실측: 그 매장 적중률 0%).
     use = collections.Counter(u for _, urls in got for u in urls)
-    floor = max(10, len(got) * 0.5)
-    shop_wide = {u for u, c in use.items() if c >= floor}
+    shop_wide = {u for u, c in use.items() if c >= 10}
 
     outdir.mkdir(parents=True, exist_ok=True)
     n_img = 0

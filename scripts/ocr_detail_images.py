@@ -747,7 +747,10 @@ def merge_extra_size_images(slug: str, latest: dict[int, dict]) -> int:
                 b = json.loads(line)
             except Exception:
                 continue
-            urls = [u for u in (b.get("size_images") or []) if isinstance(u, str)]
+            # 맨 앞자리를 셋까지만 내준다. 머리말 뒤에서 거둔 그림에는 매장 소개컷이
+            # 섞이기도 하는데(2026-09-17 실측: 한 매장은 열 벌 표본 적중 0), 그것이
+            # 읽을 예산을 다 먹으면 정작 상세 그림이 안 읽힌다.
+            urls = [u for u in (b.get("size_images") or []) if isinstance(u, str)][:3]
             d = latest.get(b.get("product_no"))
             if not urls or not d:
                 continue
