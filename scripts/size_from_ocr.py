@@ -197,6 +197,71 @@ def fix_value(label: str, raw: str, girth: bool = False) -> float | None:
 _PAREN_HEAD = re.compile(r"(?:size|사이즈)\s*[\(（]\s*([^)）]{6,140})[\)）]", re.I)
 
 
+# 라벨을 빗금으로 나란히 적고 그 아래 값도 빗금으로 잇는 꼴. 표가 아니라 **글**이라
+# 머리줄을 찾는 갈래가 전부 헛돈다:
+#
+#     ∥ Size Guide ∥ 총장 / 어깨 / 가슴 / 밑단 / 소매길이 / 소매통 / 소매단
+#     S 61 / 55.9 / 64.8 /53.3 / 52.7/20.3/13.3   M 61.6 /57.2 / 67.3 / 54 / 53.3/ 20.6 /13.7
+#
+# 이 글은 **이미 창고에 있다** — 매장이 상세 설명에 적어 둔 것을 그대로 받아 왔는데
+# 읽는 갈래가 없었을 뿐이다(2026-09-17 전수 287벌). 사람이 상품 페이지에서 짚어 줬다.
+_SLASH_ROW = re.compile(r"(\d{1,3}(?:[.,]\d)?)\s*/\s*(?=\d)")
+_SLASH_CUT = re.compile(r"/\s*[^\s/,]{1,16}\s+$")
+
+
+def parse_slash_table(text: str) -> tuple[list[str], dict[str, list[float]]] | None:
+    """빗금으로 이은 라벨 줄 + 빗금으로 이은 값 줄."""
+    best = None
+    for m in re.finditer(r"(?:[^\s/,]{1,16}\s*/\s*){2,}[^\s/,]{1,16}", text or ""):
+        # 라벨 줄의 **뒤토막**만 잡혔으면 칸 수를 못 믿는다. 라벨에 빈칸이 있으면
+        # (「Front rise」) 빈칸 없는 토막만 이어지는 이 눈이 앞을 잘라 먹는다:
+        #     Size (Length / Waist / Front rise / Back rise / Thigh / Hem)
+        #     M: 111 / 30inch / 36 / 40 / 34 / 28
+        # 「rise / Thigh / Hem)」 세 칸으로 보면 36·40·34 가 밑위·허벅지·밑단이 되는데
+        # 실제로는 밑위·뒤밑위·허벅지다(2026-09-17 실측: 이 꼴 2벌이 그렇게 틀렸다).
+        # 바로 앞이 「/ 낱말 」이면 잘린 것이므로 통째로 버린다.
+        if _SLASH_CUT.search(text[max(0, m.start() - 24):m.start()]):
+            continue
+        toks = [x.strip() for x in m.group(0).split("/")]
+        labels = [canon_label(x) for x in toks]
+        if sum(1 for c in labels if c) < 3:
+            continue
+        if len({c for c in labels if c}) != sum(1 for c in labels if c):
+            continue                      # 같은 라벨이 두 번이면 자리를 못 믿는다
+        n = len(labels)
+        names, cols, seen_rows = [], {c: [] for c in labels if c}, set()
+        tail = text[m.end():m.end() + 60 * n + 260]
+        # 「이름 값/값/값…」이 이어지는 만큼 받는다
+        # 이름 뒤에 「S- 59 / …」처럼 잇는 글자가 온다(tibaeg). 이름 칸을 느슨하게
+        # 두면 눈이 「F-59」를 이름 5 + 값 9 로 쪼개 첫 값을 망가뜨리므로, 값 줄은
+        # **숫자 한가운데서 시작할 수 없게** 막는다(2026-09-17 실측: tibaeg 1664).
+        for rm in re.finditer(rf"(?:([A-Za-z0-9가-힣]{{1,6}})\s*[-:.)]?\s*)?(?<![\d.,])"
+                              rf"((?:\d{{1,3}}(?:[.,]\d)?\s*/\s*){{{n-1}}}\d{{1,3}}(?:[.,]\d)?)", tail):
+            vals = [x.strip() for x in re.split(r"\s*/\s*", rm.group(2))]
+            if len(vals) != n:
+                continue
+            nm = (rm.group(1) or "").strip()
+            if nm and not re.fullmatch(SIZE_NAME, nm, re.I):
+                nm = ""
+            # 같은 값 줄이 두 번 오면 접는다 — 크롤러가 description 과 detail_text 를
+            # 따로 담는데 매장에 따라 둘이 같은 글이라, 이어 붙이면 표가 두 벌이 된다.
+            if tuple(vals) in seen_rows:
+                continue
+            seen_rows.add(tuple(vals))
+            names.append(nm.upper() or str(len(names) + 1))
+            for c, v in zip(labels, vals):
+                if c:
+                    cols[c].append(fix_value(c, v))
+        cols = {c: v for c, v in cols.items()
+                if v and any(isinstance(x, (int, float)) for x in v)}
+        if len(cols) < 3:
+            continue
+        sc = (len(names), len(cols))
+        if best is None or sc > best[0]:
+            best = (sc, (names, cols))
+    return best[1] if best else None
+
+
 def parse_paren_slash(text: str) -> tuple[list[str], dict[str, list[float]]] | None:
     best = None
     for m in _PAREN_HEAD.finditer(text or ""):
@@ -2493,6 +2558,12 @@ def main():
                     par = parse_paren_slash(body)
                     if par and len(clean_ocr(par[1])) > len(sizes):
                         sizes, names, source = clean_ocr(par[1]), par[0], "html"
+                # 라벨도 값도 빗금으로 이은 글(parse_slash_table 주석) — 매장이 상세
+                # 설명에 적어 둔 표라 이미 창고에 있는데 읽는 갈래가 없었다.
+                if len(sizes) < 2:
+                    sl = parse_slash_table(body)
+                    if sl and len(clean_ocr(sl[1])) > len(sizes):
+                        sizes, names, source = clean_ocr(sl[1]), sl[0], "html"
             # 브라우저가 본 표·설명글 — 서버 HTML 에 없던 것이 여기 있다
             b = brw.get(r["source_url"])
             if len(sizes) < 2 and b:
