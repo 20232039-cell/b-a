@@ -721,6 +721,41 @@ def _has_size_table(text: str) -> bool:
         return False
 
 
+def merge_extra_size_images(slug: str, latest: dict[int, dict]) -> int:
+    """**눌러야 나오는 자리**에서 따로 받아 둔 사이즈 그림을 읽을 목록 맨 앞에 끼운다.
+
+    표를 그림으로 싣는 매장은 그 그림이 토글·버튼 뒤에 있어 서버 HTML 의 상세 그림
+    목록에 아예 없다(2026-09-17 사람이 상품 페이지로 확인: 「사이즈 차트」 토글,
+    「사이즈 가이드」 버튼, 「INFORMATION」 아코디언). 브라우저 수집기가 눌러서 받아
+    둔 것을 여기서 합쳐야 OCR 이 그 그림을 본다.
+
+    맨 앞에 두는 이유: 상품당 읽는 장수에 예산이 있는데, 이 그림들은 「사이즈표라고
+    사람이 확인한 자리」에서 나온 것이라 상세컷보다 먼저 읽을 값어치가 있다.
+    """
+    n = 0
+    # sizeguide: 카페24 사이즈가이드 창을 주소로 받아 둔 것(fetch_sizeguide.py)
+    # browser: 브라우저로 토글을 눌러 받아 둔 것(browser_collect.py)
+    for sub in ("sizeguide", "browser"):
+        bp = CRAWL_DIR / sub / f"{slug}.jsonl"
+        if not bp.exists():
+            continue
+        for line in bp.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                b = json.loads(line)
+            except Exception:
+                continue
+            urls = [u for u in (b.get("size_images") or []) if isinstance(u, str)]
+            d = latest.get(b.get("product_no"))
+            if not urls or not d:
+                continue
+            have = list(d.get("detail_images") or [])
+            d["detail_images"] = urls + [u for u in have if u not in urls]
+            n += 1
+    return n
+
+
 def load_latest(path: Path) -> dict[int, dict]:
     latest: dict[int, dict] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -800,6 +835,7 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
     k, n = shard
     out = (out_dir / f"{slug}.{k}.jsonl") if out_dir else main
     latest = load_latest(src)
+    merge_extra_size_images(slug, latest)
     done: set[int] = set()
     if main.exists():
         done = {json.loads(l)["product_no"] for l in main.read_text(encoding="utf-8").splitlines() if l.strip()}

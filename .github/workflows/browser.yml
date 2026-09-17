@@ -141,7 +141,7 @@ jobs:
           mkdir -p data/crawl/browser
           python3 - <<'PY'
           import json, glob, os
-          n = t = i = bad = 0
+          n = t = i = g = bad = 0
           def load_into(path, have):
               """깨진 줄 하나에 합치기 전체가 죽지 않게 한다 — 러너가 시간 제한으로 잘리면
               마지막 줄이 반 토막으로 남는다(2026-09-10 merge 잡 JSONDecodeError)."""
@@ -170,13 +170,15 @@ jobs:
               n += len(have)
               t += sum(1 for d in have.values() if d.get("size_table_raw"))
               i += sum(1 for d in have.values() if d.get("images"))
+              g += sum(1 for d in have.values() if d.get("size_images"))
           named = 0
           for p in sorted(glob.glob("_parts/*.jsonl")):
               dst = f"data/crawl/browser/{os.path.basename(p)[:-6]}.jsonl"
               h = {}
               load_into(dst, h)
               named += sum(1 for d in h.values() if (d.get("size_table_raw") or {}).get("_names"))
-          print(f"브라우저로 본 상품 {n} · 표 얻은 것 {t} · 그중 사이즈 이름까지 {named} · 사진 얻은 것 {i}"
+          print(f"브라우저로 본 상품 {n} · 표 얻은 것 {t} · 그중 사이즈 이름까지 {named}"
+                + f" · 눌러서 그림이 나온 것 {g} · 사진 얻은 것 {i}"
                 + (f" · 깨진 줄 {bad}개 건너뜀" if bad else ""))
           PY
       - name: commit & push (rebase 후, 3회 재시도)

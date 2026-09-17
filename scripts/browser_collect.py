@@ -18,6 +18,7 @@ data/crawl/browser/<slug>.jsonl 에 따로 쌓는다. 합치는 것은 size_from
 from __future__ import annotations
 import argparse, json, os, re, sys, time
 from pathlib import Path
+from urllib.parse import urljoin
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA, CRAWL = ROOT / "data", ROOT / "data" / "crawl"
@@ -27,6 +28,13 @@ UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
 SIZE_WORD = re.compile(r"어깨|가슴|총장|소매|밑단|허리|허벅지|밑위|암홀|엉덩이|화장"
                        r"|shoulder|chest|length|sleeve|waist|thigh|rise|hem", re.I)
 PHOTO = re.compile(r"/web/product/|/detailimg/|/product/.*\.(?:jpg|jpeg|png|webp)", re.I)
+# 눌러서 나타난 그림 가운데 읽을 만한 것. 아이콘·꾸밈 그림에 OCR 예산을 쓰지 않는다.
+_SKIP_IMG = re.compile(r"\.(?:svg|gif|ico)(?:\?|$)|/icon|/btn|/banner|blank\.|spacer|"
+                       r"1x1|loading|placeholder|data:image", re.I)
+
+
+def keep_size_image(u: str) -> bool:
+    return bool(u) and not u.startswith("data:") and not _SKIP_IMG.search(u)
 
 
 def find_exe() -> str | None:
@@ -111,27 +119,109 @@ def grid_to_table(grid: list[list[str]]) -> dict[str, list[str]]:
     return {}
 
 
-def open_details(page) -> None:
-    """상세를 실제로 그리게 만든다.
+# 누를 것의 이름. 사람이 상품 페이지를 직접 눌러 보고 알려 준 것들이다(2026-09-17):
+# 「사이즈 차트」 토글 · 「사이즈 가이드」 버튼 · 「SIZE GUIDE」 · 「INFORMATION」 아코디언.
+# 앞엣것일수록 먼저 누른다 — 사이즈라고 이름 붙은 것이 표를 열 확률이 높고, 누를 횟수에
+# 상한이 있어서 순서가 곧 우선순위다.
+TOGGLE_WORDS = (
+    r"size\s*chart", r"사이즈\s*차트", r"size\s*guide", r"사이즈\s*가이드",
+    r"size\s*info(?:rmation)?", r"사이즈\s*정보", r"사이즈\s*표", r"size\s*&?\s*fit",
+    r"measurement", r"실측", r"sizing", r"사이즈",
+    r"product\s*info(?:rmation)?", r"상품\s*정보", r"인포메이션", r"information",
+    r"item\s*details?", r"상세\s*정보", r"상세\s*보기", r"details?", r"spec",
+)
+_TOGGLE_RX = [re.compile(w, re.I) for w in TOGGLE_WORDS]
+# 누를 만한 그릇. 버튼·링크·탭만 보면 놓친다 — 매장 토글은 dt·th 이거나 class 에
+# toggle·accordion·guide 가 든 div 인 경우가 많다.
+CLICK_SEL = ("a, button, summary, [role=tab], [role=button], [onclick], dt, th, "
+             "[class*=toggle], [class*=accordion], [class*=tab], [class*=guide], "
+             "[class*=sizeguide], [class*=size_guide], [class*=size-guide]")
+
+
+def _img_srcs(page) -> list[str]:
+    """지금 화면에 걸린 그림 주소 — 게으른 그림은 data-src 에 들어 있다."""
+    out: list[str] = []
+    for fr in list(page.frames):
+        try:
+            els = fr.query_selector_all("img")
+        except Exception:
+            continue
+        for im in els:
+            try:
+                s = (im.get_attribute("src") or im.get_attribute("data-src")
+                     or im.get_attribute("data-original") or "")
+            except Exception:
+                continue
+            if s and s not in out:
+                out.append(s)
+    return out
+
+
+def _toggle_candidates(page) -> list[tuple[object, str]]:
+    """누를 만한 것을 우선순위 순으로. (요소, 다시 안 누르려고 쓰는 표) 짝."""
+    found: list[tuple[int, object, str]] = []
+    for fr in list(page.frames):
+        try:
+            els = fr.query_selector_all(CLICK_SEL)
+        except Exception:
+            continue
+        for el in els[:400]:
+            try:
+                t = " ".join((el.inner_text() or "").split())
+            except Exception:
+                continue
+            # 글이 길면 토글이 아니라 그 안의 본문이다. 안내 「문단」을 눌러 봐야
+            # 아무 일도 없고, 예산만 먹는다(2026-09-05 badblood).
+            if not t or len(t) > 40:
+                continue
+            for i, rx in enumerate(_TOGGLE_RX):
+                if rx.search(t):
+                    found.append((i, el, t.lower()))
+                    break
+    found.sort(key=lambda x: x[0])
+    return [(el, key) for _, el, key in found]
+
+
+def open_details(page) -> list[str]:
+    """상세를 실제로 그리게 만들고, **눌러서 새로 나타난 그림 주소**를 돌려준다.
 
     diafvine 은 사이즈표가 DETAILS 탭 안에 있어, 페이지만 열고 기다리면 #prdDetail 이
     공백 문자 8~10자뿐이다(2026-09-04 사람이 화면으로 확인). 탭을 누르고 끝까지 내려
-    게으른 이미지·표까지 그려지게 한다."""
-    # 하나 누르고 그만두면 안 된다 — badblood 는 안내 「문단」에 「DETAILS/SIZING 버튼을
-    # 클릭하시면」이라고 적어 두어서, 그 문단이 버튼보다 먼저 잡히고 거기서 끝났다.
-    # 문단을 눌러 봐야 아무 일도 없으니 라벨을 끝까지 다 눌러 본다(2026-09-05).
-    # 누를 것은 버튼·링크·탭으로 한정한다 — 본문 글을 누르면 표가 안 열린다.
-    for label in ("SIZING", "DETAILS", "DETAIL", "상세정보", "상세보기", "SIZE GUIDE",
-                  "사이즈 가이드", "사이즈", "SIZE"):
+    게으른 이미지·표까지 그려지게 한다.
+
+    2026-09-17 사람 지적으로 넓혔다 — 「푸쉬버튼은 진짜 없고 나머진 다 토글이나 버튼
+    눌러서 들어가야 나오네」. 그때까지 이 함수는 (1) 이름을 여섯 개만 알았고 (2) 버튼·
+    링크·탭만 눌렀으며 (3) **열린 뒤에 나타난 그림을 담지 않았다**. 표가 그림으로 된
+    매장은 눌러도 소용이 없었던 이유가 이 셋이다.
+    """
+    before = set(_img_srcs(page))
+    url0 = page.url
+    seen: set[str] = set()
+    for _ in range(14):
+        pick = None
+        for el, key in _toggle_candidates(page):
+            if key not in seen:
+                pick = (el, key)
+                break
+        if pick is None:
+            break
+        el, key = pick
+        seen.add(key)
         try:
-            for role in ("button", "link", "tab"):
-                el = page.get_by_role(role, name=label, exact=False).first
-                if el.count() and el.is_visible(timeout=500):
-                    el.click(timeout=1500)
-                    page.wait_for_timeout(700)
-                    break
+            if not el.is_visible():
+                continue
+            el.click(timeout=1500)
+            page.wait_for_timeout(600)
         except Exception:
             continue
+        # 누른 것이 다른 페이지로 가는 링크였으면 되돌아온다 — 안 그러면 남은 토글도,
+        # 지금까지 연 것도 통째로 잃는다.
+        if page.url != url0:
+            try:
+                page.goto(url0, wait_until="domcontentloaded", timeout=60000)
+                page.wait_for_timeout(1200)
+            except Exception:
+                break
     try:
         for _ in range(6):
             page.evaluate("window.scrollBy(0, document.body.scrollHeight/5)")
@@ -139,6 +229,7 @@ def open_details(page) -> None:
         page.evaluate("window.scrollTo(0, 0)")
     except Exception:
         pass
+    return [s for s in _img_srcs(page) if s not in before]
 
 
 LOOKWORD = re.compile(r"룩북|룩\b|컬렉션|코디|스타일링|LOOKBOOK|COLLECTION|EDITORIAL|STYLING|LOOK", re.I)
@@ -264,13 +355,13 @@ def main():
             elif args.only_missing == "any":
                 todo = [d for d in todo if d["source_url"] not in sizes or d["source_url"] not in mats]
             todo = todo[:args.limit]
-            got_t = got_i = 0
+            got_t = got_i = got_s = 0
             with (OUT / f"{brand}.jsonl").open("a", encoding="utf-8") as fh:
                 for d in todo:
                     try:
                         page.goto(d["source_url"], wait_until="domcontentloaded", timeout=60000)
                         page.wait_for_timeout(1500)
-                        open_details(page)
+                        revealed = open_details(page)
                         try:
                             page.wait_for_load_state("networkidle", timeout=8000)
                         except Exception:
@@ -313,19 +404,28 @@ def main():
                                 desc = t[:8000]
                         imgs = []
                         for im in page.query_selector_all("img"):
-                            s = im.get_attribute("src") or im.get_attribute("data-src") or ""
-                            if s and PHOTO.search(s) and s not in imgs:
-                                imgs.append(s)
+                            u = im.get_attribute("src") or im.get_attribute("data-src") or ""
+                            if u and PHOTO.search(u) and u not in imgs:
+                                imgs.append(u)
+                        # 눌러서 나타난 그림 — 표가 그림으로 된 매장은 이것이 전부다.
+                        # PHOTO 로 거르지 않는다. 사이즈표 그림은 상품 사진과 다른 자리에
+                        # 올라가 있는 경우가 많아서, 거르면 정작 필요한 것이 빠진다.
+                        size_imgs = [urljoin(page.url, u) for u in revealed
+                                     if keep_size_image(u)]
+                        size_imgs = list(dict.fromkeys(size_imgs))[:12]
                         fh.write(json.dumps({"brand_slug": brand, "product_no": d.get("product_no"),
                                              "source_url": d["source_url"], "size_table_raw": table,
-                                             "description": desc, "images": imgs[:20]},
+                                             "description": desc, "images": imgs[:20],
+                                             "size_images": size_imgs},
                                             ensure_ascii=False) + "\n")
                         got_t += bool(table)
                         got_i += bool(imgs)
+                        got_s += bool(size_imgs)
                     except Exception as e:
                         print(f"    ! {d.get('product_no')} {type(e).__name__}", flush=True)
                     time.sleep(args.delay)
-            print(f"  {brand}: {len(todo)}벌 열었다 · 표 {got_t} · 사진 {got_i}", flush=True)
+            print(f"  {brand}: {len(todo)}벌 열었다 · 표 {got_t} · 사진 {got_i} · "
+                  f"눌러서 나온 그림 {got_s}", flush=True)
         browser.close()
 
 
