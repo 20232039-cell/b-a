@@ -720,8 +720,13 @@ def ocr_deruled(data: bytes) -> str:
     return "\n".join(lines)
 
 
-def ocr_bytes(data: bytes) -> str:
-    """tesseract 로 한 장. --psm 6(균일 블록)이 상품 상세의 세로 긴 이미지에 가장 안정적이었다."""
+def ocr_bytes(data: bytes, derule: bool = False) -> str:
+    """tesseract 로 한 장. --psm 6(균일 블록)이 상품 상세의 세로 긴 이미지에 가장 안정적이었다.
+
+    derule: 괘선을 지우고 한 번 더 읽어도 좋은 그림인가. **사람이 확인한 사이즈표 자리**에서
+    받아 온 그림(crawl/sizeguide·pagesize·browser)에만 켠다 — 아무 그림에나 켰더니 열 장에
+    여섯 장꼴로 돌면서(2026-09-17 실측: 79장 중 45장) 표는 한 장도 못 얻고 시간만 15% 더 썼다.
+    """
     orig = data
     data = preprocess(data)
     # 세로로 긴 띠는 통짜로 못 읽는다 — 두 단계 훑기로 넘긴다(ocr_tall 주석).
@@ -741,7 +746,8 @@ def ocr_bytes(data: bytes) -> str:
             words = re.findall(r"[가-힣]{2,}|[A-Za-z]{3,}", joined)
             if len(words) < 3:
                 return ""
-            return _with_deruled(add_cell_grid(joined, data, orig), data)
+            return _with_deruled(add_cell_grid(joined, data, orig), data) if derule \
+                else add_cell_grid(joined, data, orig)
     except Exception:
         pass
     with tempfile.NamedTemporaryFile(suffix=".img", delete=True) as f:
@@ -775,7 +781,8 @@ def ocr_bytes(data: bytes) -> str:
     words = re.findall(r"[가-힣]{2,}|[A-Za-z]{3,}", joined)
     if len(words) < 3:
         return ""
-    return _with_deruled(add_cell_grid(joined, data, orig), data)
+    out = add_cell_grid(joined, data, orig)
+    return _with_deruled(out, data) if derule else out
 
 
 def _with_deruled(joined: str, data: bytes) -> str:
@@ -807,7 +814,7 @@ def _has_size_table(text: str) -> bool:
         return False
 
 
-def merge_extra_size_images(slug: str, latest: dict[int, dict]) -> int:
+def merge_extra_size_images(slug: str, latest: dict[int, dict]) -> set[str]:
     """**눌러야 나오는 자리**에서 따로 받아 둔 사이즈 그림을 읽을 목록 맨 앞에 끼운다.
 
     표를 그림으로 싣는 매장은 그 그림이 토글·버튼 뒤에 있어 서버 HTML 의 상세 그림
@@ -818,7 +825,7 @@ def merge_extra_size_images(slug: str, latest: dict[int, dict]) -> int:
     맨 앞에 두는 이유: 상품당 읽는 장수에 예산이 있는데, 이 그림들은 「사이즈표라고
     사람이 확인한 자리」에서 나온 것이라 상세컷보다 먼저 읽을 값어치가 있다.
     """
-    n = 0
+    got: set[str] = set()
     # sizeguide: 카페24 사이즈가이드 창을 주소로 받아 둔 것(fetch_sizeguide.py)
     # pagesize: 상품 페이지의 사이즈 머리말 뒤에서 거둔 것(같은 스크립트, --source page)
     # browser: 브라우저로 토글을 눌러 받아 둔 것(browser_collect.py)
@@ -847,8 +854,8 @@ def merge_extra_size_images(slug: str, latest: dict[int, dict]) -> int:
             # juntae-kim 이 한 벌도 안 움직였다. 이 매장들은 상세 그림이 없어 갤러리를 읽는다).
             have = list(d.get("detail_images") or []) or list(d.get("gallery") or [])
             d["detail_images"] = urls + [u for u in have if u not in urls]
-            n += 1
-    return n
+            got.update(urls)
+    return got
 
 
 def load_latest(path: Path) -> dict[int, dict]:
@@ -930,7 +937,7 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
     k, n = shard
     out = (out_dir / f"{slug}.{k}.jsonl") if out_dir else main
     latest = load_latest(src)
-    merge_extra_size_images(slug, latest)
+    extra_urls = merge_extra_size_images(slug, latest)
     done: set[int] = set()
     if main.exists():
         done = {json.loads(l)["product_no"] for l in main.read_text(encoding="utf-8").splitlines() if l.strip()}
@@ -1192,7 +1199,7 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
                     continue
                 with wlock:
                     counters["img"] += 1
-                t = ocr_bytes(data)
+                t = ocr_bytes(data, derule=url in extra_urls)
                 imgs.append({"url": url, "chars": len(t), "text": t})
                 if t:
                     texts.append(t)
