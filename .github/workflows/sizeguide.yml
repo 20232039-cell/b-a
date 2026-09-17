@@ -1,0 +1,80 @@
+# 눌러야 나오는 사이즈표 그림 거두기 — 브라우저 없이.
+#
+# 왜 있는가(2026-09-17, 사람이 상품 페이지를 직접 눌러 보고 알려 줬다): 사이즈표가
+# 「사이즈 가이드」 버튼이나 「SIZE CHART」 아코디언 뒤에 있는 매장이 많다. 그런데 그 둘 다
+# 자바스크립트가 필요 없었다 —
+#   · 버튼은 /product/sizeguide.html?product_no=N 을 레이어로 띄울 뿐이라 주소로 받아진다
+#   · 아코디언은 내용을 서버 HTML 에 두고 CSS 로 숨길 뿐이라 머리말 뒤를 보면 된다
+# 전수 조사에서 사이즈 없는 7,347벌 가운데 3,091벌(42%)에 읽을 그림이 생겼다.
+#
+# 비용: 상품 하나에 요청 두 번. 러너 하나로 30분 안팎.
+# 결과는 data/crawl/{sizeguide,pagesize}/<slug>.jsonl — ocr_detail_images 가 읽을 목록
+# 맨 앞에 끼워 읽는다. 그림을 새로 넣어도 OCR 판을 redo=true 로 띄워야 이미 읽은 상품이 열린다.
+
+name: sizeguide-images
+
+on:
+  schedule:
+    - cron: "20 5 * * *"       # 하루 한 번
+  workflow_dispatch:
+    inputs:
+      brands:
+        description: "쉼표로 나눈 slug 목록. 비우면 사이즈 없는 옷이 있는 매장 전부"
+        required: false
+        default: ""
+      source:
+        description: "sizeguide | page | both"
+        required: false
+        default: "both"
+
+env:
+  DATA_BRANCH: crawl/cafe24-full-catalog
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sizeguide-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    defaults:
+      run:
+        working-directory: work
+    steps:
+      - uses: actions/checkout@v4
+      - name: 데이터 저장소(비공개) 받기
+        uses: ./.github/actions/data-repo
+        with:
+          token: ${{ secrets.DATA_TOKEN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -q requests
+      - name: 사이즈표 그림 받기
+        shell: bash
+        run: |
+          SRC="${{ inputs.source }}"; SRC="${SRC:-both}"
+          if [ -n "${{ inputs.brands }}" ]; then
+            python scripts/fetch_sizeguide.py --brands "${{ inputs.brands }}" \
+              --source "$SRC" --workers 4 --delay 0.2
+          else
+            python scripts/fetch_sizeguide.py --all-missing \
+              --source "$SRC" --workers 4 --delay 0.2
+          fi
+      # 이미 받아 둔 상품은 건너뛰므로(sidecar 에 있으면 skip) 매번 돌려도 새것만 받는다.
+      - name: commit & push (rebase 후, 3회 재시도)
+        shell: bash
+        run: |
+          git add data/crawl/sizeguide/ data/crawl/pagesize/ 2>/dev/null || true
+          git diff --cached --quiet && { echo "새로 받은 것 없음"; exit 0; }
+          git commit -m "사이즈표 그림 (Actions)"
+          for i in 1 2 3; do
+            git pull --rebase --autostash origin "$DATA_BRANCH" && git push && exit 0
+            git rebase --abort 2>/dev/null || true
+            echo "푸시 실패, 재시도 $i"; sleep 10
+          done
+          exit 1
