@@ -312,6 +312,78 @@ _PAIR = re.compile(r"([가-힣A-Za-z][가-힣A-Za-z0-9]{0,9})\s*[:\-]?\s*"
                    r"(\d{1,3}(?:[.,]\d{1,2})?)\s*(?:cm|CM|센티)?(?![\d.])")
 
 
+def _label_value_pairs(s: str) -> list[tuple[str, str, int]]:
+    """한 줄에서 「라벨 값」 짝을 차례대로 뽑는다. 라벨 뒤에 바로 수가 없으면 표 줄이 아니다."""
+    out: list[tuple[str, str, int]] = []
+    for m in LABEL_RX.finditer(s):
+        lab = canon_label(m.group(0))
+        if not lab:
+            continue
+        mv = re.match(r"\s*[:=]?\s*(\d{1,3}(?:[.,]\d)?)\s*(?:cm|CM)?", s[m.end():])
+        if not mv:
+            return []
+        out.append((lab, mv.group(1), m.start()))
+    return out
+
+
+def parse_pair_rows(lines: list[str]) -> tuple[list[str] | None, dict[str, list[float]]] | None:
+    """**줄 하나가 사이즈 하나**이고, 그 줄 안에 「라벨 값」이 되풀이되는 표.
+
+        M
+        총장 74.5 어깨 55.5 가슴 64 소매 22.5
+        L
+        총장 76.5 어깨 57.5 가슴 66 소매 23.5
+
+    사람이 상품 페이지의 「INFORMATION」을 눌러 보고 알려 준 꼴이다(2026-09-18). 그 창은
+    `/product/sizeguide.html?product_no=N` 로 그냥 받아지는데, 여태 우리는 그 창에서
+    **그림만** 찾고 있었다 — 글로 적힌 매장은 통째로 「없음」으로 세었다. 못 채운 옷이
+    20벌 넘는 매장 47곳을 찔러 보니 네 곳이 이 꼴이다(합 500벌 남짓).
+
+    parse_named_pairs 와는 **눕는 방향이 반대**다. 거기서는 한 줄이 한 라벨이고 짝의 이름이
+    사이즈였는데, 여기서는 한 줄이 한 사이즈고 짝의 이름이 라벨이다.
+
+    잘못 걸리지 않도록: 줄마다 짝이 둘 이상 · 한 줄 안에 같은 라벨이 두 번 나오지 않을 것 ·
+    **라벨 차례가 줄마다 똑같을 것** · 라벨 바로 뒤에 수가 붙을 것. 마지막 조건이 같은 창에
+    함께 실린 매장 공용 환산표(「가슴 (inches) 22 23 24 …」)를 자동으로 걸러 낸다 —
+    거기서는 라벨 뒤에 수가 아니라 괄호가 온다.
+    """
+    rows: list[tuple[tuple[str, ...], list[str], str | None]] = []
+    prev = ""
+    for ln in lines:
+        ps = _label_value_pairs(ln or "")
+        if len(ps) < 2:
+            if (ln or "").strip():
+                prev = ln.strip()
+            continue
+        labs = tuple(l for l, _, _ in ps)
+        if len(set(labs)) != len(labs):
+            prev = ln.strip()
+            continue
+        # 사이즈 이름은 라벨 앞에 붙기도 하고(「M 총장 74.5 …」) 윗줄에 혼자 서기도 한다.
+        head = (ln[:ps[0][2]] or "").strip() or prev
+        mh = re.fullmatch(r"[\[(]?\s*([A-Za-z0-9가-힣]{1,6})\s*[\])]?", head)
+        rows.append((labs, [v for _, v, _ in ps], mh.group(1) if mh else None))
+        prev = ""
+    # 한 줄뿐이어도 짝이 셋 이상이면 표로 본다 — 사이즈가 하나인 옷(FREE)이 그 꼴이다
+    # (2026-09-18: 「총장 49 어깨 35 가슴 39 소매 12」 한 줄짜리가 실제로 있다).
+    if len(rows) < 2 and not (len(rows) == 1 and len(rows[0][0]) >= 3):
+        return None
+    key = Counter(r[0] for r in rows).most_common(1)[0][0]
+    rows = [r for r in rows if r[0] == key]
+    if len(rows) < 2 and not (len(rows) == 1 and len(key) >= 3):
+        return None
+    cols: dict[str, list[float]] = {}
+    for i, lab in enumerate(key):
+        if lab in cols:
+            continue
+        cols[lab] = [fix_value(lab, r[1][i]) for r in rows]
+    cols = {c: v for c, v in cols.items() if any(x is not None for x in v)}
+    if len(cols) < 2:
+        return None
+    names = [r[2] for r in rows]
+    return (names if all(names) and len(set(names)) == len(names) else None), cols
+
+
 def parse_named_pairs(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] | None:
     """한 줄 안에서 「이름 값 이름 값」이 되풀이되는 표.
 
@@ -2590,6 +2662,19 @@ def main():
                     brw[d2["source_url"]] = d2
     if brw:
         print(f"브라우저 기록 {len(brw)}건")
+    # 사이즈가이드 창에서 **글로** 거둔 표(fetch_sizeguide 의 size_text). 그림보다 앞선다.
+    sg_text: dict[str, str] = {}
+    for sub in ("sizeguide", "pagesize"):
+        dd = CRAWL / sub
+        if not dd.exists():
+            continue
+        for p3 in dd.glob("*.jsonl"):
+            for d3 in iter_jsonl(p3):
+                t3 = d3.get("size_text")
+                if t3 and d3.get("source_url") and len(t3) > len(sg_text.get(d3["source_url"], "")):
+                    sg_text[d3["source_url"]] = t3
+    if sg_text:
+        print(f"사이즈가이드 창의 글 {len(sg_text)}건")
     girth_keys = brand_girth(CRAWL)
     label_med = brand_label_median(CRAWL)
     shared = shop_wide_tables(CRAWL, rows)
@@ -2664,6 +2749,22 @@ def main():
                     n2, s2 = from_ocr(b.get("description") or "")
                     if len(s2) > len(sizes):
                         sizes, names, source = s2, n2, "browser"
+            # ③ 사이즈가이드 창에 **글로** 적힌 표 — 사진을 읽기 전에 본다.
+            # 사람이 정한 차례다(2026-09-18): ①HTML → ②토글 펼친 HTML → ③버튼이 여는 창 →
+            # ④그래도 없으면 사진. 글이 있으면 사진보다 훨씬 정확하니 앞에 세운다.
+            sg = sg_text.get(r["source_url"])
+            if len(sizes) < 2 and sg:
+                # 이 갈래는 **이 창의 글에만** 건다. 창고 전수로 재 보니 OCR 글 전체에 걸었을 때
+                # 다른 매장의 표를 가로챈다 — 얻음 108벌 옆에서 **775벌이 값을 잃고 12벌이
+                # 통째로 사라졌다**(till-i-die 516 · crank 171 · known-better 81, 2026-09-18).
+                # 이 꼴을 찾은 자리가 버튼이 여는 창이었으니 거기서만 쓴다.
+                sgl = [x.strip() for x in sg.splitlines() if x.strip()]
+                pr = parse_pair_rows(sgl)
+                n3, s3 = (pr[0], clean_ocr(pr[1])) if pr else from_ocr(sg)
+                if len(s3) < 2:
+                    n3, s3 = from_ocr(sg)
+                if len(s3) > len(sizes):
+                    sizes, names, source = s3, n3, "sizeguide"
             if len(sizes) < 2 and ocr.get(k):
                 names2, sizes2 = from_ocr(ocr[k])
                 if len(sizes2) > len(sizes):
