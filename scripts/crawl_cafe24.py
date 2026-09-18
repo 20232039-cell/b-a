@@ -42,6 +42,7 @@ import json
 import os
 import random
 import re
+import statistics
 from collections import Counter
 import sys
 import threading
@@ -349,6 +350,29 @@ BRAND_GENDER = {"Womenswear": "WOMENSWEAR", "Menswear": "MENSWEAR", "Unisex": "U
 # 매장이 성별 칸을 안 쓰는 상품에서, 품목만으로 여성이라 말할 수 있는 것.
 # 왜 둘뿐인지는 classify_gender 안에 센 값과 함께 적어 두었다.
 WOMEN_ONLY_ITEM = {"스커트", "원피스"}
+# 상의는 총장이 말해 준다. 매장이 제 손으로 성별 칸에 넣어 둔 상의 10,884벌로 재 보니
+# 총장 중앙값 50cm 미만은 1,356벌 중 1,352벌(99.7%)이 여성 칸이었다 — 여성 칸이 원래
+# 1.5배 많아 기준선이 58.2% 인데도 그렇다. 걸린 상품이 여성 쪽 34곳에서 나왔으니 한 매장이
+# 만든 이야기도 아니다. 54·58 까지 올려도 99.6% 로 같고 60 부터 무너지는데, 자름값은
+# 50 으로 둔다(사람 결정 2026-09-18).
+TOP_ITEMS = {"티셔츠", "맨투맨", "셔츠", "니트", "후드", "롱슬리브", "반팔", "탑",
+             "가디건", "집업", "베스트", "피케", "저지"}
+TOP_SHORT_CM = 50.0
+_LEN_KEYS = ("총장", "총길이", "기장", "length", "총기장")
+
+
+def top_length(size_table) -> float | None:
+    """실측표에서 총장 중앙값. 값이 없거나 옷 치수로 볼 수 없는 수면 None."""
+    if not isinstance(size_table, dict):
+        return None
+    for k in _LEN_KEYS:
+        v = size_table.get(k)
+        if not isinstance(v, list):
+            continue
+        nums = [float(x) for x in v if isinstance(x, (int, float)) and 20 <= x <= 120]
+        if nums:
+            return statistics.median(nums)
+    return None
 
 # 상품이 아닌 페이지의 이름 — 개인결제·스태프 결제·룩북·테스트. 가격이 있어도 상품이 아니다.
 # ^@ — glowny 가 고객 착용샷을 「@인스타아이디」 상품(2,500,000원)으로 830건 올려 둠. ^[¥*]+ — insilence 비공개 자리표시자 159건 (사람 결정 2026-09-02)
@@ -875,6 +899,21 @@ KIDS_CATEGORY = re.compile(r"^\s*(kids?|키즈|아동|주니어|junior|유아|ba
 KIDS_NAME = re.compile(r"^\s*[\[\(]?\s*(kids?|키즈|아동|주니어)\b|키즈|아동복|유아복|주니어", re.I)
 # 「KID MOHAIR」는 새끼염소 털(실 이름)이지 아동복이 아니다 — 성인 니트 넉 벌이 잘렸다
 KIDS_FALSE = re.compile(r"kid[\s-]*mohair|키드[\s-]*모헤어|kid[\s-]*silk", re.I)
+# 이름에 아동 낱말이 없어도 매장이 아동 라인을 같은 목록에 섞어 파는 데가 있다. 확실한 표식
+# 둘만 더 본다(2026-09-18 창고 전수로 재고 고른 것) —
+#   ① 이름 맨 앞의 「(K)」: 138벌, 한 매장뿐이고 다른 데서는 한 번도 안 쓴다.
+#      그 상품들의 사이즈가 110·120·130·140·150(아동 키)이라 아동복이 맞다.
+#   ② 사이즈가 「4y 6y 8y 10y 12y」 꼴: 143벌, 역시 한 매장뿐. 해 나이라 헷갈릴 데가 없다.
+# 「children」이라는 낱말은 안 쓴다 — 넣으면 성인 티셔츠가 잘린다(사이즈가 S·M 인데 이름이
+# 「CHILDREN PRINTED T-SHIRTS」인 그래픽 상품 7벌).
+KIDS_NAME_MARK = re.compile(r"^\s*[\[\(]\s*k\s*[\]\)]\s*", re.I)
+KIDS_SIZE_YEAR = re.compile(r"^\s*\d{1,2}\s*y\s*$", re.I)
+
+
+def kids_by_size(options) -> bool:
+    """사이즈 선택지가 해 나이(4y·6y…)면 아동복이다. 둘 이상일 때만 본다."""
+    n = sum(1 for o in (options or []) if KIDS_SIZE_YEAR.match(str(o)))
+    return n >= 2
 
 
 # 이름 끝의 괄호 안이 색이나 소재면 그건 꾸밈말이다(「… CAP (DENIM)」).
@@ -961,7 +1000,8 @@ def classify_category(name: str, category_names: list[str], description: str = "
     if any(PET_CATEGORY.match(c or "") for c in category_names):
         return "pet"
     if not KIDS_FALSE.search(name) and (
-            any(KIDS_CATEGORY.match(c or "") for c in category_names) or KIDS_NAME.search(name)):
+            any(KIDS_CATEGORY.match(c or "") for c in category_names) or KIDS_NAME.search(name)
+            or KIDS_NAME_MARK.match(name) or kids_by_size(options)):
         return "kids"
     if SHOE_FALSE.search(name):
         return "bottoms"
@@ -1229,7 +1269,7 @@ NAME_M_HEAD = re.compile(r"^\s*(?:\[[^\]]*\]\s*)?M\s+(?=[A-Za-z가-힣])")
 
 
 def classify_gender(category_names: list[str], brand_default: str, name: str = "",
-                    item_type: str = "") -> str:
+                    item_type: str = "", top_len: float | None = None) -> str:
     """칸 이름 → 브랜드 기본값 순으로 성별을 정하되, 상품 이름이 말하면 그게 이긴다.
 
     지금까지는 이름을 안 봤다. 그래서 여성복 매장의 「UNISEX PADDED DENIM BOMBER JACKET」이
@@ -1272,6 +1312,8 @@ def classify_gender(category_names: list[str], brand_default: str, name: str = "
     # 기준선이 61% 여성이라 「여성 비율이 높다」만으로는 아무 말도 아니다. 남성 칸이 0인
     # 둘만 받는다. 탑(남성 105/1763 = 6%)·플랫·샌들은 0이 아니라 뺐다 — 확신 없으면 비운다.
     if item_type in WOMEN_ONLY_ITEM:
+        return "WOMENSWEAR"
+    if item_type in TOP_ITEMS and top_len is not None and top_len < TOP_SHORT_CM:
         return "WOMENSWEAR"
     return brand_default or "UNISEX"
 
@@ -2987,7 +3029,7 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
                 "item_type": item,
                 "name": d["name"],
                 "gender_target": classify_gender(d.get("category_names", []), brand_gender.get(slug, "UNISEX"),
-                                                 d["name"], item),
+                                                 d["name"], item, top_length(d.get("size_table"))),
                 "price": d["price"],
                 "representative_color": pick_color(d["name"], d.get("description", ""), d.get("spec"),
                                                    d.get("options")),
