@@ -1183,13 +1183,21 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
             # 파일 이름에 size/detail/info 가 든 그림은 어디에 있든 먼저 읽는다.
             cand = [u for u in images_of(d)
                     if u not in shared and not skip_image(u)]
-            hinted = [u for u in cand if HINT_NAME.search(u)]
-            rest = [u for u in cand if u not in hinted]
+            # 「눌러서 얻은 그림」이 맨 앞이다 — 사이즈가이드 창·SIZE CHART 칸처럼 **사람이
+            # 확인한 자리**에서 받아 온 주소라, 파일 이름 힌트보다 확실하다. 이것을 따로
+            # 앞세우지 않으면 아래의 `rest[::-1]`(뒤에서부터 읽기)이 그림을 **맨 뒤로**
+            # 보내 버린다 — 그림이 열 장 넘는 상품에서는 예산 안에 아예 안 들어온다
+            # (2026-09-18 실측: cayl 은 사이즈표 그림이 붙은 865벌 가운데 178벌만 그 그림을
+            # 읽었고, 나머지 687벌은 판을 두 번 돌려도 그대로였다. 그 상품들은 갤러리가
+            # 11~12장이라 뒤에서부터 열 장을 읽으면 앞의 사이즈표에 닿지 못한다).
+            first = [u for u in cand if u in extra_urls]
+            hinted = [u for u in cand if u not in first and HINT_NAME.search(u)]
+            rest = [u for u in cand if u not in first and u not in hinted]
             # 힌트가 붙은 그림을 먼저, 나머지는 뒤에서부터. 상한에 닿았는데 글자가 거의 안
             # 나왔으면 상한을 두 배까지 늘려 더 본다 — 뒤 여덟 장이 전부 착용컷이고 표는
             # 앞쪽에 있는 매장이 있다(espionage 는 그림 23장 중 뒤 8장만 읽고 42자를 건졌다,
             # 2026-09-06). 잘 나오는 상품에는 아무 값도 더 안 든다.
-            order = hinted + rest[::-1]
+            order = first + hinted + rest[::-1]
             budget, read = max_images, 0
             for url in order:
                 if read >= budget:

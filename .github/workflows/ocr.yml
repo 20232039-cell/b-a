@@ -201,8 +201,25 @@ jobs:
         run: |
           mkdir -p data/crawl/ocr
           python3 - <<'PY'
-          import json, glob, os
+          import json, glob, os, sys
           from collections import defaultdict
+          sys.path.insert(0, "scripts")
+          try:
+              from size_from_ocr import from_ocr
+          except Exception:
+              from_ocr = None
+
+          def has_table(t):
+              """그 글에서 사이즈 표가 읽히나."""
+              if not t or from_ocr is None:
+                  return False
+              try:
+                  _, cols = from_ocr(t)
+              except Exception:
+                  return False
+              return len({k: v for k, v in (cols or {}).items()
+                          if any(x is not None for x in v)}) >= 2
+
           parts = defaultdict(list)
           for p in sorted(glob.glob("_parts/*.jsonl")):
               brand = os.path.basename(p).rsplit(".", 2)[0]
@@ -225,8 +242,21 @@ jobs:
                       # --redo 로 3,056장을 다시 읽고도 collect 가 「변화 없음」으로 끝났다(2026-09-04 run 3).
                       if old is None:
                           have[d["product_no"]] = d; new += 1
-                      elif (len(d.get("images") or []), len(d.get("ocr_text") or "")) > \
-                           (len(old.get("images") or []), len(old.get("ocr_text") or "")):
+                          continue
+                      # **표가 있는 쪽이 먼저다.** 장 수·글자 수만 보면, 「눌러서 얻은
+                      # 사이즈표 그림을 읽고 표를 찾아 일찍 멈춘」 기록이 「착장컷 열두 장을
+                      # 끝까지 읽은」 옛 기록에 진다 — 장 수가 적고 글자도 적기 때문이다.
+                      # 그래서 판을 두 번 돌려도 그 상품은 영영 안 바뀐다(2026-09-18 실측:
+                      # cayl 687벌이 이 자리에 갇혀 있었다. 조각은 다 읽었는데 합치는 데서
+                      # 버려졌다). 우리가 찾는 것은 장 수가 아니라 표다.
+                      nt, ot = d.get("ocr_text") or "", old.get("ocr_text") or ""
+                      nh, oh = has_table(nt), has_table(ot)
+                      if nh != oh:
+                          if nh:
+                              have[d["product_no"]] = d; new += 1
+                          continue
+                      if (len(d.get("images") or []), len(nt)) > \
+                         (len(old.get("images") or []), len(ot)):
                           have[d["product_no"]] = d; new += 1
               with open(dst, "w", encoding="utf-8") as f:
                   for d in have.values():
