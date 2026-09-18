@@ -21,6 +21,10 @@ on:
         description: "매장마다 볼 상품 수"
         required: false
         default: "3"
+      gender:
+        description: "true 면 건강 확인 대신 **브랜드 성별 전수**를 돌린다"
+        required: false
+        default: "false"
 
 env:
   DATA_BRANCH: crawl/cafe24-full-catalog
@@ -48,7 +52,18 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: "3.11"}
       - run: pip install -q requests beautifulsoup4 lxml
+      - name: 브랜드 성별 전수
+        if: ${{ inputs.gender == 'true' }}
+        run: |
+          python scripts/brand_gender.py --brands "${{ inputs.brands }}" --workers 6 | tee /tmp/gender.log
+          {
+            echo "## 브랜드 성별"
+            echo '```'
+            tail -60 /tmp/gender.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: 매장 건강 확인
+        if: ${{ inputs.gender != 'true' }}
         run: |
           python scripts/store_health.py --brands "${{ inputs.brands }}" \
             --per "${{ inputs.per || '3' }}" --workers 6 | tee /tmp/health.log
@@ -63,7 +78,7 @@ jobs:
         run: |
           git config user.name "layer-health-bot"
           git config user.email "health@layer.invalid"
-          git add data/_store_health.csv
+          git add data/_store_health.csv data/_brand_gender.csv
           git diff --cached --quiet && { echo "변화 없음"; exit 0; }
           git commit -m "매장 건강 확인 (Actions)"
           for i in 1 2 3; do
