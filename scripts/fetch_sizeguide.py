@@ -33,6 +33,7 @@ from pathlib import Path
 from urllib.parse import urljoin
 
 import requests
+from bs4 import BeautifulSoup
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA, CRAWL = ROOT / "data", ROOT / "data" / "crawl"
@@ -86,6 +87,33 @@ def images_after_heading(html: str, base: str) -> list[str]:
             if n >= 3:        # 머리말 하나에 셋까지 — 그 뒤는 다음 칸의 그림일 공산이 크다
                 break
     return out[:6]
+
+
+SIZEY = re.compile(r"(?:총장|기장|어깨|가슴|소매|허리|밑단|밑위|허벅지|암홀|"
+                   r"LENGTH|CHEST|SHOULDER|SLEEVE|WAIST|HEM|THIGH)\s*[:=]?\s*\d", re.I)
+
+
+def text_in(html: str) -> list[str]:
+    """그 창에 **글로** 적힌 치수를 줄 단위로 거둔다.
+
+    여태 이 창에서는 그림만 찾았다. 그런데 사람이 상품 페이지의 「INFORMATION」을 직접 눌러
+    보고 알려 줬다 — 그 창의 내용이 그림이 아니라 글인 매장이 있다(2026-09-18):
+
+        M  총장 74.5 어깨 55.5 가슴 64 소매 22.5
+        L  총장 76.5 어깨 57.5 가슴 66 소매 23.5
+
+    그림만 보던 탓에 이런 매장은 통째로 「없음」으로 세었다. 못 채운 옷이 20벌 넘는 매장
+    47곳을 찔러 보니 네 곳이 이 꼴이다.
+    """
+    soup = BeautifulSoup(html, "lxml")
+    for t in soup(["script", "style", "noscript"]):
+        t.decompose()
+    out = []
+    for ln in soup.get_text("\n").splitlines():
+        ln = re.sub(r"\s+", " ", ln).strip()
+        if ln:
+            out.append(ln)
+    return out
 
 
 def load_targets(brand: str, only_missing: bool, cats: dict, sized: set) -> list[dict]:
@@ -144,16 +172,17 @@ def fetch_brand(brand: str, recs: list[dict], delay: float, workers: int, limit:
                 r = sess.get(url, timeout=25)
                 if r.status_code != 200:
                     return None
-                return d, (images_in(r.text, base) if source == "sizeguide"
-                           else images_after_heading(r.text, base))
+                imgs = (images_in(r.text, base) if source == "sizeguide"
+                        else images_after_heading(r.text, base))
+                return d, imgs, text_in(r.text)
             except Exception:
                 time.sleep(1.5 * (attempt + 1))
         return None
 
-    got: list[tuple[dict, list[str]]] = []
+    got: list[tuple[dict, list[str], list[str]]] = []
     with ThreadPoolExecutor(max_workers=workers) as ex:
         for res in ex.map(one, todo):
-            if res and res[1]:
+            if res and (res[1] or res[2]):
                 got.append(res)
             time.sleep(delay)
 
@@ -163,22 +192,32 @@ def fetch_brand(brand: str, recs: list[dict], delay: float, workers: int, limit:
     # 열 벌 넘게 겹치는 그림은 그 상품의 치수가 아니다 — 다른 자리에서 쓰는 잣대와 같게
     # 맞춘다. 처음엔 「절반 넘게」로 느슨하게 잡았다가, 한 매장의 브랜드 소개 그림 석 장이
     # 136벌 가운데 50벌쯤에 붙어 그대로 통과했다(2026-09-17 실측: 그 매장 적중률 0%).
-    use = collections.Counter(u for _, urls in got for u in urls)
+    use = collections.Counter(u for _, urls, _ in got for u in urls)
     shop_wide = {u for u, c in use.items() if c >= 10}
+    # 글도 같은 잣대로 거른다 — 이 창에는 상품별 실측과 **매장 공용 환산표**가 함께 실린다
+    # (saintpain: 「M 총장 74.5 어깨 55.5 …」 밑에 「가슴 (inches) 22 23 24 …」가 붙어 있다).
+    # 열 벌 넘게 똑같이 나오는 줄은 그 상품의 치수가 아니다.
+    line_use = collections.Counter(l for _, _, lines in got for l in set(lines))
+    shop_lines = {l for l, c in line_use.items() if c >= 10}
 
     outdir.mkdir(parents=True, exist_ok=True)
-    n_img = 0
+    n_img = n_txt = 0
     with dst.open("a", encoding="utf-8") as fh:
-        for d, urls in got:
+        for d, urls, lines in got:
             keep = [u for u in urls if u not in shop_wide]
-            if not keep:
+            mine = [l for l in lines if l not in shop_lines]
+            txt = "\n".join(mine)
+            if not keep and not SIZEY.search(txt):
                 continue
             n_img += len(keep)
-            fh.write(json.dumps({"brand_slug": brand, "product_no": d["product_no"],
-                                 "source_url": d["source_url"], "size_images": keep[:8]},
-                                ensure_ascii=False) + "\n")
+            rec = {"brand_slug": brand, "product_no": d["product_no"],
+                   "source_url": d["source_url"], "size_images": keep[:8]}
+            if SIZEY.search(txt):
+                n_txt += 1
+                rec["size_text"] = txt[:4000]
+            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
     return {"brand": brand, "products": len(todo), "with_img": len(got),
-            "images": n_img, "shop_wide": len(shop_wide)}
+            "images": n_img, "texts": n_txt, "shop_wide": len(shop_wide)}
 
 
 def main():
