@@ -847,13 +847,55 @@ def parse_transposed(lines: list[str]) -> tuple[None, dict[str, list[float]]] | 
             s_ = re.sub(r"[:：=]", " ", cand).strip()
             m = LABEL_RX.match(s_)
             if not m:
+                # 도식에 A·B·C 를 달고 줄머리에도 그 글자를 붙이는 표가 있다
+                # (「A (BODY LENGTH) 78.5 80 81.5」). 글자 하나를 떼고 다시 본다 —
+                # 뗀 자리에 **아는 라벨**이 서야만 받으므로, 사이즈 이름 줄(「S 65 61…」)이
+                # 잘못 걸릴 여지가 없다(2026-09-17 실측: 이 꼴이 한 매장에서만 300벌 넘는다).
+                k = re.match(r"[(\[]?\s*[A-Za-z①-⑳]\s*[)\].·-]?\s+", s_)
+                if k:
+                    s2 = s_[k.end():].lstrip("([<")
+                    m = LABEL_RX.match(s2)
+                    if m:
+                        s_ = s2
+            if not m:
                 continue
             lab = canon_label(m.group(0))
             if not lab:
                 continue
+            # 한 줄에 **같은 라벨이 두 번 이상** 서면 표의 한 줄이 아니라 모델 정보 카드다:
+            #     = Model size info
+            #     가슴둘레 | 79cm 가슴둘레 | 77cm
+            #     허리둘레 | 57cm 허리둘레 | 62cm
+            # 칸이 옆으로 늘어서 있어 이 갈래에는 「라벨 + 값 둘」인 멀쩡한 표로 보인다.
+            # drop_model_body 는 **키가 적힌 줄**만 모델 정보로 보고 값이 하나일 때만 빼므로
+            # 여기엔 안 듣는다(2026-09-18 실측: loeuvre 두 벌이 모델 가슴 79·77 · 허리 57·62 를
+            # 옷 치수로 받았다 — 여러 상품에 같은 값이 그대로 붙어 있어 곧 눈에 띈다).
+            # 머리말 자리로는 못 가른다 — OCR 이 머리말과 값을 열 줄 넘게 떼어 놓는다.
+            # 진짜 표는 라벨을 한 번만 적고 값을 잇는다. 서로 **다른** 라벨이 한 줄에 겹치는
+            # 표(「Length) | Hip 50cm 52cm」)는 세로선으로 쪼갠 칸이 따로 받는다.
+            if sum(1 for m2 in LABEL_RX.finditer(cand)
+                   if canon_label(m2.group(0)) == lab) > 1:
+                continue
             rest = s_[m.end():]
             # 단위와 구분 기호를 걷어낸 뒤에도 글자가 남으면 표가 아니라 문장이다
+            # 라벨 뒤 괄호 속 한두 자리 수는 도식 번호다(「어깨(6) 42 44 46 48 50」).
+            # 값으로 세면 줄 전체가 한 칸씩 밀린다 — 실제로 그렇게 밀었다(2026-09-17 실측:
+            # 한 매장 88벌에서 어깨 [6, 42, 44 …] 처럼 앞에 번호가 들어앉았다).
+            rest = re.sub(r"^\s*[(\[]\s*\d{1,2}\s*[)\]]", " ", rest)
+            # 인치로 적은 줄은 받지 않는다. 아래에서 단위 낱말을 걷어 내고 「글자가 남지
+            # 않으면 표」로 보는데, 그 걷어 내기가 inch 까지 지워 인치 값이 cm 자리에
+            # 들어앉는다(2026-09-17 loeuvre/706: 「가슴둘레 | 30.5 inch」가 가슴 30.5cm 로
+            # 읽혔다 — 실제로는 77cm 다). 환산해서 넣을 수도 있지만 그 매장 표는 모델
+            # 치수와 옷 치수가 한 줄에 나란히 서 있어 어느 쪽인지 가릴 수 없다.
+            # 없는 치수보다 틀린 치수가 나쁘다.
+            if re.search(r"\d\s*(?:inch(?:es)?|in\b|[”\"])", rest, re.I):
+                continue
             bare = re.sub(r"[\d.,\s/~\-]|cm|CM|em|inch|in\b", "", rest)
+            # 라벨 뒤에 꾸밈말이 한 마디 더 붙는 표가 있다(「C (CHEST WIDTH) 53 55.5 58」).
+            # 어휘에 「chest width」를 통째로 넣는 길도 있지만, 그러면 라벨이 두 토막에서
+            # 한 토막이 되어 **자리로 맞추는 갈래의 칸 수가 어긋난다** — 전수로 재니 한 매장
+            # 세 벌이 소매·총장을 잃었다. 그래서 어휘는 그대로 두고 이 자리에서만 덜어 낸다.
+            bare = re.sub(r"width|length|단면|둘레|길이|너비", "", bare, flags=re.I)
             if len(bare) > 2:
                 continue
             vals = _TRANS_NUM.findall(rest)
@@ -861,6 +903,34 @@ def parse_transposed(lines: list[str]) -> tuple[None, dict[str, list[float]]] | 
                 continue
             rows.append((lab, vals))
             break
+    def _sane(lab, vals):
+        """값이 모두 그 라벨의 정상 범위 안인가."""
+        lo, hi = RANGES.get(lab, (0, 10 ** 6))
+        for raw in vals:
+            x = fix_value(lab, raw)
+            if x is None:
+                try:
+                    x = float(str(raw).replace(",", "."))
+                except ValueError:
+                    return False
+            if not (lo <= x <= hi):
+                return False
+        return True
+
+    # 괄호를 반만 흘린 도식 번호 — 위에서 떼지 못한 나머지.
+    # OCR 이 「가슴단면 (0) 53.5 56 58.5」의 닫는 괄호를 흘리면(「(0 53.5 …」) 앞의 괄호
+    # 떼기가 듣지 않아 그 줄만 값이 하나 많아지고, 칸 수가 어긋난다는 이유로 줄째 버려진다
+    # (2026-09-17 blr/326: 가슴·소매길이를 잃고 대신 parse_rows 의 가슴 82 이 들어앉았다).
+    # 그래서 **칸 수가 가장 흔한 수보다 딱 하나 많고 · 첫 값만 그 라벨의 범위 밖이며 ·
+    # 나머지가 모두 범위 안**일 때만 앞의 하나를 덜어 낸다. 세 조건을 다 요구하므로 값이
+    # 정말 하나 더 있는 표(칸이 하나 더 많은 사이즈)는 건드리지 않는다.
+    if rows:
+        cnt0 = Counter(len(v) for _, v in rows)
+        n0 = max(cnt0, key=lambda k: (cnt0[k], k))
+        if cnt0[n0] >= 2 and n0 >= 2:
+            rows = [(lab, v[1:]) if (len(v) == n0 + 1 and not _sane(lab, v[:1])
+                                     and _sane(lab, v[1:])) else (lab, v)
+                    for lab, v in rows]
     if len(rows) < 2 or len({lab for lab, _ in rows}) < 2:
         return None
     n = len(rows[0][1])
@@ -882,22 +952,32 @@ def parse_transposed(lines: list[str]) -> tuple[None, dict[str, list[float]]] | 
         rows = [(lab, v) for lab, v in rows if len(v) == n]
         if len({lab for lab, _ in rows}) < 2:
             return None
-        def _sane(lab, vals):
-            lo, hi = RANGES.get(lab, (0, 10 ** 6))
-            for raw in vals:
-                x = fix_value(lab, raw)
-                if x is None:
-                    try:
-                        x = float(str(raw).replace(",", "."))
-                    except ValueError:
-                        return False
-                if not (lo <= x <= hi):
-                    return False
-            return True
-
         rows = [(lab, v) for lab, v in rows if _sane(lab, v)]
         if len({lab for lab, _ in rows}) < 2:
             return None
+    # OCR 이 같은 줄을 두 번 뱉기도 한다 — 한 번은 깨진 채로:
+    #     엉덩이둘레 S77 903.3 98.4     ← 잡음
+    #     엉덩이둘레 87.7 93.3 98.4     ← 멀쩡한 줄
+    # 먼저 나온 것을 쓰면 잡음이 이긴다(2026-09-17 실측). 범위 밖 값이 든 쪽을 버린다.
+    def _score(lab, vals):
+        """어느 줄이 더 표다운가 — (값이 다 범위 안, 사이즈가 커지며 값도 커짐)."""
+        nums = []
+        for raw in vals:
+            x = fix_value(lab, raw)
+            if x is None:
+                try:
+                    x = float(str(raw).replace(",", "."))
+                except ValueError:
+                    return (0, 0)
+            nums.append(x)
+        mono = all(a <= b for a, b in zip(nums, nums[1:]))
+        return (int(_sane(lab, vals)), int(mono))
+
+    best: dict[str, list[str]] = {}
+    for lab, vals in rows:
+        if lab not in best or _score(lab, vals) > _score(lab, best[lab]):
+            best[lab] = vals
+    rows = list(best.items())
     out: dict[str, list[float]] = {}
     for lab, vals in rows:
         if lab in out:
