@@ -1604,7 +1604,10 @@ def repeated_block_table(seq: list[tuple[str, list[float], int]], t: str) -> dic
         return {}
     cnt = Counter(l for l, _, _ in seq)
     k = max(cnt.values())
-    if not 2 <= k <= 8:
+    # 같은 표를 페이지에 여러 번 찍는 매장이 있다(nomanual 은 세 번). 사이즈 넷짜리 표가
+    # 세 번이면 k=12 라 8 에서 잘려 표가 통째로 버려졌다 — 살아 있는 페이지에서 확인했다.
+    # 접는 일은 collapse_repeated_columns 가 하니, 여기서는 접을 여지까지 받아 준다.
+    if not 2 <= k <= 24:
         return {}
     multi = [l for l, c in cnt.items() if c == k]
     if len(multi) < 2:
@@ -1716,11 +1719,18 @@ def extract_size_table(html_text: str) -> dict[str, list[float]]:
         if len(mat) > len(rows):
             rows = mat
     # 붙여 쓴 표는 칸 수로 이긴다 — 글자 파서는 이 꼴에서 언제나 첫 줄만 읽어 한 칸을 준다.
+    # 다만 사이즈 이름이 있는 쪽을 먼저 본다(table_is_better 와 같은 잣대). 한 페이지에 표가
+    # 둘 실린 매장에서 되풀이 묶음 파서가 두 표를 한 줄로 이어 붙여 칸이 배로 늘어난 적이
+    # 있다 — 치마·바지 세트에서 총길이가 [36,38,40,100,101,102] 이 됐다. 칸 수만 보면 그게
+    # 이기지만 그건 표가 아니라 두 표가 붙은 것이다(foeto/1875, 살아 있는 페이지에서 확인).
     run = extract_size_runon(t)
     if run:
         have = max((len(v) for k, v in rows.items() if k != "_names"), default=0)
         want = max((len(v) for k, v in run.items() if k != "_names"), default=0)
-        if want > have:
+        if bool(run.get("_names")) != bool(rows.get("_names")):
+            if run.get("_names") and want >= 2:
+                rows = run
+        elif want > have:
             rows = run
     return rows
 
