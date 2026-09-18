@@ -350,6 +350,17 @@ def parse_pair_rows(lines: list[str]) -> tuple[list[str] | None, dict[str, list[
     rows: list[tuple[tuple[str, ...], list[str], str | None]] = []
     prev = ""
     for ln in lines:
+        # 모델 몸 치수 줄은 받지 않는다 — 꼴이 옷 표와 똑같아서 그냥 두면 그대로 들어온다:
+        #     * Model size
+        #     - INGA  Height 175cm Bust 78cm Waist 62cm Hip 90cm
+        #     - LISA  Height 171cm Bust 75cm Waist 60cm Hip 90cm
+        # 이 두 줄이 「라벨 차례가 같은 두 줄」이라 표로 보이고, 정작 그 위의 진짜 표
+        # (Total length 66 / Shoulder 68 / …)는 열로 서 있어 이 갈래가 못 읽는다. 그래서
+        # 가슴 78·75(줄어든다)가 들어왔다(2026-09-18 실측 crank 4벌). **키가 적힌 줄**은
+        # 옷 표일 수 없다 — drop_model_body 가 쓰는 잣대와 같다.
+        if _MODEL_H.search(ln or ""):
+            prev = ""
+            continue
         ps = _label_value_pairs(ln or "")
         if len(ps) < 2:
             if (ln or "").strip():
@@ -2664,6 +2675,7 @@ def main():
         print(f"브라우저 기록 {len(brw)}건")
     # 사이즈가이드 창에서 **글로** 거둔 표(fetch_sizeguide 의 size_text). 그림보다 앞선다.
     sg_text: dict[str, str] = {}
+    _sg_seen: dict[tuple, list] = defaultdict(lambda: [0, set()])
     for sub in ("sizeguide", "pagesize"):
         dd = CRAWL / sub
         if not dd.exists():
@@ -2671,8 +2683,28 @@ def main():
         for p3 in dd.glob("*.jsonl"):
             for d3 in iter_jsonl(p3):
                 t3 = d3.get("size_text")
-                if t3 and d3.get("source_url") and len(t3) > len(sg_text.get(d3["source_url"], "")):
-                    sg_text[d3["source_url"]] = t3
+                u3 = d3.get("source_url")
+                if not (t3 and u3):
+                    continue
+                if len(t3) > len(sg_text.get(u3, "")):
+                    sg_text[u3] = t3
+                r3 = {r["source_url"]: r for r in rows.values()}.get(u3) if False else None
+    # 매장 공용 안내가 이 창에도 그대로 실린다. 다른 자리에서 쓰는 잣대와 같게 —
+    # **같은 글이 열 벌 넘게 × 품목 셋 이상**에 붙으면 그 상품의 치수가 아니다.
+    _by_url = {r["source_url"]: r for r in rows.values()}
+    for u3, t3 in sg_text.items():
+        r3 = _by_url.get(u3)
+        if not r3:
+            continue
+        k3 = (r3["brand_slug"], t3)
+        _sg_seen[k3][0] += 1
+        if r3.get("category"):
+            _sg_seen[k3][1].add(r3["category"])
+    _sg_wide = {k for k, (n, cats) in _sg_seen.items() if n >= 10 and len(cats) >= 3}
+    if _sg_wide:
+        sg_text = {u: t for u, t in sg_text.items()
+                   if (_by_url.get(u, {}).get("brand_slug"), t) not in _sg_wide}
+        print(f"사이즈가이드 창의 글 가운데 매장 공용으로 판단해 버림 {len(_sg_wide)}가지")
     if sg_text:
         print(f"사이즈가이드 창의 글 {len(sg_text)}건")
     girth_keys = brand_girth(CRAWL)
@@ -2758,13 +2790,17 @@ def main():
                 # 다른 매장의 표를 가로챈다 — 얻음 108벌 옆에서 **775벌이 값을 잃고 12벌이
                 # 통째로 사라졌다**(till-i-die 516 · crank 171 · known-better 81, 2026-09-18).
                 # 이 꼴을 찾은 자리가 버튼이 여는 창이었으니 거기서만 쓴다.
+                # **이 갈래로 읽힌 것만 받는다.** 안 되면 from_ocr 로 되돌리게 해 봤더니,
+                # 같은 창에 실린 **카페24 공용 인치 환산표**(「가슴 (inches) 22 23 24 …」)가
+                # 그대로 들어왔다 — 215벌 중 59벌이 그 되돌림에서 나왔고 거기에 섞여 있었다
+                # (2026-09-18 실측: unaffected 4벌이 가슴 27·28.5·30·32 를 받았다. 인치다).
+                # parse_pair_rows 는 라벨 뒤에 수가 붙어야 받으므로 그 표를 구조적으로 거른다.
                 sgl = [x.strip() for x in sg.splitlines() if x.strip()]
                 pr = parse_pair_rows(sgl)
-                n3, s3 = (pr[0], clean_ocr(pr[1])) if pr else from_ocr(sg)
-                if len(s3) < 2:
-                    n3, s3 = from_ocr(sg)
-                if len(s3) > len(sizes):
-                    sizes, names, source = s3, n3, "sizeguide"
+                if pr:
+                    s3 = clean_ocr(pr[1])
+                    if len(s3) > len(sizes):
+                        sizes, names, source = s3, pr[0], "sizeguide"
             if len(sizes) < 2 and ocr.get(k):
                 names2, sizes2 = from_ocr(ocr[k])
                 if len(sizes2) > len(sizes):

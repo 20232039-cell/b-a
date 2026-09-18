@@ -140,7 +140,7 @@ def load_targets(brand: str, only_missing: bool, cats: dict, sized: set) -> list
 
 
 def fetch_brand(brand: str, recs: list[dict], delay: float, workers: int, limit: int,
-                source: str = "sizeguide", retext: bool = False) -> dict:
+                source: str = "sizeguide", retext: bool = False, force: bool = False) -> dict:
     """source=sizeguide: 카페24 사이즈가이드 창 · source=page: 상품 페이지의 사이즈 머리말 뒤"""
     if not recs:
         return {"brand": brand, "products": 0, "with_img": 0, "images": 0, "shop_wide": 0}
@@ -160,7 +160,7 @@ def fetch_brand(brand: str, recs: list[dict], delay: float, workers: int, limit:
                     o = json.loads(l)
                 except Exception:
                     continue
-                if retext and not o.get("size_text"):
+                if force or (retext and not o.get("size_text")):
                     continue
                 done.add(o["product_no"])
     todo = [d for d in recs if d["product_no"] not in done][:limit]
@@ -203,11 +203,15 @@ def fetch_brand(brand: str, recs: list[dict], delay: float, workers: int, limit:
     # (saintpain: 「M 총장 74.5 어깨 55.5 …」 밑에 「가슴 (inches) 22 23 24 …」가 붙어 있다).
     # 열 벌 넘게 똑같이 나오는 줄은 그 상품의 치수가 아니다.
     line_use = collections.Counter(l for _, _, lines in got for l in set(lines))
-    shop_lines = {l for l, c in line_use.items() if c >= 10}
+    # **짧은 줄은 안 버린다.** 사이즈 이름이 한 줄에 혼자 서는 매장이 있는데(「M」·「L」·「XL」),
+    # 그 줄은 당연히 상품마다 같아서 공용으로 몰려 지워진다 — 값은 남고 이름만 사라졌다
+    # (2026-09-18 실측: saintpain 표가 이름 없이 들어왔다). 공용 안내표는 한 줄이 길다.
+    shop_lines = {l for l, c in line_use.items() if c >= 10 and len(l) >= 8}
 
     outdir.mkdir(parents=True, exist_ok=True)
     n_img = n_txt = 0
-    with dst.open("a", encoding="utf-8") as fh:
+    # force 로 전부 다시 받을 때는 덧붙이지 말고 새로 쓴다 — 안 그러면 같은 상품이 두 줄이 된다.
+    with dst.open("w" if force else "a", encoding="utf-8") as fh:
         for d, urls, lines in got:
             keep = [u for u in urls if u not in shop_wide]
             mine = [l for l in lines if l not in shop_lines]
@@ -235,6 +239,8 @@ def main():
                     help="사이즈가 이미 있는 옷까지 받는다")
     ap.add_argument("--limit", type=int, default=100000, help="매장마다 최대 상품 수")
     ap.add_argument("--delay", type=float, default=0.05)
+    ap.add_argument("--force", action="store_true",
+                    help="이미 받아 둔 기록도 무시하고 전부 다시 받는다")
     ap.add_argument("--retext", action="store_true",
                     help="그림만 받아 둔 기록을 다시 받아 **글**도 거둔다(글 거두기는 나중에 붙었다)")
     ap.add_argument("--workers", type=int, default=6)
@@ -278,7 +284,7 @@ def main():
     for b in brands:
         recs = load_targets(b, args.only_missing, cats, sized)
         for src in sources:
-            r = fetch_brand(b, recs, args.delay, args.workers, args.limit, src, args.retext)
+            r = fetch_brand(b, recs, args.delay, args.workers, args.limit, src, args.retext, args.force)
             if r["products"]:
                 tag = "사이즈가이드 창" if src == "sizeguide" else "머리말 뒤"
                 print(f"  {b:26s} [{tag}] {r['products']:5d}벌 물어봄 · 그림 나온 상품 "
