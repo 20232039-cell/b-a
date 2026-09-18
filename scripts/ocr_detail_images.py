@@ -941,7 +941,7 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
     done: set[int] = set()
     if main.exists():
         done = {json.loads(l)["product_no"] for l in main.read_text(encoding="utf-8").splitlines() if l.strip()}
-    cats = load_categories() if select in ("no-size", "ocr", "gaps", "bad-size") else {}
+    cats = load_categories() if select in ("no-size", "ocr", "gaps", "bad-size", "no-detail") else {}
     # select=ocr: 사이즈를 「그림에서」 읽어 둔 옷을 다시 읽는다. 머리줄을 낱말 단위로
     # 읽게 바꾼 뒤 kirsh 10440 은 라벨이 한 칸씩 밀려 있던 것이 바로잡혔다(밑위 49cm·
     # 허벅지 25.5cm → 밑위 25.5·허벅지 33.8, 2026-09-05). 빠진 것뿐 아니라 틀린 것도 있다.
@@ -1023,6 +1023,28 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
                     or not (t.get("design_element") or t.get("construction") or t.get("hardware"))):
                 gap_urls.add(u)
 
+    # select=no-detail: **상품 설명(디테일)이 없는 옷.** 사이즈·소재는 이미 있어도 상관없다 —
+    # 우리가 찾는 것은 「이 옷이 어떤 옷인가」를 말하는 문장이다. detail_from_ocr 이 읽어 둔
+    # 글에서 그걸 못 뽑은 상품을 고른다. 기존 갈래로는 이 대상을 못 부른다: gaps 는 사이즈·
+    # 소재·색이 이미 있으면 안 걸리고(그래서 판 49 가 「읽을 것이 하나도 없다」로 죽었다),
+    # short 는 글자 수로만 본다. 디테일 없는 판매중 의류 60,644벌 중 52%(31,611벌)에 아직
+    # 안 읽은 그림이 남아 있고, 표본 39벌을 실제로 읽어 보니 21%에서 알맹이가 나왔다.
+    nodetail_nos: set[int] = set()
+    if select == "no-detail":
+        dp = CRAWL_DIR / "detail" / f"{slug}.jsonl"
+        has_desc: set[int] = set()
+        if dp.exists():
+            for l in dp.read_text(encoding="utf-8").splitlines():
+                if not l.strip():
+                    continue
+                try:
+                    o = json.loads(l)
+                except Exception:
+                    continue
+                if o.get("description"):
+                    has_desc.add(o.get("product_no"))
+        nodetail_nos = {no for no in latest if no not in has_desc}
+
     # 옛 6,000자 상한에 잘려 나간 기록 — 그때는 그림별 글을 남기지 않아서 되살릴 길이
     # 그림을 다시 읽는 것뿐이다(지금 상한은 12,000자). 잘린 자리가 글 끝이라, 상세 그림
     # 맨 뒤에 오는 사이즈 표·소재·케어가 통째로 날아간 상품이 있다.
@@ -1046,7 +1068,7 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
     # 읽어 넣은 것이니 전부 done 안에 있다. 그래서 --redo 없이 돌리면 대상이 58 → 5 로
     # 주저앉는다(2026-09-07 실측: noirer 20 · easy-no-easy 9 · frizmworks 7 이 전부 0 이 됐다).
     # 이 갈래는 다시 읽기가 목적이므로 redo 를 켜고 시작한다.
-    if select in ("bad-size", "capped", "thin-table"):
+    if select in ("bad-size", "capped", "thin-table", "no-detail"):
         redo = True
 
     # 매장 공용 안내 그림은 읽어도 소용없다 — 결제 아이콘·저작권 안내·교환반품 규정이
@@ -1090,7 +1112,7 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
             if 5995 <= text_len.get(no, 0) <= 6005:
                 done.discard(no)
                 continue
-            if select not in ("ocr", "bad-size") and d.get("source_url") in sized_urls:
+            if select not in ("ocr", "bad-size", "no-detail") and d.get("source_url") in sized_urls:
                 # select=all 에서도 「그림에서 읽은」 사이즈는 다시 읽는다 — 판독기가 바뀌면
                 # 같은 그림에서 다른 값이 나온다. HTML 로 얻은 사이즈는 건드릴 까닭이 없다
                 # (2026-09-05: 되찾은 그림 읽기와 판독기 재판독을 한 판에 돌리려고).
@@ -1155,6 +1177,9 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
                 continue
         elif select == "thin-table":
             if d.get("source_url") not in thin_urls:
+                continue
+        elif select == "no-detail":
+            if no not in nodetail_nos or cats.get((slug, int(no)), "") not in GARMENTS:
                 continue
         elif only_short and len(d.get("description", "")) >= SHORT_TEXT:
             continue
@@ -1368,7 +1393,7 @@ def main():
     ap.add_argument("--max-jobs", type=int, default=60,
                     help="--plan: matrix 잡 수 상한 (GitHub 은 256잡을 넘기면 잡을 아예 안 만든다)")
     ap.add_argument("--allow-empty", action="store_true", help="--plan: 대상이 0이어도 죽지 않는다")
-    ap.add_argument("--select", default="short", choices=["short", "all", "no-size", "ocr", "gaps", "bad-size", "capped", "thin-table"], help="short=설명 짧은 것(기본) · all=전부 · no-size=사이즈 표 없는 옷 · ocr=사이즈를 그림에서 읽은 옷 다시 · gaps=사이즈·소재·색·디테일 중 하나라도 빈 옷 · bad-size=사이즈가 커지는데 값이 작아지는 표만 다시 · capped=옛 6,000자 상한에 잘린 기록만 다시 · thin-table=표 칸 수가 매장 사이즈 수보다 적은 옷")
+    ap.add_argument("--select", default="short", choices=["short", "all", "no-size", "ocr", "gaps", "bad-size", "capped", "thin-table", "no-detail"], help="short=설명 짧은 것(기본) · all=전부 · no-size=사이즈 표 없는 옷 · ocr=사이즈를 그림에서 읽은 옷 다시 · gaps=사이즈·소재·색·디테일 중 하나라도 빈 옷 · bad-size=사이즈가 커지는데 값이 작아지는 표만 다시 · capped=옛 6,000자 상한에 잘린 기록만 다시 · thin-table=표 칸 수가 매장 사이즈 수보다 적은 옷 · no-detail=상품 설명이 없는 옷")
     args = ap.parse_args()
     OCR_DIR.mkdir(parents=True, exist_ok=True)
     k, n = (int(x) for x in args.shard.split("/"))
