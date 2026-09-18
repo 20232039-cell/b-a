@@ -346,6 +346,9 @@ GENDER_RULES = [
     ("UNISEX", ["unisex", "유니섹스"]),
 ]
 BRAND_GENDER = {"Womenswear": "WOMENSWEAR", "Menswear": "MENSWEAR", "Unisex": "UNISEX"}
+# 매장이 성별 칸을 안 쓰는 상품에서, 품목만으로 여성이라 말할 수 있는 것.
+# 왜 둘뿐인지는 classify_gender 안에 센 값과 함께 적어 두었다.
+WOMEN_ONLY_ITEM = {"스커트", "원피스"}
 
 # 상품이 아닌 페이지의 이름 — 개인결제·스태프 결제·룩북·테스트. 가격이 있어도 상품이 아니다.
 # ^@ — glowny 가 고객 착용샷을 「@인스타아이디」 상품(2,500,000원)으로 830건 올려 둠. ^[¥*]+ — insilence 비공개 자리표시자 159건 (사람 결정 2026-09-02)
@@ -1225,7 +1228,8 @@ NAME_W_HEAD = re.compile(r"^\s*(?:\[[^\]]*\]\s*)?W\s+(?=[A-Za-z가-힣])")
 NAME_M_HEAD = re.compile(r"^\s*(?:\[[^\]]*\]\s*)?M\s+(?=[A-Za-z가-힣])")
 
 
-def classify_gender(category_names: list[str], brand_default: str, name: str = "") -> str:
+def classify_gender(category_names: list[str], brand_default: str, name: str = "",
+                    item_type: str = "") -> str:
     """칸 이름 → 브랜드 기본값 순으로 성별을 정하되, 상품 이름이 말하면 그게 이긴다.
 
     지금까지는 이름을 안 봤다. 그래서 여성복 매장의 「UNISEX PADDED DENIM BOMBER JACKET」이
@@ -1258,6 +1262,17 @@ def classify_gender(category_names: list[str], brand_default: str, name: str = "
     for g, keys in GENDER_RULES:
         if any(re.search(rf"\b{k}\b", joined) for k in keys):
             return g
+    # 매장이 아무 말도 안 했으면 품목이 말한다. 짐작이 아니라 센 값이다 — 매장이 제 손으로
+    # 성별 칸에 넣어 둔 22,714벌에서 품목별로 어느 칸에 들어갔는지 셌다(2026-09-18):
+    #
+    #     스커트  남성 칸    0 / 여성 칸  954
+    #     원피스  남성 칸    0 / 여성 칸  365
+    #     티셔츠  남성 칸  960 / 여성 칸 1527   ← 기준선. 여성 칸이 원래 1.5배 많다(61%)
+    #
+    # 기준선이 61% 여성이라 「여성 비율이 높다」만으로는 아무 말도 아니다. 남성 칸이 0인
+    # 둘만 받는다. 탑(남성 105/1763 = 6%)·플랫·샌들은 0이 아니라 뺐다 — 확신 없으면 비운다.
+    if item_type in WOMEN_ONLY_ITEM:
+        return "WOMENSWEAR"
     return brand_default or "UNISEX"
 
 
@@ -2946,7 +2961,8 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
                 "category_code": code,
                 "item_type": item,
                 "name": d["name"],
-                "gender_target": classify_gender(d.get("category_names", []), brand_gender.get(slug, "UNISEX"), d["name"]),
+                "gender_target": classify_gender(d.get("category_names", []), brand_gender.get(slug, "UNISEX"),
+                                                 d["name"], item),
                 "price": d["price"],
                 "representative_color": pick_color(d["name"], d.get("description", ""), d.get("spec"),
                                                    d.get("options")),
