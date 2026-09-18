@@ -1,0 +1,82 @@
+# 매장이 아직 살아 있는지 **내용으로** 확인한다 — 상태 코드가 아니라 상품 글이 오는가로.
+#
+# 왜(2026-09-18): till-i-die 는 우리가 tillidie.co.kr 를 긁는데 실제 매장은 tilldie.co.kr 다.
+# 옛 주소가 200 을 돌려주고 페이지도 118,003자가 오는데 상품 글이 한 줄도 없다. 주소 점검표에
+# 「200 · OK」로 찍혀 있어 상태 코드로는 못 잡고, 그렇게 1,573벌이 옛 데이터로 남아 있었다.
+#
+# 결과는 data/_store_health.csv — 사람이 「껍데기」로 찍힌 매장의 새 주소를 확인해 주면 된다.
+
+name: store-health
+
+on:
+  schedule:
+    - cron: "40 6 * * 1"        # 주 1회 월요일
+  workflow_dispatch:
+    inputs:
+      brands:
+        description: "공백으로 나눈 slug. 비우면 전부"
+        required: false
+        default: ""
+      per:
+        description: "매장마다 볼 상품 수"
+        required: false
+        default: "3"
+
+env:
+  DATA_BRANCH: crawl/cafe24-full-catalog
+
+permissions:
+  contents: read
+
+concurrency:
+  group: health-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: work
+    steps:
+      - uses: actions/checkout@v4
+      - name: 데이터 저장소(비공개) 받기
+        uses: ./.github/actions/data-repo
+        with:
+          token: ${{ secrets.DATA_TOKEN }}
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: pip install -q requests beautifulsoup4 lxml
+      - name: 매장 건강 확인
+        run: |
+          python scripts/store_health.py --brands "${{ inputs.brands }}" \
+            --per "${{ inputs.per || '3' }}" --workers 6 | tee /tmp/health.log
+          {
+            echo "## 매장 건강"
+            echo '```'
+            tail -40 /tmp/health.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: commit & push (rebase 후, 3회 재시도)
+        shell: bash
+        run: |
+          git config user.name "layer-health-bot"
+          git config user.email "health@layer.invalid"
+          git add data/_store_health.csv
+          git diff --cached --quiet && { echo "변화 없음"; exit 0; }
+          git commit -m "매장 건강 확인 (Actions)"
+          for i in 1 2 3; do
+            git pull --rebase --autostash origin "$DATA_BRANCH" && git push && exit 0
+            if [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ]; then
+              for f in $(git diff --name-only --diff-filter=U || true); do
+                git checkout --ours -- "$f" && git add "$f"
+              done
+              if [ -z "$(git diff --name-only --diff-filter=U)" ]; then
+                git -c core.editor=true rebase --continue && git push && exit 0
+              fi
+              git rebase --abort 2>/dev/null || true
+            fi
+            echo "푸시 실패, 재시도 $i"; sleep 10
+          done
+          exit 1
