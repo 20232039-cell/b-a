@@ -1503,6 +1503,12 @@ def crawl_category_lists(http: PoliteSession, shop: Shop, max_pages: int = 80) -
         shop.enumerated_by = (shop.enumerated_by + "+lists") if shop.enumerated_by else "category-lists"
 
 
+def says_gender(name: str) -> bool:
+    """칸 이름이 성별을 말하나 — GENDER_RULES 와 같은 낱말을 쓴다."""
+    low = (name or "").lower()
+    return any(re.search(rf"\b{k}\b", low) for _, keys in GENDER_RULES for k in keys)
+
+
 def _crawl_one_list(http: PoliteSession, shop: Shop, cate_no: int, list_path: str, max_pages: int) -> None:
         page = 1
         seen_here: set[int] = set()
@@ -1518,7 +1524,16 @@ def _crawl_one_list(http: PoliteSession, shop: Shop, cate_no: int, list_path: st
             if page == 1:
                 m = re.search(r"<title>\s*([^<]+?)\s*(?:-|\||·)\s*[^<]*</title>", r.text)
                 if m and 1 < len(m.group(1)) <= 40:
-                    shop.categories[cate_no] = m.group(1).strip()
+                    nm = m.group(1).strip()
+                    # 제목은 앞 토막만 떼어 온다. 「SHOP - MEN - 미세키서울」이면 MEN 을 버리고
+                    # SHOP 을 적는다 — 그 매장의 남성 칸 211벌·여성 칸 737벌이 둘 다 「SHOP」이
+                    # 되어 성별을 통째로 잃었다(2026-09-18 실측). 제목 떼는 규칙을 손대면 다른
+                    # 매장 칸 이름이 줄줄이 바뀌어서, 여기서는 잃는 것만 막는다: 이미 성별을
+                    # 말하는 이름(메뉴 주소의 /category/men/79/ 에서 온 「men」)이 있으면
+                    # 성별을 말하지 않는 이름으로 덮지 않는다.
+                    had = shop.categories.get(cate_no, "")
+                    if not (says_gender(had) and not says_gender(nm)):
+                        shop.categories[cate_no] = nm
             links = harvest_product_links(r.text, shop)
             # 목록 페이지에 하위 카테고리 링크가 더 있으면 그것도 훑는다
             for m in re.finditer(r'href="[^"]*cate_no=(\d+)[^"]*"[^>]*>\s*([^<]{1,40}?)\s*<', r.text):
