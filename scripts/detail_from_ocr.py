@@ -42,8 +42,12 @@ _CARE = re.compile(r"(드라이\s*클?리?닝|손\s*세탁|물\s*세탁|세탁�
 _SENT = re.compile(r"[가-힣].{10,}?(?:다|요|죠|음|함)\s*[.!]?\s*$")
 _HANGUL = re.compile(r"[가-힣]")
 # 상품 글이 아닌 줄 — 매장 공지·법적 고지·배송 안내
+# 상품 글이 아닌 줄 — 매장 공지·법적 고지·배송 안내, 그리고 소식받기·행사 홍보.
+# 「신상품 발매와 세일 소식을 가장 먼저 받아보세요」가 상품 설명으로 들어가 있었다.
 _BOILER = re.compile(r"(교환|반품|환불|배송|택배|상표권|법적|무단|고지|주의사항|모니터|해상도|"
-                     r"오차가|착용 컷|상세 컷|고객센터|영업일|입금|적립금|쿠폰)")
+                     r"오차가|착용 컷|상세 컷|고객센터|영업일|입금|적립금|쿠폰|"
+                     r"신상품|발매|세일|소식|받아보세요|구독|회원가입|이벤트|할인|"
+                     r"카카오|인스타|팔로우|문의|재입고|품절|주문|결제|무이자|사은품)")
 
 
 def _clean_lines(text: str) -> list[str]:
@@ -94,6 +98,28 @@ def care(lines: list[str]) -> list[str]:
     return out[:4]
 
 
+# 상품 글인지 가리는 마지막 잣대 — 낱말을 막는 쪽(_BOILER)만으로는 안 됐다. 매장 안내문이
+# 끝없이 다른 말로 들어온다("측정 방법에 따라…", "보내주신 피드백을 바탕으로…",
+# "컬러 별로 약간의 차이가 있을 수 있습니다"). 뽑아 둔 설명의 32.8%가 그런 줄이었다.
+# 그래서 막는 대신 **옷 이야기를 하는 줄만 받는다**. 문장은 둘 중 하나는 말한다 —
+# 옷의 성질(핏·두께·신축·안감·포켓·짜임…)이거나, 입었을 때의 인상(무드·실루엣…)이다.
+_HARD = re.compile(r"(핏\b|오버핏|루즈핏|슬림핏|레귤러핏|크롭|와이드|테이퍼|스트레이트|기장|총장|"
+                   r"두께|도톰|얇은|얇게|가벼운|중량|신축|스트레치|늘어나|비침|비치지|안감|겉감|기모|"
+                   r"포켓|주머니|지퍼|단추|버튼|스냅|밴딩|스트링|카라|칼라|넥라인|라운드넥|브이넥|"
+                   r"소매|커프스|봉제|스티치|절개|다트|주름|플리츠|자수|프린팅|워싱|가공|짜임|조직감|"
+                   r"원단|소재|통기|보온|방수|방풍|수축|이염|보풀|착용감|실루엣|밑단|허리|어깨|"
+                   r"셋업|레이어드|배색|컬러웨이)")
+_SOFT = re.compile(r"(여리여리|사랑스|러블리|무드|분위기|세련|시크|우아|고급스|감각적|트렌디|"
+                   r"스타일리시|매력|빈티지|캐주얼|미니멀|클래식)")
+
+
+def detail_kind(sents: list[str]) -> str:
+    """설명이 무엇을 말하나 — 옷의 성질이면 「성질」, 인상뿐이면 「분위기」."""
+    if any(_HARD.search(s) for s in sents):
+        return "성질"
+    return "분위기" if sents else ""
+
+
 def description(lines: list[str]) -> list[str]:
     out = []
     for ln in lines:
@@ -102,6 +128,9 @@ def description(lines: list[str]) -> list[str]:
         han = len(_HANGUL.findall(ln))
         # 한글이 절반 넘게 차야 문장이다 — OCR 잡음은 기호·로마자가 많다
         if han < 10 or han / max(1, len(ln)) < 0.45:
+            continue
+        # 옷 이야기를 하는 줄만 받는다 — 위의 잣대
+        if not (_HARD.search(ln) or _SOFT.search(ln)):
             continue
         if ln not in out:
             out.append(ln)
@@ -155,7 +184,8 @@ def main() -> int:
             per[p.stem] += 1
             rows.append({"brand_slug": p.stem, "product_no": d.get("product_no"),
                          "material": got["material"], "care": got["care"],
-                         "description": got["description"], "source": "ocr"})
+                         "description": got["description"],
+                         "detail_kind": detail_kind(got["description"]), "source": "ocr"})
         if rows and not args.dry_run:
             with (OUT_DIR / f"{p.stem}.jsonl").open("w", encoding="utf-8") as f:
                 for r in rows:
