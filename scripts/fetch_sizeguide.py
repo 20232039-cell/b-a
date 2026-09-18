@@ -140,7 +140,7 @@ def load_targets(brand: str, only_missing: bool, cats: dict, sized: set) -> list
 
 
 def fetch_brand(brand: str, recs: list[dict], delay: float, workers: int, limit: int,
-                source: str = "sizeguide") -> dict:
+                source: str = "sizeguide", retext: bool = False) -> dict:
     """source=sizeguide: 카페24 사이즈가이드 창 · source=page: 상품 페이지의 사이즈 머리말 뒤"""
     if not recs:
         return {"brand": brand, "products": 0, "with_img": 0, "images": 0, "shop_wide": 0}
@@ -149,15 +149,20 @@ def fetch_brand(brand: str, recs: list[dict], delay: float, workers: int, limit:
         return {"brand": brand, "products": 0, "with_img": 0, "images": 0, "shop_wide": 0}
     base = m.group(1)
     outdir = OUT if source == "sizeguide" else OUT_PAGE
+    # 이미 받아 둔 상품은 건너뛴다. 다만 **글을 거두기 시작한 것은 나중**이라(2026-09-18),
+    # 그림만 있는 기록은 글이 있는지 아직 모른다 — retext 를 켜면 그런 기록을 다시 받는다.
     done: set[int] = set()
     dst = outdir / f"{brand}.jsonl"
     if dst.exists():
         for l in dst.read_text(encoding="utf-8").splitlines():
             if l.strip():
                 try:
-                    done.add(json.loads(l)["product_no"])
+                    o = json.loads(l)
                 except Exception:
-                    pass
+                    continue
+                if retext and not o.get("size_text"):
+                    continue
+                done.add(o["product_no"])
     todo = [d for d in recs if d["product_no"] not in done][:limit]
     sess = requests.Session()
     sess.headers.update(HDR)
@@ -230,6 +235,8 @@ def main():
                     help="사이즈가 이미 있는 옷까지 받는다")
     ap.add_argument("--limit", type=int, default=100000, help="매장마다 최대 상품 수")
     ap.add_argument("--delay", type=float, default=0.05)
+    ap.add_argument("--retext", action="store_true",
+                    help="그림만 받아 둔 기록을 다시 받아 **글**도 거둔다(글 거두기는 나중에 붙었다)")
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--source", choices=["sizeguide", "page", "both"], default="sizeguide",
                     help="sizeguide: 카페24 사이즈가이드 창 · page: 상품 페이지의 사이즈 머리말 뒤")
@@ -271,7 +278,7 @@ def main():
     for b in brands:
         recs = load_targets(b, args.only_missing, cats, sized)
         for src in sources:
-            r = fetch_brand(b, recs, args.delay, args.workers, args.limit, src)
+            r = fetch_brand(b, recs, args.delay, args.workers, args.limit, src, args.retext)
             if r["products"]:
                 tag = "사이즈가이드 창" if src == "sizeguide" else "머리말 뒤"
                 print(f"  {b:26s} [{tag}] {r['products']:5d}벌 물어봄 · 그림 나온 상품 "

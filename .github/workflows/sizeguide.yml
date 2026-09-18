@@ -26,6 +26,10 @@ on:
         description: "sizeguide | page | both"
         required: false
         default: "both"
+      retext:
+        description: "true 면 그림만 받아 둔 상품도 다시 받아 **글**을 거둔다(글 거두기는 나중에 붙었다)"
+        required: false
+        default: "false"
 
 env:
   DATA_BRANCH: crawl/cafe24-full-catalog
@@ -53,17 +57,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install -q requests
+      - run: pip install -q requests beautifulsoup4 lxml
       - name: 사이즈표 그림 받기
         shell: bash
         run: |
           SRC="${{ inputs.source }}"; SRC="${SRC:-both}"
+          RT=""; [ "${{ inputs.retext }}" = "true" ] && RT="--retext"
           if [ -n "${{ inputs.brands }}" ]; then
             python scripts/fetch_sizeguide.py --brands "${{ inputs.brands }}" \
-              --source "$SRC" --workers 4 --delay 0.2
+              --source "$SRC" --workers 4 --delay 0.2 $RT
           else
             python scripts/fetch_sizeguide.py --all-missing \
-              --source "$SRC" --workers 4 --delay 0.2
+              --source "$SRC" --workers 4 --delay 0.2 $RT
           fi
       # 이미 받아 둔 상품은 건너뛰므로(sidecar 에 있으면 skip) 매번 돌려도 새것만 받는다.
       - name: commit & push (rebase 후, 3회 재시도)
