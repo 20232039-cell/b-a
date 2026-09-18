@@ -50,33 +50,42 @@ def label(text: str) -> str | None:
     return None
 
 
-def menu_of(home: str) -> tuple[str, str]:
-    """매장 상단 메뉴에서 성별 탭을 찾는다. (판정, 본 메뉴 글) — 못 찾으면 ('', '')"""
+def menu_of(home: str) -> tuple[str, str, str]:
+    """매장 상단 메뉴에서 성별 탭을 찾는다. (판정, 본 메뉴 글, 걸린 링크) — 못 찾으면 ('', '', '')
+
+    개수만 세어 두면 나중에 그 판정을 되짚을 수가 없다. 「WOMENSWEAR 1 · MENSWEAR 1」이
+    진짜 성별 칸인지, 룩북 제목에 든 낱말인지 글자만 봐서는 못 가린다. 그래서 걸린 링크의
+    글과 주소를 함께 적는다 — /category/men/79/ 처럼 분류번호가 붙어 있으면 훑을 수 있는
+    칸이고, /collection/lookbook25fw-mens.html 이면 룩북일 뿐이다(munn).
+    """
     try:
         r = requests.get(home, headers=HDR, timeout=25)
         if r.status_code != 200:
-            return "", f"HTTP {r.status_code}"
+            return "", f"HTTP {r.status_code}", ""
     except Exception as e:
-        return "", type(e).__name__
+        return "", type(e).__name__, ""
     soup = BeautifulSoup(r.text, "lxml")
-    words = []
+    seen = collections.Counter()
+    hit: dict[str, list[str]] = collections.defaultdict(list)
     for a in soup.find_all("a"):
         t = re.sub(r"\s+", " ", a.get_text(" ", strip=True))
-        if 1 <= len(t) <= 24:
-            words.append(t)
-    seen = collections.Counter()
-    for t in words:
+        if not 1 <= len(t) <= 24:
+            continue
         g = label(t)
-        if g:
-            seen[g] += 1
+        if not g:
+            continue
+        seen[g] += 1
+        one = f"{t}→{(a.get('href') or '')[:48]}"
+        if one not in hit[g]:
+            hit[g].append(one)
     if not seen:
-        return "", ""
-    kinds = set(seen)
-    if {"WOMENSWEAR", "MENSWEAR"} <= kinds:
+        return "", "", ""
+    if {"WOMENSWEAR", "MENSWEAR"} <= set(seen):
         v = "BOTH"
     else:
         v = seen.most_common(1)[0][0]
-    return v, " · ".join(f"{k} {n}" for k, n in seen.most_common())
+    links = " | ".join(x for g, _ in seen.most_common() for x in hit[g][:2])
+    return v, " · ".join(f"{k} {n}" for k, n in seen.most_common()), links
 
 
 def main() -> int:
@@ -108,7 +117,7 @@ def main() -> int:
     rows = []
 
     def one(b):
-        v, note = menu_of(home[b]) if b in home else ("", "주소 없음")
+        v, note, links = menu_of(home[b]) if b in home else ("", "주소 없음", "")
         c = cat.get(b, collections.Counter())
         o = ours[b]
         n = sum(c.values())
@@ -119,18 +128,29 @@ def main() -> int:
         return {"brand_slug": b, "지금 값": o.most_common(1)[0][0] if o else "",
                 "지금 값 분포": " · ".join(f"{k} {x}" for k, x in o.most_common()),
                 "매장 분류가 말하는 것": by_cat, "분류 근거 수": n,
-                "매장 메뉴가 말하는 것": v, "메뉴 근거": note, "홈": home.get(b, "")}
+                "매장 메뉴가 말하는 것": v, "메뉴 근거": note, "메뉴 링크": links,
+                "홈": home.get(b, "")}
 
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
         for r in ex.map(one, brands):
             rows.append(r)
             time.sleep(0.03)
 
+    # --brands 로 몇 곳만 돌렸으면 나머지 줄은 그대로 둔다. 통째로 덮으면 217곳짜리
+    # 표가 4줄로 줄어든다 — 한 번 겪었다.
     OUT.parent.mkdir(parents=True, exist_ok=True)
+    keep: dict[str, dict] = {}
+    if want and OUT.exists():
+        with OUT.open(encoding="utf-8-sig") as fh:
+            for r in csv.DictReader(fh):
+                if r["brand_slug"] not in want:
+                    keep[r["brand_slug"]] = r
+    fields = list(rows[0].keys())
+    merged = list(rows) + [{k: r.get(k, "") for k in fields} for r in keep.values()]
     with OUT.open("w", encoding="utf-8", newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
+        w = csv.DictWriter(fh, fieldnames=fields)
         w.writeheader()
-        for r in sorted(rows, key=lambda x: x["brand_slug"]):
+        for r in sorted(merged, key=lambda x: x["brand_slug"]):
             w.writerow(r)
 
     t = collections.Counter()
