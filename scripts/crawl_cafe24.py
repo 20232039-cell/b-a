@@ -358,21 +358,39 @@ WOMEN_ONLY_ITEM = {"스커트", "원피스"}
 TOP_ITEMS = {"티셔츠", "맨투맨", "셔츠", "니트", "후드", "롱슬리브", "반팔", "탑",
              "가디건", "집업", "베스트", "피케", "저지"}
 TOP_SHORT_CM = 50.0
+# 아우터는 총장으로 못 가른다 — 여성 코트도 길다. 어깨가 가른다.
+# 같은 정답지(매장이 성별 칸에 넣어 둔 아우터 3,066벌, 기준선 여성 48.0%)로 재면
+# 어깨 중앙값이 남성 53.5 · 여성 49.0 이고, 어깨 44cm 미만은 409벌 중 408벌이 여성이다
+# (99.8%). 42 아래로는 336벌 전부 여성이고 46 에서 98.5% 로 떨어진다 — 44 에서 끊는다.
+# 상의에도 어깨 규칙을 붙일 수 있지만(어깨 40 미만 97.6%) 총장 규칙(99.7%)보다 무르다.
+OUTER_ITEMS = {"재킷", "코트", "점퍼", "블레이저", "패딩", "파카", "바람막이",
+               "MA-1/봄버", "트렌치"}
+OUTER_NARROW_CM = 44.0
 _LEN_KEYS = ("총장", "총길이", "기장", "length", "총기장")
+_SHOULDER_KEYS = ("어깨", "어깨단면", "어깨너비", "shoulder")
+
+
+def _med_of(size_table, keys, lo, hi) -> float | None:
+    if not isinstance(size_table, dict):
+        return None
+    for k in keys:
+        v = size_table.get(k)
+        if not isinstance(v, list):
+            continue
+        nums = [float(x) for x in v if isinstance(x, (int, float)) and lo <= x <= hi]
+        if nums:
+            return statistics.median(nums)
+    return None
 
 
 def top_length(size_table) -> float | None:
     """실측표에서 총장 중앙값. 값이 없거나 옷 치수로 볼 수 없는 수면 None."""
-    if not isinstance(size_table, dict):
-        return None
-    for k in _LEN_KEYS:
-        v = size_table.get(k)
-        if not isinstance(v, list):
-            continue
-        nums = [float(x) for x in v if isinstance(x, (int, float)) and 20 <= x <= 120]
-        if nums:
-            return statistics.median(nums)
-    return None
+    return _med_of(size_table, _LEN_KEYS, 20, 120)
+
+
+def shoulder_width(size_table) -> float | None:
+    """실측표에서 어깨 중앙값."""
+    return _med_of(size_table, _SHOULDER_KEYS, 20, 90)
 
 # 상품이 아닌 페이지의 이름 — 개인결제·스태프 결제·룩북·테스트. 가격이 있어도 상품이 아니다.
 # ^@ — glowny 가 고객 착용샷을 「@인스타아이디」 상품(2,500,000원)으로 830건 올려 둠. ^[¥*]+ — insilence 비공개 자리표시자 159건 (사람 결정 2026-09-02)
@@ -1269,7 +1287,8 @@ NAME_M_HEAD = re.compile(r"^\s*(?:\[[^\]]*\]\s*)?M\s+(?=[A-Za-z가-힣])")
 
 
 def classify_gender(category_names: list[str], brand_default: str, name: str = "",
-                    item_type: str = "", top_len: float | None = None) -> str:
+                    item_type: str = "", top_len: float | None = None,
+                    shoulder: float | None = None) -> str:
     """칸 이름 → 브랜드 기본값 순으로 성별을 정하되, 상품 이름이 말하면 그게 이긴다.
 
     지금까지는 이름을 안 봤다. 그래서 여성복 매장의 「UNISEX PADDED DENIM BOMBER JACKET」이
@@ -1314,6 +1333,8 @@ def classify_gender(category_names: list[str], brand_default: str, name: str = "
     if item_type in WOMEN_ONLY_ITEM:
         return "WOMENSWEAR"
     if item_type in TOP_ITEMS and top_len is not None and top_len < TOP_SHORT_CM:
+        return "WOMENSWEAR"
+    if item_type in OUTER_ITEMS and shoulder is not None and shoulder < OUTER_NARROW_CM:
         return "WOMENSWEAR"
     return brand_default or "UNISEX"
 
@@ -3029,7 +3050,8 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
                 "item_type": item,
                 "name": d["name"],
                 "gender_target": classify_gender(d.get("category_names", []), brand_gender.get(slug, "UNISEX"),
-                                                 d["name"], item, top_length(d.get("size_table"))),
+                                                 d["name"], item, top_length(d.get("size_table")),
+                                                 shoulder_width(d.get("size_table"))),
                 "price": d["price"],
                 "representative_color": pick_color(d["name"], d.get("description", ""), d.get("spec"),
                                                    d.get("options")),
