@@ -2676,6 +2676,31 @@ def crawl_brand(http: PoliteSession, shop: Shop, refresh: bool, log, refetch_ids
             if fetched % 100 == 0:
                 log(f"[{shop.slug}] … {fetched}/{len(todo)}")
 
+        # 이미 받아 둔 상품은 다시 열지 않으니 칸 이름이 옛것으로 굳는다. 목록은 이번 판에도
+        # 훑었으므로 소속과 이름은 새로 알고 있다 — 달라진 줄만 여기서 다시 적는다(HTTP 0회).
+        # 미세키서울이 이 자리에 걸렸다: 남성 칸 211벌·여성 칸 737벌의 이름이 「SHOP」으로
+        # 굳어 있었고, 이름 떼는 규칙을 고쳐도 상품을 다시 안 여니 그대로였다(2026-09-18).
+        # 칸이 줄어드는 쪽으로는 안 적는다 — 목록을 덜 훑은 판이 소속을 깎으면 안 된다.
+        renamed = 0
+        for no, prev in list(done.items()):
+            cates = sorted(shop.membership.get(no, set()))
+            if not cates:
+                continue
+            old_cates = list(prev.get("category_nos") or [])
+            if not set(cates) >= set(old_cates):
+                continue
+            names = [shop.categories.get(c, str(c)) for c in cates]
+            if cates == old_cates and names == list(prev.get("category_names") or []):
+                continue
+            upd = dict(prev)
+            upd["category_nos"], upd["category_names"] = cates, names
+            f.write(jsonl_line(upd) + "\n")
+            done[no] = upd
+            renamed += 1
+        if renamed:
+            f.flush()
+            log(f"[{shop.slug}] 칸 이름만 고쳐 다시 적은 상품 {renamed}")
+
     if shop.failures:
         (CRAWL_DIR / f"_failures_{shop.slug}.jsonl").write_text(
             "\n".join(jsonl_line(x) for x in shop.failures) + "\n", encoding="utf-8")
