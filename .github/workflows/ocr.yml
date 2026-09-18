@@ -311,7 +311,13 @@ jobs:
                          | grep -E '^data/(products_full\.csv|product_sizes\.json|product_tags_full\.json|_audit\.(json|csv)|_issues[^/]*\.csv|size_unavailable\.csv|_missing[^/]*\.csv)$|^data/crawl/_[^/]*\.json$' || true); do
                 git checkout --ours -- "$f" && git add "$f"
               done
-              # 수확(매장별 jsonl)이 하나라도 안 풀리면 abort — 저쪽 것으로 덮지 않는다.
+              # 수확(매장별 jsonl)은 덮지 않고 **내용으로 합친다** — 한 줄이 한 상품이고
+              # 합치는 규칙은 조각을 모을 때와 같다(그림을 더 읽었거나 글이 더 나온 쪽이 이긴다).
+              # 예전엔 여기서 abort 했는데, 같은 매장을 읽은 판이 둘 겹치면 그것으로 **판이
+              # 통째로 날아갔다** — 2026-09-17 판 43(조각 78개 · 두 시간)이 세 번 다 실패하고
+              # 끝났다(그 사이 판 44 가 같은 매장을 밀었다).
+              python3 scripts/resolve_ocr_conflicts.py || true
+              # 그래도 안 풀린 것이 있으면 abort — 저쪽 것으로 덮지 않는다.
               if [ -z "$(git diff --name-only --diff-filter=U)" ]; then
                 git -c core.editor=true rebase --continue && git push && exit 0
               fi
