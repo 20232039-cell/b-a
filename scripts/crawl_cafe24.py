@@ -2748,7 +2748,14 @@ def crawl_brand(http: PoliteSession, shop: Shop, refresh: bool, log, refetch_ids
         for no, d in done.items():
             for c in d.get("category_nos", []):
                 shop.membership.setdefault(no, set()).add(c)
-                shop.categories.setdefault(c, (d.get("category_names") or [str(c)])[d["category_nos"].index(c)])
+                kept = (d.get("category_names") or [str(c)])[d["category_nos"].index(c)]
+                # 성별을 말하는 옛 이름은 홈에서 온 이름에 **안 진다.** 지난 전수 훑기에서
+                # 목록 페이지가 확인해 준 「MEN ALL」을 홈 메뉴의 「ALL」이 덮으면, 이 판에서
+                # 목록을 안 훑는 탓에 확인할 길이 없어 성별이 통째로 사라진다
+                # (goodlifeworks 298벌이 그 자리였다). 잃는 것만 막는다.
+                had = shop.categories.get(c)
+                if had is None or (says_gender(kept) and not says_gender(had)):
+                    shop.categories[c] = kept
         shop.enumerated_by = "refetch"
     else:
         enumerate_by_sitemap(http, shop)
