@@ -353,7 +353,11 @@ CATEGORY_NAME_RULES = [
 GENDER_RULES = [
     ("WOMENSWEAR", ["women", "woman", "여성", "우먼", "womens", "ladies", "girls"]),
     ("MENSWEAR", ["men", "man", "남성", "mens"]),
-    ("UNISEX", ["unisex", "유니섹스"]),
+    # 「젠더리스」는 매장이 제 입으로 한 유니섹스 선언이다. umarmung 이 GENDERLESS 185 ·
+    # WOMEN 101 로 탭을 나눠 뒀는데 우리가 그 말을 못 알아들어, 젠더리스 칸 113벌이
+    # 브랜드값(여성)으로 통째로 들어가 있었다(사람이 매장을 열어 보고 짚었다).
+    # 전수로 이 말을 쓰는 매장은 그 한 곳뿐이라 넓혀도 닿는 데가 없다.
+    ("UNISEX", ["unisex", "유니섹스", "genderless", "젠더리스", "agender"]),
 ]
 # 칸 이름을 글자마다 띄어 놓는 매장이 있다(「G i r L」·「M E N」). 한 글자씩 떨어진
 # 토막만 붙인다 — 「MEN WOMEN」처럼 제대로 띄운 것은 안 건드린다.
@@ -419,6 +423,66 @@ def _med_of(size_table, keys, lo, hi) -> float | None:
         nums = [float(x) for x in v if isinstance(x, (int, float)) and lo <= x <= hi]
         if nums:
             return statistics.median(nums)
+    return None
+
+
+# ─── 하의 허리로 성별 가리기 ───────────────────────────────────────────────
+#
+# 사람이 짚어 준 잣대다: 「남성 허리단면은 36 밑으로 잘 안 내려간다 · 여성은 큰 것도
+# 입는다 · S 34 · L 42 처럼 폭이 걸치면 유니섹스다 · **밴딩엔 안 통한다**」.
+# 매장이 제 손으로 성별 칸에 넣어 둔 판매중 하의 2,898벌을 정답지로 놓고 전수로 쟀다.
+#
+# 세 가지가 다 있어야 쓸 만해진다 — 하나라도 빼면 맞힘이 무너진다:
+#
+#   ① 둘레로 적힌 값을 접는다   한 칸에 단면(35)과 둘레(70)가 섞여 있다.
+#                              여성 90분위가 59.0cm 였다 — 그건 단면이 아니다.
+#   ② 밴딩·조거·쇼츠를 뺀다     그것만 따로 재면 양쪽 다 74~91%로 무너진다.
+#                              허리를 늘어난 상태가 아니라 눌린 상태로 적어서다.
+#   ③ 치수 폭을 요구한다        치수가 하나뿐인 383벌에 **값이 깨진 것이 몰려 있다**
+#                              (「WASHED JEANS 허리 24cm」= 둘레 48cm, 아동복 치수).
+#                              이 조건 하나로 여성 쪽 잘못이 26벌 → 5벌이 된다.
+#
+# 셋을 다 건 1,839벌에서:
+#     최대 허리 < 38  → 여성   맞힘 98.3%  거둠 292  잘못 5
+#     최소 허리 ≥ 40  → 남성   맞힘 99.6%  거둠 443  잘못 2
+# 여성 쪽 잘못 5벌은 더 못 줄인다 — 허리 32~36 짜리 진짜 남성 바지다
+# (uniform-bridge 치노 · goodlifeworks 투턱 와이드).
+# 문턱 사이는 **안 정한다** — 거기가 진짜로 겹치는 자리다.
+#
+# 「XS 가 있으면 여성」은 **안 받는다.** XS 가 있어도 359벌이 남성 칸이다
+# (andersson-bell 「UNISEX PUPPY T-SHIRT」가 XS~XL). 가르는 것은 낱말이 아니라 폭이다.
+_WAIST_KEYS = ("waist", "허리", "허리단면")
+WAIST_WOMEN_MAX = 38.0
+WAIST_MEN_MIN = 40.0
+WAIST_FOLD_OVER = 50.0      # 이보다 크면 둘레로 보고 반으로 접는다
+# 허리를 믿을 수 없는 옷 — 고무줄이 눌린 채로 적힌다
+WAIST_UNRELIABLE = re.compile(
+    r"밴딩|밴드|banding|elastic|스트링|string|조거|jogger|플리스|fleece|"
+    r"스웨트|스웻|sweat\s?pants|트랙\s?팬츠|track\s?pants|이지\s?팬츠|easy\s?pants|"
+    r"파자마|pajama|잠옷|"
+    # 반바지는 허리를 크게 잡고 기장만 줄인 꼴이라 여성복도 허리가 크다. 띄어 쓴
+    # 「SHORT PANTS」·「Half Pants」를 메우니 남성 쪽 맞힘이 98.91% → 99.55% 가 됐다
+    # (잘못 5 → 2, 거둠은 12벌만 잃는다).
+    r"쇼츠|shorts|short\s?pants|숏\s?팬츠|반바지|하프\s?팬츠|half\s?pants|버뮤다|bermuda", re.I)
+
+# 품목으로도 같은 것을 거른다 — 어휘표가 든 동의어(「트레이닝 팬츠」·「숏츠」)를 이름
+# 정규식은 못 잡는다. 반대로 띄어 쓴 「SHORT PANTS」는 품목이 못 잡는다. 둘 다 건다.
+WAIST_UNRELIABLE_ITEM = {"숏팬츠", "쇼츠", "버뮤다", "스웨트팬츠", "레깅스", "조거팬츠"}
+
+
+def waist_span(size_table) -> tuple[float, float] | None:
+    """허리의 가장 작은 치수와 가장 큰 치수. 폭이 없으면(치수 한 벌) None."""
+    if not isinstance(size_table, dict):
+        return None
+    for k in _WAIST_KEYS:
+        v = size_table.get(k)
+        if not isinstance(v, list):
+            continue
+        nums = [float(x) / 2 if float(x) > WAIST_FOLD_OVER else float(x)
+                for x in v if isinstance(x, (int, float)) and 15 <= x <= 140]
+        if len(nums) >= 2 and max(nums) - min(nums) >= 1.0:
+            return min(nums), max(nums)
+        return None
     return None
 
 
@@ -1340,11 +1404,30 @@ GROUP_OF = {
 
 # 상품 이름이 성별을 대놓고 말하는 경우. 매장이 제 상품에 붙인 말이라 칸보다 정확하다.
 NAME_UNISEX = re.compile(r"\bunisex\b|유니섹스|남녀\s?공용", re.I)
-# 「(W)」·「[W]」로 시작하는 이름은 그 매장의 여성 라인이다. tonywack 313벌 · lmood 179 ·
+# 「(W)」·「[W]」가 든 이름은 그 매장의 여성 라인이다. tonywack 313벌 · lmood 179 ·
 # the-coldest-moment 65 · afterpray 21 — 600벌인데 그중 314벌이 남성복으로 들어가 있었다
-# (2026-09-06). 맨 앞에 있을 때만 본다 — 이름 가운데의 (W) 는 다른 뜻일 수 있다.
-# 「(M)」·「(F)」로 시작하는 상품은 카탈로그에 하나도 없어서 넣지 않는다.
-NAME_WOMEN = re.compile(r"^\s*[\(\[]\s*(?:w|women)\s*[\)\]]|\bwomen'?s?\b|\bwmn\b|여성용?|우먼(?:즈)?", re.I)
+# (2026-09-06).
+#
+# 처음엔 **맨 앞에 있을 때만** 봤다. 「가운데의 (W) 는 다른 뜻일 수 있다」는 조심이었는데,
+# 사람이 한 매장을 열어 보고 「여성복은 (W) 적혀 있다」고 짚어 줘서 전수로 다시 쟀다.
+# 그 매장은 이름 **끝**에 붙인다: 「RIB KNIT LONG SLEEVE (W) / White」. 맨 앞만 보던 탓에
+# 통째로 놓치고 있었다.
+#
+# (W) 가 성별이라는 증거는 세 겹이다(판매중 1,537벌 · 매장 11곳):
+#   ① 1,396벌(91%)은 지금도 이미 여성이다 — 매장이 제 손으로 여성 칸에 넣어 뒀다.
+#      이름표와 칸이 따로 말하는데 같은 말을 한다. 남성 칸에 든 것은 **0벌**이다.
+#   ② (W) 를 뗀 **같은 이름의 짝**이 그 매장에 따로 있다 — heritagefloss 67벌 ·
+#      satur 138 · tonywack 46 · belier 40 · lmood 12. 색이나 치수라면 짝이 안 생긴다.
+#   ③ 색은 이름 안에 따로 적혀 있다(「… (W) / White」). (W) 가 색일 자리가 없다.
+#
+# 그래서 자리를 안 따지되, **앞 낱말에 붙은 것은 안 받는다.** moif 의 「404 GNF(B)」·
+# 「GNF(F)」가 그림 앞뒤를 가리키는 코드라 그 꼴을 막아야 한다. 이 잣대로 창고 전수를
+# 돌리면 127벌이 여성으로 바뀌고 **잃는 것은 0**이다(heritagefloss 97 · satur 24 · moif 6).
+#
+# 「(M)」은 **안 넣는다.** 같은 매장에서 (M)·(S) 는 가방·슬리퍼의 치수였다
+# (PATENT SPORTS GYM BAG (M) / White). 남성을 뜻하는 (M) 은 한 벌도 못 찾았다.
+NAME_WOMEN = re.compile(r"(?<![A-Za-z0-9])[\(\[]\s*(?:w|women)\s*[\)\]]"
+                        r"|\bwomen'?s?\b|\bwmn\b|여성용?|우먼(?:즈)?", re.I)
 NAME_MEN = re.compile(r"\bmen'?s?\b|남성용?|맨즈", re.I)
 
 # 매장이 여성판·남성판을 이름 맨 앞의 한 글자로 가른다 — noice 는 같은 옷 24가지를
@@ -1356,9 +1439,21 @@ NAME_W_HEAD = re.compile(r"^\s*(?:\[[^\]]*\]\s*)?W\s+(?=[A-Za-z가-힣])")
 NAME_M_HEAD = re.compile(r"^\s*(?:\[[^\]]*\]\s*)?M\s+(?=[A-Za-z가-힣])")
 
 
+# 홀로 선 「(M)」은 옷에서만 남성이다. 잡화에서는 치수(Medium)다 — 전수로 갈라 봤다:
+#   옷      kijun 「(M) Patch Tank Top」(칸이 MEN · (W) 짝 4벌) · moif 「MICKEY TEE (M)」
+#           ((W) 짝 5/5벌) · blr 3벌(칸이 MEN)                          → 남성 11벌
+#   잡화    heritagefloss 「PATENT SPORTS GYM BAG (M)」·「(S)」 9벌 · depound 가방 5 ·
+#           lememe 「Gift Packaging Service (M)」 · rest-recreation 귀걸이  → 치수 16벌
+# 「(MEN)」처럼 철자로 적은 것은 갈래와 상관없이 NAME_MEN 이 이미 잡는다
+# (foeto 7 · youth 18 · juntae-kim 2).
+APPAREL_CODES = {"tops", "bottoms", "outer", "dress", "skirt", "suiting"}
+NAME_M_PAREN = re.compile(r"(?<![A-Za-z0-9])[\(\[]\s*m\s*[\)\]]", re.I)
+
+
 def classify_gender(category_names: list[str], brand_default: str, name: str = "",
                     item_type: str = "", top_len: float | None = None,
-                    shoulder: float | None = None) -> str:
+                    shoulder: float | None = None, category_code: str = "",
+                    waist: tuple[float, float] | None = None) -> str:
     """칸 이름 → 브랜드 기본값 순으로 성별을 정하되, 상품 이름이 말하면 그게 이긴다.
 
     지금까지는 이름을 안 봤다. 그래서 여성복 매장의 「UNISEX PADDED DENIM BOMBER JACKET」이
@@ -1378,6 +1473,9 @@ def classify_gender(category_names: list[str], brand_default: str, name: str = "
     if name:
         if NAME_UNISEX.search(name):
             return "UNISEX"
+        if category_code in APPAREL_CODES and NAME_M_PAREN.search(name) \
+                and not NAME_WOMEN.search(name):
+            return "MENSWEAR"
         if NAME_W_HEAD.match(name):
             return "WOMENSWEAR"
         if NAME_M_HEAD.match(name):
@@ -1424,6 +1522,14 @@ def classify_gender(category_names: list[str], brand_default: str, name: str = "
     # 둘만 받는다. 탑(남성 105/1763 = 6%)·플랫·샌들은 0이 아니라 뺐다 — 확신 없으면 비운다.
     if item_type in WOMEN_ONLY_ITEM or (name and NAME_WOMEN_ONLY.search(name)):
         return "WOMENSWEAR"
+    if (category_code == "bottoms" and waist is not None
+            and item_type not in WAIST_UNRELIABLE_ITEM
+            and not (name and WAIST_UNRELIABLE.search(name))):
+        lo, hi = waist
+        if hi < WAIST_WOMEN_MAX:
+            return "WOMENSWEAR"
+        if lo >= WAIST_MEN_MIN:
+            return "MENSWEAR"
     if item_type in TOP_ITEMS and top_len is not None and top_len < TOP_SHORT_CM:
         return "WOMENSWEAR"
     if item_type in OUTER_ITEMS and shoulder is not None and shoulder < OUTER_NARROW_CM:
@@ -1621,6 +1727,7 @@ MENU_GENDER_TOKEN = {
     "ladies": "WOMEN", "girls": "WOMEN", "여성": "WOMEN", "우먼": "WOMEN",
     "men": "MEN", "mens": "MEN", "man": "MEN", "mans": "MEN", "남성": "MEN",
     "unisex": "UNISEX", "유니섹스": "UNISEX", "남녀공용": "UNISEX",
+    "genderless": "UNISEX", "젠더리스": "UNISEX", "agender": "UNISEX",
 }
 # 메뉴가 「펼침 머리글」인 매장이 있다. 성별은 여는 항목의 글에만 있고 그 항목의 주소는
 # 비어 있으며, 진짜 칸 링크는 그 아래 <ul> 에 들어 있다:
@@ -1635,7 +1742,7 @@ MENU_GENDER_TOKEN = {
 _MENU_HEAD = re.compile(
     r"^\s*(?:women'?s?|woman|여성|우먼|ladies|"
     r"men'?s?|man|남성|맨|"
-    r"unisex|유니섹스|공용|남녀공용)\s*$", re.I)
+    r"unisex|유니섹스|공용|남녀공용|genderless|젠더리스)\s*$", re.I)
 
 
 def _head_gender(li) -> str | None:
@@ -1804,7 +1911,7 @@ _PATH_SEL = ("#contents .path", ".xans-product-headcategory", ".titleArea",
              ".path", "h2.title", ".location", ".displayArea .title")
 _SAYS_W = re.compile(r"\b(?:women|woman|womens|ladies)\b|여성|우먼", re.I)
 _SAYS_M = re.compile(r"\b(?:men|man|mens)\b|남성", re.I)
-_SAYS_U = re.compile(r"\bunisex\b|유니섹스|남녀공용", re.I)
+_SAYS_U = re.compile(r"\bunisex\b|\bgenderless\b|유니섹스|젠더리스|남녀공용", re.I)
 
 
 def page_says_gender(html_text: str) -> str | None:
@@ -3417,7 +3524,8 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
                 "name": d["name"],
                 "gender_target": classify_gender(d.get("category_names", []), brand_gender.get(slug, "UNISEX"),
                                                  d["name"], item, top_length(d.get("size_table")),
-                                                 shoulder_width(d.get("size_table"))),
+                                                 shoulder_width(d.get("size_table")), code,
+                                                 waist_span(d.get("size_table"))),
                 "price": d["price"],
                 "representative_color": pick_color(d["name"], d.get("description", ""), d.get("spec"),
                                                    d.get("options")),
