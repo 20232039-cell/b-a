@@ -341,8 +341,11 @@ CATEGORY_NAME_RULES = [
 ]
 
 # 성별 — 카테고리 이름에서. 없으면 브랜드 기본값.
+# 「girls」도 여성 칸이다 — 창고의 칸 이름을 전수로 훑어 고른 낱말이다(2026-09-19).
+# 833벌 중 830벌이 한 매장의 「GIRLS」 칸이고, 나머지 셋은 협업 이름(「GIRLS DON'T CRY X …」)이다.
+# 「W」·「M」 한 글자는 안 넣는다 — 「MMLG W」 84벌을 얻자고 넣기엔 딴 데 걸릴 자리가 너무 많다.
 GENDER_RULES = [
-    ("WOMENSWEAR", ["women", "woman", "여성", "우먼", "womens", "ladies"]),
+    ("WOMENSWEAR", ["women", "woman", "여성", "우먼", "womens", "ladies", "girls"]),
     ("MENSWEAR", ["men", "man", "남성", "mens"]),
     ("UNISEX", ["unisex", "유니섹스"]),
 ]
