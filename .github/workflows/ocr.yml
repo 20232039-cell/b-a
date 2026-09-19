@@ -94,10 +94,16 @@ jobs:
           # 표를 노리는 판(no-size·ocr…)은 머리줄을 낱말 단위로 다시 읽어 장당 5초가 든다 —
           # 조각을 잘게 낸다. 설명글만 훑는 판은 장당 1.5초라 크게 묶어도 된다(2026-09-05).
           case "$SEL" in
-            no-size|ocr|gaps|thin-table|capped) PER=250 ;;
+            no-size|ocr|gaps|thin-table|capped|no-detail) PER=250 ;;
             *) PER=700 ;;
           esac
-          python3 scripts/ocr_detail_images.py --plan --per-shard "$PER" \
+          # 조각 수 상한이 진짜 제약이다 — covernat 은 읽을 그림이 24,971장인데 상한 12 에
+          # 걸려 조각 하나가 2,080장이 됐고, 러너가 2시간 10분 만에 끊겼다(판 50, exit 143).
+          # 그때 수율은 99%(100벌 읽어 99벌에서 글)라 포기할 자리가 아니다. 설명글을 노리는
+          # 판만 상한을 올려 조각을 잘게 낸다.
+          MAXSH=12
+          if [ "$SEL" = "no-detail" ]; then MAXSH=40; fi
+          python3 scripts/ocr_detail_images.py --plan --per-shard "$PER" --max-shards "$MAXSH" \
             --max-images "$MAXI" --select "$SEL" --procs 4 "${ARGS[@]}"
 
   ocr:
