@@ -1478,6 +1478,7 @@ class Shop:
     slug: str
     base: str                     # https://host
     brand_gender: str
+    names: tuple = ()             # 그 매장이 스스로를 부르는 이름들(한글·영문)
     robots: RobotFileParser | None = None
     categories: dict[int, str] = field(default_factory=dict)      # cate_no → 이름
     membership: dict[int, set] = field(default_factory=dict)      # product_no → {cate_no}
@@ -1775,6 +1776,15 @@ def crawl_category_lists(http: PoliteSession, shop: Shop, max_pages: int = 80) -
         shop.enumerated_by = (shop.enumerated_by + "+lists") if shop.enumerated_by else "category-lists"
 
 
+def is_shop_name(shop: "Shop", text: str) -> bool:
+    """그 글이 매장 이름인가 — 빈칸·기호를 떼고 맞춰 본다."""
+    key = re.sub(r"[^0-9a-z가-힣]", "", (text or "").lower())
+    if not key:
+        return False
+    return any(key == re.sub(r"[^0-9a-z가-힣]", "", (n or "").lower())
+               for n in (shop.names or ()))
+
+
 def says_gender(name: str) -> bool:
     """칸 이름이 성별을 말하나 — GENDER_RULES 와 같은 낱말을 쓴다."""
     if cate_says_women_solo(name):
@@ -1901,7 +1911,12 @@ def _crawl_one_list(http: PoliteSession, shop: Shop, cate_no: int, list_path: st
                     # 말하는 이름(메뉴 주소의 /category/men/79/ 에서 온 「men」)이 있으면
                     # 성별을 말하지 않는 이름으로 덮지 않는다.
                     had = shop.categories.get(cate_no, "")
-                    if not (says_gender(had) and not says_gender(nm)):
+                    # **매장 이름은 칸 이름이 아니다.** 목록 페이지 제목이 늘 매장 이름인
+                    # 곳이 있어(till-i-die 의 제목이 「틸아이다이」다) 칸이란 칸이 죄다 그
+                    # 이름으로 덮였다 — 다시 훑어도 성별 칸을 못 찾는다. 실측: till-i-die
+                    # 2,810벌의 칸 이름이 한 가지(「틸아이다이」)뿐이고, juntae-kim 은
+                    # 「JUNTAE KIM」, atelier-de-lumen 은 「Atelier de LUMEN」이다.
+                    if not is_shop_name(shop, nm) and not (says_gender(had) and not says_gender(nm)):
                         shop.categories[cate_no] = nm
             links = harvest_product_links(r.text, shop)
             # 목록 페이지에 하위 카테고리 링크가 더 있으면 그것도 훑는다
@@ -3638,7 +3653,10 @@ def main():
             print(f"[{s}] brands_seed 에 없거나 official_url 없음 — 건너뜀", file=sys.stderr)
             continue
         u = urlparse(b["official_url"].strip())
-        shops.append(Shop(slug=s, base=f"{u.scheme or 'https'}://{u.netloc}", brand_gender=brand_gender.get(s, "UNISEX")))
+        shops.append(Shop(slug=s, base=f"{u.scheme or 'https'}://{u.netloc}",
+                          brand_gender=brand_gender.get(s, "UNISEX"),
+                          names=tuple(x for x in (b.get("name"), b.get("name_en"),
+                                                  s.replace("-", " ")) if x)))
 
     http = PoliteSession(delay=args.delay)
     lock = threading.Lock()
