@@ -393,22 +393,35 @@ WOMEN_ONLY_ITEM = {"스커트", "원피스", "레그웨어", "수영복"}
 NAME_WOMEN_ONLY = re.compile(
     r"브라\s?탑|브라렛|bralette|bra\s?top|뷔스티에|bustier|튜브\s?탑|tube\s?top|홀터|halter",
     re.I)
-# 상의는 총장이 말해 준다. 매장이 제 손으로 성별 칸에 넣어 둔 상의 10,884벌로 재 보니
-# 총장 중앙값 50cm 미만은 1,356벌 중 1,352벌(99.7%)이 여성 칸이었다 — 여성 칸이 원래
-# 1.5배 많아 기준선이 58.2% 인데도 그렇다. 걸린 상품이 여성 쪽 34곳에서 나왔으니 한 매장이
-# 만든 이야기도 아니다. 54·58 까지 올려도 99.6% 로 같고 60 부터 무너지는데, 자름값은
-# 50 으로 둔다(사람 결정 2026-09-18).
+# 상의·아우터는 **총장**이 가른다. 정답지는 매장이 제 손으로 한쪽 성별 칸에만 넣어 둔
+# 판매중 상의·아우터인데, 여기서 **이름이 한 마디라도 하는 상품은 빼야 한다** —
+# 「UNISEX FISHERMAN KNIT CARDIGAN」처럼 이름이 유니섹스라 말하는 옷은 ①에서 이미
+# 갈라지므로 이 층에 오지 않는다. 그것을 안 뺐다가 규칙이 95%로 보인 적이 있다(재측정 실수).
+#
+# 씻은 정답지 8,911벌(상의 6,482 · 아우터 2,429)로 재면:
+#
+#     상의 총장 중앙  여성 2,861벌 중앙 54cm · 남성 2,919벌 중앙 68cm · **남성 최솟값 57.25**
+#         <54  100.000%  1,349벌      <57  100.000%  1,769벌   ← 여기까지 잘못 0
+#         <58   99.946%  1,856벌      <60   99.000%  2,069벌
+#     아우터 총장 중앙
+#         <57  100.000%    222벌      <58   98.760%    242벌
+#
+# 옛 문턱 50 은 너무 짰다 — 57 로 올리면 거둠이 상의 620 → 1,769벌(2.85배)인데 잘못은
+# 그대로 0이다. 아우터는 어깨(<44, 99.2% · 128벌)보다 총장이 낫다(100% · 222벌).
+#
+# 어깨는 **총장이 없을 때만** 쓴다. 총장이 있는데 어깨로 덮으면 98.0%로 떨어진다
+# (총장<57 또는 어깨<41 을 상의 전체에 걸면 잘못이 0 → 46벌이 된다).
+# 총장 없는 상의 400벌만 놓고 보면 어깨<40 이 233벌 100.00%, 41부터 잘못이 생긴다.
+#
+# **남성 쪽은 세울 수 없다.** 같은 정답지로 훑으면 가장 좋은 것이 상의 총장≥76 의 91.1%,
+# 어깨≥54 의 83.1%, 아우터 어깨≥58 의 67.7% 다. 여성 오버핏이 남성 치수를 통째로 덮는다.
+# 하의(허리)는 되는데 상의는 안 된다 — 억지로 넣지 않는다.
 TOP_ITEMS = {"티셔츠", "맨투맨", "셔츠", "니트", "후드", "롱슬리브", "반팔", "탑",
              "가디건", "집업", "베스트", "피케", "저지"}
-TOP_SHORT_CM = 50.0
-# 아우터는 총장으로 못 가른다 — 여성 코트도 길다. 어깨가 가른다.
-# 같은 정답지(매장이 성별 칸에 넣어 둔 아우터 3,066벌, 기준선 여성 48.0%)로 재면
-# 어깨 중앙값이 남성 53.5 · 여성 49.0 이고, 어깨 44cm 미만은 409벌 중 408벌이 여성이다
-# (99.8%). 42 아래로는 336벌 전부 여성이고 46 에서 98.5% 로 떨어진다 — 44 에서 끊는다.
-# 상의에도 어깨 규칙을 붙일 수 있지만(어깨 40 미만 97.6%) 총장 규칙(99.7%)보다 무르다.
 OUTER_ITEMS = {"재킷", "코트", "점퍼", "블레이저", "패딩", "파카", "바람막이",
                "MA-1/봄버", "트렌치"}
-OUTER_NARROW_CM = 44.0
+TOP_SHORT_CM = 57.0          # 총장 중앙이 이보다 짧으면 여성
+SHOULDER_NARROW_CM = 40.0    # 총장을 모를 때만 본다
 _LEN_KEYS = ("총장", "총길이", "기장", "length", "총기장")
 _SHOULDER_KEYS = ("어깨", "어깨단면", "어깨너비", "shoulder")
 
@@ -1435,6 +1448,27 @@ NAME_MEN = re.compile(r"\bmen'?s?\b|남성용?|맨즈", re.I)
 # 코튼 …」을 따로 판다. 칸 이름보다 이쪽이 구체적이다: noice 의 「M WOOL FLARED PANTS」는
 # 매장이 「WOMEN'S NEW ARRIVALS」 칸에도 같이 걸어 두어서 여성복이 되어 있었다(2026-09-07).
 # 대소문자를 가린다 — 소문자 「w …」는 성별 표시가 아니다.
+# 매장이 **설명글에** 성별을 선언하는 자리 — 여태 한 번도 안 읽었다.
+#
+#     「남녀 모두 착용할 수 있는 유니섹스 상품입니다」        beyond-closet
+#     「ㆍ남녀공용 착용 ㆍ여성분들은 S사이즈 착용 권장」        beyond-closet
+#     「ㆍ유니섹스 제품」                                    beyond-closet
+#
+# 전수로 715벌 · 매장 21곳(beyond-closet 277 · dunst 182 · satur 176 · suare 40).
+#
+# 검산 — 그 상품들을 매장이 **칸으로는** 어디에 넣었나:
+#     남성 칸 111 · 여성 칸 100 · 유니섹스 칸 16
+# 53:47 이다. dunst 는 같은 옷(UNISEX FISHERMAN KNIT CARDIGAN)을 색깔별로 남성 탭과
+# 여성 탭에 **둘 다** 걸어 뒀다. 설명이 틀렸다면 한쪽으로 쏠렸을 텐데 안 쏠린다 —
+# 매장이 제 칸으로 제 설명을 뒷받침한다.
+#
+# **여성·남성 선언은 안 받는다.** 여성이라 적힌 25벌 가운데 7벌이 남성 칸에 들어 있고
+# (suare 「린넨 세미 와이드 밴딩 팬츠」가 MEN 칸이다), 남성 선언은 통틀어 6벌뿐이다.
+# 꾸밈말도 안 받는다 — 「유니섹스 무드」는 선언이 아니라 분위기다. 선언 꼴만 맞춘다.
+DESC_UNISEX = re.compile(
+    r"남녀\s?모두[^.·\n]{0,12}착용|남녀\s?공용\s?착용|남녀\s?공용\s?(?:상품|제품)|"
+    r"유니섹스\s?(?:상품|제품|로\s?제작|디자인으로)|unisex\s?(?:item|product|design)", re.I)
+
 NAME_W_HEAD = re.compile(r"^\s*(?:\[[^\]]*\]\s*)?W\s+(?=[A-Za-z가-힣])")
 NAME_M_HEAD = re.compile(r"^\s*(?:\[[^\]]*\]\s*)?M\s+(?=[A-Za-z가-힣])")
 
@@ -1453,7 +1487,7 @@ NAME_M_PAREN = re.compile(r"(?<![A-Za-z0-9])[\(\[]\s*m\s*[\)\]]", re.I)
 def classify_gender(category_names: list[str], brand_default: str, name: str = "",
                     item_type: str = "", top_len: float | None = None,
                     shoulder: float | None = None, category_code: str = "",
-                    waist: tuple[float, float] | None = None) -> str:
+                    waist: tuple[float, float] | None = None, description: str = "") -> str:
     """칸 이름 → 브랜드 기본값 순으로 성별을 정하되, 상품 이름이 말하면 그게 이긴다.
 
     지금까지는 이름을 안 봤다. 그래서 여성복 매장의 「UNISEX PADDED DENIM BOMBER JACKET」이
@@ -1485,6 +1519,10 @@ def classify_gender(category_names: list[str], brand_default: str, name: str = "
             return "WOMENSWEAR"
         if m and not w:
             return "MENSWEAR"
+    # 이름이 아무 말도 안 하면, 설명글의 선언을 본다 — 칸보다 앞이다.
+    # 칸은 매장이 상품을 어디 **진열**했나이고, 설명은 무엇을 **만들었나**이다.
+    if description and DESC_UNISEX.search(description):
+        return "UNISEX"
     joined = unspace_cate(" ".join(category_names)).lower()
     if any(cate_says_women_solo(x) for x in category_names):
         joined += " women"
@@ -1530,10 +1568,13 @@ def classify_gender(category_names: list[str], brand_default: str, name: str = "
             return "WOMENSWEAR"
         if lo >= WAIST_MEN_MIN:
             return "MENSWEAR"
-    if item_type in TOP_ITEMS and top_len is not None and top_len < TOP_SHORT_CM:
-        return "WOMENSWEAR"
-    if item_type in OUTER_ITEMS and shoulder is not None and shoulder < OUTER_NARROW_CM:
-        return "WOMENSWEAR"
+    if item_type in TOP_ITEMS or item_type in OUTER_ITEMS:
+        if top_len is not None:
+            if top_len < TOP_SHORT_CM:
+                return "WOMENSWEAR"
+        elif shoulder is not None and shoulder < SHOULDER_NARROW_CM:
+            # 총장을 모를 때만 어깨를 본다 — 총장이 있는데 어깨로 덮으면 98%로 떨어진다
+            return "WOMENSWEAR"
     return brand_default or "UNISEX"
 
 
@@ -3368,6 +3409,29 @@ def fill_season_gaps(rows: list[dict]) -> int:
     return filled
 
 
+def length_is_placeholder(rows: list[dict]) -> bool:
+    """이 매장의 총장이 실측인가, 매번 같은 수를 주워 온 것인가.
+
+    saintpain 은 실측표 499개가 **전부 똑같다** — `{"length": [50.0]}`. 파서가 페이지
+    어딘가의 「50」을 상품마다 주워 온 것이지 옷을 잰 값이 아니다. 옛 문턱(<50)은
+    50.0 을 안 집어서 우연히 조용했는데, 문턱을 57 로 올리자 391벌이 통째로 여성이 됐다.
+    「얻은 것을 한 벌씩 열어 봐야 한다」로 잡았다.
+
+    잣대는 **값의 가짓수**다. 스무 벌 넘게 쟀는데 값이 한 가지뿐이면 그건 잰 게 아니다.
+    전수로 이 잣대에 걸리는 매장은 saintpain 하나고, 절반 넘게 한 값에 몰린 다른 두 곳
+    (legacy 69% · helet 53%)은 값이 10~11가지라 안 걸린다 — 진짜 비슷한 옷을 파는 것이다.
+    """
+    seen = set()
+    for d in rows:
+        v = top_length(d.get("size_table"))
+        if v is not None:
+            seen.add(v)
+            if len(seen) > 1:
+                return False
+    return len(seen) == 1 and sum(
+        1 for d in rows if top_length(d.get("size_table")) is not None) >= 20
+
+
 def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
     rows = []
     per_brand: dict[str, int] = {}
@@ -3398,6 +3462,8 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
         # 사이트 공용 이미지 판정 — 한 브랜드 안에서 같은 그림을 여러 상품이 물면 그건 상품 사진이
         # 아니다(dunst 의 LINK_0831.jpg 1,759건). 경로(/web/product/)로 가르면 depound 처럼
         # 자기 CDN(depound.cafe24.com/img/…)을 쓰는 매장의 진짜 사진 107장이 빠진다(2026-09-02).
+        # 총장이 실측이 아니라 자리표시인 매장에서는 총장·어깨 규칙을 끈다
+        len_bad = length_is_placeholder(list(latest.values()))
         img_uses = collections.Counter(d.get("image_url", "") for d in latest.values())
         # 한 브랜드는 제 도메인 하나(또는 en.· /shopN/ 같은 같은 도메인의 변형)를 쓴다.
         # 다른 도메인이 소수로 끼어 있으면 그건 훑다가 흘러든 남의 매장이다.
@@ -3523,9 +3589,11 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
                 "item_type": item,
                 "name": d["name"],
                 "gender_target": classify_gender(d.get("category_names", []), brand_gender.get(slug, "UNISEX"),
-                                                 d["name"], item, top_length(d.get("size_table")),
+                                                 d["name"], item,
+                                                 None if len_bad else top_length(d.get("size_table")),
                                                  shoulder_width(d.get("size_table")), code,
-                                                 waist_span(d.get("size_table"))),
+                                                 waist_span(d.get("size_table")),
+                                                 d.get("description") or ""),
                 "price": d["price"],
                 "representative_color": pick_color(d["name"], d.get("description", ""), d.get("spec"),
                                                    d.get("options")),
