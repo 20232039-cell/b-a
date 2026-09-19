@@ -3114,6 +3114,23 @@ def crawl_brand(http: PoliteSession, shop: Shop, refresh: bool, log, refetch_ids
                 shop.failures.append({"product_no": no, "url": url, "reason": "members-only"})
                 continue
             d = parse_detail(r.text, url, shop)
+            # 이름 자리에 매장 이름만 왔고 주소가 표준판이 아니면, 표준판으로 한 번 더 연다.
+            # 제 스킨(detail1.html·detail2.html)이 자바스크립트 껍데기라 서버 HTML 에 상품
+            # 이름이 아예 없는 매장이 있다 — 본문 글자가 9천 자인데 죄다 머리글·메뉴다.
+            # 표본으로 가른 결과(각 6벌):
+            #     aeae(detail2) 440건 · cpgn-studio(detail1) 1,255 · dnsr(detail2) 493
+            #         → 표준 주소로 열면 진짜 이름이 나온다(「WEB LOGO 5PANNEL CAP [BLACK]」)
+            #     akro·markm·recto(각 800건)는 **이미 표준 주소**인데도 매장 이름만 온다.
+            #         표준판까지 자바스크립트라 다른 병이다 — 여기서는 안 고쳐진다.
+            # 그래서 「주소가 표준판이 아닐 때만」 되연다. 헛걸음이 안 생긴다.
+            if (d and not_a_product(d["name"], shop_titles) == "매장이름뿐"
+                    and not re.search(r"/product/detail\.html\?product_no=", url)):
+                alt = f"{shop.base}/product/detail.html?product_no={no}"
+                r2 = http.get(alt, retries=1)
+                if r2 is not None and r2.status_code == 200:
+                    d2 = parse_detail(r2.text, alt, shop)
+                    if d2 and not_a_product(d2["name"], shop_titles) != "매장이름뿐":
+                        url, r, d = alt, r2, d2
             if not d:
                 failed += 1
                 shop.failures.append({"product_no": no, "url": url, "reason": "no-name", "bytes": len(r.text)})
