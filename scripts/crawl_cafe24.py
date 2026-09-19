@@ -1321,9 +1321,24 @@ def classify_gender(category_names: list[str], brand_default: str, name: str = "
         if m and not w:
             return "MENSWEAR"
     joined = " ".join(category_names).lower()
-    for g, keys in GENDER_RULES:
-        if any(re.search(rf"\b{k}\b", joined) for k in keys):
-            return g
+    hit = [g for g, keys in GENDER_RULES
+           if any(re.search(rf"\b{k}\b", joined) for k in keys)]
+    # 매장이 남성 칸과 여성 칸에 **둘 다** 넣어 둔 상품이 있다. 그건 매장이 「둘 다 입는
+    # 옷」이라고 말한 것이지 둘 중 하나가 아니다. 지금까지는 GENDER_RULES 차례에 따라
+    # 여성이 먼저 걸려서 전부 여성복이 됐다 — 1,659벌(전체의 1.2%)이 그렇게 들어갔다.
+    # 매장이 제 손으로 한 말이라 표본이 아니라 실측이고, 열어 보면 성격이 분명하다:
+    #
+    #     kijun            COTERIE Cap UNISEX Black   ['WOMEN','MEN','ACC','Hat']  ← 이름이 유니섹스다
+    #     rest-recreation  RR CHINO PANTS - BEIGE     ['WOMEN','MEN']
+    #     youth            Essential Socks (Long)     ['MEN','WOMEN']
+    #     amomento         Cotton nylon shirring coat ['outwears','Women','Men']
+    #
+    # 이름에서 「UNISEX … FOR MEN」을 유니섹스로 보는 것과 같은 까닭이다. 성별 필터를
+    # 씌웠을 때 이 옷들이 남성 쪽에서 통째로 사라지는 것이 지금 문제다(사람 지적).
+    if "WOMENSWEAR" in hit and "MENSWEAR" in hit:
+        return "UNISEX"
+    if hit:
+        return hit[0]
     # 매장이 아무 말도 안 했으면 품목이 말한다. 짐작이 아니라 센 값이다 — 매장이 제 손으로
     # 성별 칸에 넣어 둔 22,714벌에서 품목별로 어느 칸에 들어갔는지 셌다(2026-09-18):
     #
@@ -1398,6 +1413,8 @@ class Shop:
     list_paths: set = field(default_factory=lambda: {"/product/list.html"})
     failures: list[dict] = field(default_factory=list)
     content_cats: dict[int, str | None] = field(default_factory=dict)   # cate_no → 룩북 칸이면 그 이름
+    menu_gender: dict[int, str] = field(default_factory=dict)     # cate_no → 감싼 메뉴 덩이가 말한 성별
+    page_gender: dict[int, str] = field(default_factory=dict)     # cate_no → 그 칸 목록 페이지가 스스로 말한 성별
 
     def allowed(self, url: str) -> bool:
         if not self.robots:
@@ -1519,13 +1536,78 @@ def harvest_product_links(html_text: str, shop: Shop) -> set[tuple[int, str]]:
     return found
 
 
+# 링크 글이 아니라 **감싼 덩이의 이름**이 성별을 말하는 매장이 있다. 메뉴가
+#   <ul class="WOMEN_menu"><li><a href="…cate_no=654">ALL</a>…
+# 꼴이라 링크 글에는 ALL·TOP·BOTTOM 밖에 없다. 덩이 이름은 「_」·「-」로 끊어 낱말이
+# 통째로 맞을 때만 받는다 — 안 그러면 class="element" 의 「men」 같은 것이 걸린다.
+MENU_GENDER_TOKEN = {
+    "women": "WOMEN", "womens": "WOMEN", "woman": "WOMEN", "womans": "WOMEN",
+    "ladies": "WOMEN", "girls": "WOMEN", "여성": "WOMEN", "우먼": "WOMEN",
+    "men": "MEN", "mens": "MEN", "man": "MEN", "mans": "MEN", "남성": "MEN",
+}
+# 덩이 이름은 가까운 조상에서만 찾는다. <body class="women"> 같은 것이 매장 전체를
+# 여성으로 칠하는 것을 막는다.
+MENU_GENDER_UP = 6
+
+
+def _menu_gender(a) -> str | None:
+    up = 0
+    for el in a.parents:
+        if getattr(el, "name", None) in (None, "body", "html", "[document]"):
+            return None
+        up += 1
+        if up > MENU_GENDER_UP:
+            return None
+        vals: list[str] = []
+        cls = el.get("class")
+        if cls:
+            vals += cls if isinstance(cls, list) else [cls]
+        if el.get("id"):
+            vals.append(str(el.get("id")))
+        for v in vals:
+            for tok in re.split(r"[^0-9A-Za-z가-힣]+", str(v)):
+                g = MENU_GENDER_TOKEN.get(tok.lower())
+                if g:
+                    return g
+    return None
+
+
+# 같은 칸에 이름이 여럿 걸린다(ava-molli 의 cate 55 는 「ALL」·「WOMAN」·「View More」).
+# 성별을 말하는 쪽을 쓰되, **메뉴 이름일 때만** 쓴다. 기획전 제목에도 성별 낱말이 들어가는데
+# 그건 칸의 성별이 아니다 — 실측으로 둘이 걸렸다:
+#     crank      「🐰 MY LITTLE GIANT GIRLS 🐰」      (기획전 이름)
+#     years-ago  「26 Summer  'For Women'」           (시즌 캠페인)
+# 둘 다 길거나 숫자가 섞여 있다. 메뉴 이름은 짧고 숫자가 없다.
+def _is_menu_label(text: str) -> bool:
+    return len(text) <= 12 and not re.search(r"\d", text)
+
+
 def load_categories(http: PoliteSession, shop: Shop, soup: BeautifulSoup, html_text: str = "") -> None:
+    votes: dict[int, set[str]] = {}
     for a in soup.select('a[href*="cate_no="]'):
         href = a.get("href", "")
         m = re.search(r"cate_no=(\d+)", href)
+        if not m:
+            continue
+        no = int(m.group(1))
         text = a.get_text(" ", strip=True)
-        if m and text and len(text) <= 40:
-            shop.categories.setdefault(int(m.group(1)), text)
+        if text and len(text) <= 40:
+            had = shop.categories.get(no)
+            if had is None or (
+                says_gender(text) and _is_menu_label(text) and not says_gender(had)
+            ):
+                shop.categories[no] = text
+        g = _menu_gender(a)
+        if g:
+            votes.setdefault(no, set()).add(g)
+    # 덩이 이름은 만장일치일 때만 받는다. 매장이 메뉴를 복사해 놓고 한쪽 class 를 안 고친
+    # 곳이 있어(goodlifeworks 의 모바일 메뉴가 여성 칸을 MEN_menu 로 감싼다) 엇갈리면
+    # 아무 말도 안 하는 편이 낫다 — 틀린 성별이 빈 성별보다 나쁘다.
+    # 여기서는 적어만 두고 이름은 안 바꾼다. 덩이 이름만으로는 못 믿기 때문이다 —
+    # apply_menu_gender 가 매장이 제 입으로 한 말로 검산한 뒤에야 붙인다.
+    for no, gs in votes.items():
+        if len(gs) == 1 and not says_gender(shop.categories.get(no, "")):
+            shop.menu_gender[no] = next(iter(gs))
     # 목록 페이지 이름이 list.html 이 아닌 매장이 있다 — pogservice 는 list2.html, matinkim 은
     # /product/kimmatin/list.html 을 같이 쓴다. 홈 링크에서 본 경로를 전부 후보로 둔다.
     for m in re.finditer(r'href="((?:https?://[^/"]+)?(/product/(?:[^/?"]+/)?list\w*\.html))\?[^"]*cate_no=', html_text):
@@ -1575,6 +1657,84 @@ def says_gender(name: str) -> bool:
     return any(re.search(rf"\b{k}\b", low) for _, keys in GENDER_RULES for k in keys)
 
 
+# 목록 페이지의 제목·「현재 위치」줄은 매장이 그 칸을 뭐라 부르는지 제 입으로 말한 것이다.
+#     goodlifeworks  cate 460  「GLW | MEN」
+#     brownbreath    cate 1014 「NEW ARRIVALS … 현재 위치 MEN NEW ARRIVALS」
+#     umarmung       cate 348  「WOMEN - UMARMUNG」
+# 반대로 아무 말도 안 하는 곳도 많다(horlisun 은 「Outerwears - 홀리선」뿐이다).
+_PATH_SEL = ("#contents .path", ".xans-product-headcategory", ".titleArea",
+             ".path", "h2.title", ".location", ".displayArea .title")
+_SAYS_W = re.compile(r"\b(?:women|woman|womens|ladies)\b|여성|우먼", re.I)
+_SAYS_M = re.compile(r"\b(?:men|man|mens)\b|남성", re.I)
+
+
+def page_says_gender(html_text: str) -> str | None:
+    """그 칸 목록 페이지가 스스로 성별을 말하나 — 둘 다 말하면 아무 말도 안 한 것으로 친다."""
+    try:
+        soup = BeautifulSoup(html_text, "html.parser")
+    except Exception:
+        return None
+    bits = []
+    if soup.title:
+        bits.append(soup.title.get_text(" ", strip=True))
+    for sel in _PATH_SEL:
+        for el in soup.select(sel)[:2]:
+            bits.append(el.get_text(" ", strip=True))
+    txt = " | ".join(b for b in bits if b)[:400]
+    w, m = bool(_SAYS_W.search(txt)), bool(_SAYS_M.search(txt))
+    if w and not m:
+        return "WOMEN"
+    if m and not w:
+        return "MEN"
+    return None
+
+
+# 덩이 메뉴가 「이 칸은 남성」이라 말한 것을, 매장이 제 입으로 한 말로 검산한 뒤에만 이름에
+# 붙인다. 검산 없이 붙였다가 horlisun 에서 틀렸다 — 그 매장의 category-sub-men 안에는
+# 가게 전체(cate 87 「Shop」)가 들어 있어서, 남성 칸이라는 것들의 상품이 여성 칸 상품과
+# 53~100% 겹쳤다(실측). 아래 두 길 중 하나로 확인되면 받는다:
+#
+#   ㄱ. 그 칸의 목록 페이지가 스스로 같은 성별을 말한다        ← 매장이 직접 한 말
+#   ㄴ. 그 매장의 덩이 메뉴가 실제로 상품을 남녀로 가른다      ← 겹침이 작은 쪽의 절반 미만
+#
+# 매장 단위로 잰 겹침은 두 무리로 깨끗이 갈렸다(2026-09-19 실측, 창고 전수):
+#     가르는 곳  insilence 0% · rough-side 0% · belier 4% · anotheroffice 6% · dunst 8% ·
+#                brown-yard 22% · wooyoungmi 29%
+#     아닌 곳    brownbreath 90% · horlisun 99%
+# 자름값 50% 는 두 무리 사이 빈 자리에 둔다.
+MENU_GENDER_CROSS = 0.5
+
+
+def apply_menu_gender(shop: Shop) -> None:
+    if not shop.menu_gender:
+        return
+    side: dict[str, set] = {"MEN": set(), "WOMEN": set()}
+    for no, cats in shop.membership.items():
+        for c in cats:
+            g = shop.menu_gender.get(c)
+            if g:
+                side[g].add(no)
+    splits = False
+    if side["MEN"] and side["WOMEN"]:
+        cross = len(side["MEN"] & side["WOMEN"]) / min(len(side["MEN"]), len(side["WOMEN"]))
+        splits = cross < MENU_GENDER_CROSS
+        shop.errors.append(
+            f"메뉴 덩이 성별: 남 {len(side['MEN'])}벌 · 여 {len(side['WOMEN'])}벌 · "
+            f"겹침 {cross:.0%} → {'가른다' if splits else '안 가른다 — 덩이 이름은 안 쓴다'}")
+    kept = dropped = 0
+    for no, g in shop.menu_gender.items():
+        said = shop.page_gender.get(no)
+        if said == g or (splits and said is None):
+            had = shop.categories.get(no, "")
+            if not says_gender(had):
+                shop.categories[no] = f"{g} {had}".strip()
+            kept += 1
+        else:
+            dropped += 1
+    if dropped:
+        shop.errors.append(f"메뉴 덩이 성별: {kept}칸 받고 {dropped}칸 버림(매장이 말이 없다)")
+
+
 def _crawl_one_list(http: PoliteSession, shop: Shop, cate_no: int, list_path: str, max_pages: int) -> None:
         page = 1
         seen_here: set[int] = set()
@@ -1588,6 +1748,9 @@ def _crawl_one_list(http: PoliteSession, shop: Shop, cate_no: int, list_path: st
                 break
             # <title> 이 카테고리 이름을 더 정확히 말해 준다("Outerwears - MATINKIM")
             if page == 1:
+                said = page_says_gender(r.text)
+                if said:
+                    shop.page_gender[cate_no] = said
                 m = re.search(r"<title>\s*([^<]+?)\s*(?:-|\||·)\s*[^<]*</title>", r.text)
                 if m and 1 < len(m.group(1)) <= 40:
                     nm = m.group(1).strip()
@@ -2592,6 +2755,8 @@ def crawl_brand(http: PoliteSession, shop: Shop, refresh: bool, log, refetch_ids
         crawl_category_lists(http, shop)
         enumerate_by_number(http, shop)      # 앞의 두 길이 빈손일 때만 돈다
         todo = [(no, u) for no, u in shop.product_urls.items() if no not in done and no not in members_only]
+    # 칸 소속을 다 안 뒤라야 덩이 메뉴가 말한 성별을 검산할 수 있다
+    apply_menu_gender(shop)
     log(f"[{shop.slug}] 카테고리 {len(shop.categories)} · 상품 URL {len(shop.product_urls)} ({shop.enumerated_by}) · 받을 것 {len(todo)} · 이미 {len(done)}")
 
     fetched = 0
