@@ -1695,7 +1695,7 @@ def load_categories(http: PoliteSession, shop: Shop, soup: BeautifulSoup, html_t
             continue
         no = int(m.group(1))
         text = a.get_text(" ", strip=True)
-        if text and len(text) <= 40:
+        if text and len(text) <= 40 and not is_shop_name(shop, text):
             had = shop.categories.get(no)
             if had is None or (
                 says_gender(text) and _is_menu_label(text) and not says_gender(had)
@@ -1742,8 +1742,10 @@ def load_categories(http: PoliteSession, shop: Shop, soup: BeautifulSoup, html_t
     # 그랬다(2026-09-06): numbering 0벌 · opus-0012 0벌 · pog-service 0벌.
     # 셋 다 지금도 열리는 cafe24 매장이고 홈에 「/category/acc/47」·「/category/bottoms/46」이
     # 걸려 있는데 우리가 안 봤다. 이름은 주소의 토막을 그대로 쓴다.
-    for m in re.finditer(r'href="[^"]*?/category/([A-Za-z0-9%\-_.]+)/(\d+)', html_text):
-        shop.categories.setdefault(int(m.group(2)), unquote(m.group(1)))
+    for m in re.finditer(r'href="[^"]*?/category/([^/"?<>]{1,40})/(\d+)', html_text):
+        nm = unquote(m.group(1))
+        if not is_shop_name(shop, nm):
+            shop.categories.setdefault(int(m.group(2)), nm)
     # 내비에 없는 카테고리가 상품 링크의 /category/N/ 에 숨어 있다(9999archive 의 협업 카테고리 1).
     for m in re.finditer(r"/product/[^/\"]+/\d+/category/(\d+)/", html_text):
         shop.categories.setdefault(int(m.group(1)), f"cate_{m.group(1)}")
@@ -1921,12 +1923,16 @@ def _crawl_one_list(http: PoliteSession, shop: Shop, cate_no: int, list_path: st
             links = harvest_product_links(r.text, shop)
             # 목록 페이지에 하위 카테고리 링크가 더 있으면 그것도 훑는다
             for m in re.finditer(r'href="[^"]*cate_no=(\d+)[^"]*"[^>]*>\s*([^<]{1,40}?)\s*<', r.text):
-                shop.categories.setdefault(int(m.group(1)), m.group(2).strip())
+                nm2 = m.group(2).strip()
+                if not is_shop_name(shop, nm2):
+                    shop.categories.setdefault(int(m.group(1)), nm2)
             # 「/category/women/112/」 꼴도 여기서 줍는다. 여태 홈에서만 주웠는데, 그 링크를
             # **홈에 안 걸고 안쪽 목록에만** 둔 매장이 있다 — bmuette 의 women 112·men 113 이
             # SHOP 칸(111) 안에만 있어서 성별 칸을 통째로 못 봤다(판매중 308벌).
-            for m in re.finditer(r'href="[^"]*?/category/([A-Za-z0-9%\-_.]+)/(\d+)', r.text):
-                shop.categories.setdefault(int(m.group(2)), unquote(m.group(1)))
+            for m in re.finditer(r'href="[^"]*?/category/([^/"?<>]{1,40})/(\d+)', r.text):
+                nm3 = unquote(m.group(1))
+                if not is_shop_name(shop, nm3):
+                    shop.categories.setdefault(int(m.group(2)), nm3)
             new = {no for no, _ in links} - seen_here
             if not new:
                 break
