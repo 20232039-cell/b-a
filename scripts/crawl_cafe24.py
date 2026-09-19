@@ -1215,11 +1215,26 @@ def field_color(text: str) -> str:
 #   · URL 의 %20(빈칸)이 20 으로 남는다 — 「a20summer20line20knit」이 20SS 가 됐다(175벌).
 #   · 해시 파일 이름 — 「f65d7c39318c27fa08be…」의 27fa 가 27FW 가 됐다(kirsh 362벌).
 # 두 글자 약어 fa·su·sp·wi 도 뺀다. 매장은 SS·FW·AW 로 쓰고, 저 넷은 해시에 흔한 조각이다.
+# 매장은 「25FW」만 쓰는 게 아니라 **슬래시를 넣어** 「25 F/W」·「26 A/W」·「26 S/S」로도
+# 쓴다(사람이 짚었다). 두 글자 사이에 슬래시가 끼면 앞의 갈래가 통째로 안 걸렸다 —
+# hatching-room 의 「26 F/W」칸 150벌이 그렇게 빈칸이었다. s/s·f/w·a/w 를 따로 받는다.
+# 간절기 시즌도 받는다(사람 결정: SS/FW 로 뭉갠다) — 매장이 쓰는 꼴을 전수로 긁어 골랐다:
+#     PF  Pre-Fall    927벌   le17septembre 「Womens > PF 2023」· pushbutton 「PF22 …」  → FW
+#     PS  Pre-Spring  801벌   amomento 「25PS Paris Presentation」· grove 「2026 PS」    → SS
+#     HS  High Summer        atelier-de-lumen 「24 HS COLLECTION」· coor 「22HS …」     → SS
+#         홀리데이로 읽었다가 사람이 「HS는 여름이다」라고 고쳐 줬고, 창고에 증거가 있다:
+#         brownbreath 의 그림 주소가 「detail/**26ss**/26hs_intro.jpg」로 SS 폴더 안이고,
+#         big-union 은 「24HS/**240404**/」— 4월에 올린 옷이다. 홀리데이일 수 없다.
+# 같은 훑기에서 나온 tee22·pts22·jkt22·hde22·knt22·20TH 따위는 품목 코드·주년이라 안 받는다.
+_SEASON_HALF_RX = (r"s\s?/\s?s|f\s?/\s?w|a\s?/\s?w|ss|fw|aw|pf|ps|hs"
+                   r"|spring|summer|fall|autumn|winter|pre-?fall|resort|cruise|holiday")
 _SEASON_RX = re.compile(
-    r"(?<![0-9a-z])(?:20)?(\d{2})\s*[-_/]?\s*(ss|fw|aw|spring|summer|fall|autumn|winter)(?![a-z0-9]*\d)"
-    r"|(?<![a-z0-9])(ss|fw|aw|spring|summer|fall|autumn|winter)\s*[-_/]?\s*(?:20)?(\d{2})(?![0-9])", re.I)
+    rf"(?<![0-9a-z])(?:20)?(\d{{2}})\s*[-_/]?\s*({_SEASON_HALF_RX})(?![a-z0-9]*\d)"
+    rf"|(?<![a-z0-9])({_SEASON_HALF_RX})\s*[-_/]?\s*(?:20)?(\d{{2}})(?![0-9])", re.I)
 _SEASON_HALF = {"ss": "SS", "spring": "SS", "summer": "SS",
-                "fw": "FW", "fall": "FW", "autumn": "FW", "aw": "FW", "winter": "FW"}
+                "fw": "FW", "fall": "FW", "autumn": "FW", "aw": "FW", "winter": "FW",
+                "ps": "SS", "resort": "SS", "cruise": "SS", "hs": "SS",
+                "pf": "FW", "prefall": "FW", "holiday": "FW"}
 
 
 def season_in(text: str) -> str:
@@ -1228,24 +1243,40 @@ def season_in(text: str) -> str:
     if not m:
         return ""
     yr, half = (m.group(1), m.group(2)) if m.group(1) else (m.group(4), m.group(3))
-    half = _SEASON_HALF.get((half or "").lower(), "")
+    # 「F / W」의 슬래시·빈칸을 떼고 표에서 찾는다
+    half = _SEASON_HALF.get(re.sub(r"[\s/]", "", (half or "").lower()), "")
     if not half or not (yr or "").isdigit():
         return ""
     y = int(yr)
     return f"{y:02d}{half}" if 18 <= y <= 27 else ""
 
 
-def season_of(name: str, detail_images: list | None) -> str:
-    """상품명이 먼저다 — 매장이 직접 적은 것이므로. 없으면 상세 그림 주소에서."""
+def season_of(name: str, detail_images: list | None,
+              category_names: list | None = None) -> str:
+    """상품명이 먼저다 — 매장이 직접 적은 것이므로. 없으면 **칸 이름**, 그다음 상세 그림 주소.
+
+    칸 이름을 보기로 한 까닭: 시즌을 상품명에 안 적고 칸으로만 나눠 둔 매장이 많다
+    (hatching-room 의 「26 F/W」·「26 Summer」, and-you 의 「26 FALL LIVE」). 판매중 의류의
+    시즌 빈칸 46,267 가운데 2,643벌이 이 길로 찬다 — 34.7% → 38.4%.
+
+    가짜가 섞이지 않는지 전수로 확인했다(2026-09-19): 시즌으로 읽히는 칸 이름 96가지가
+    전부 진짜 시즌이고, 「SEASON OFF」·「ALL SEASON」은 해가 없어 안 걸린다. 시즌 칸 둘에
+    든 상품은 82벌뿐이라 아래 「동점이면 최신」이 받아 준다.
+    """
     got = season_in(name)
     if got:
         return got
-    found = [s for s in (season_in(u) for u in (detail_images or [])) if s]
+    found = [s for s in (season_in(x) for x in (category_names or [])) if s]
+    if not found:
+        found = [s for s in (season_in(u) for u in (detail_images or [])) if s]
     if not found:
         return ""
     top = collections.Counter(found).most_common()
     best = max(n for _, n in top)
-    return max(s for s, n in top if n == best)   # 동점이면 최신
+    # 동점이면 최신. 글자 크기로 고르면 안 된다 — 「26SS」가 「26FW」를 이긴다(S > F).
+    # 같은 해에서는 FW 가 나중이다.
+    return max((s for s, n in top if n == best),
+               key=lambda x: (int(x[:2]), x[2:] == "FW"))
 
 
 def pick_color(name: str, description: str, spec: dict | None = None,
@@ -3369,7 +3400,7 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
                 "price": d["price"],
                 "representative_color": pick_color(d["name"], d.get("description", ""), d.get("spec"),
                                                    d.get("options")),
-                "season": season_of(d["name"], d.get("detail_images")),
+                "season": season_of(d["name"], d.get("detail_images"), d.get("category_names")),
                 "status": "SOLD_OUT" if (d.get("soldout") or d.get("delisted")) else "ON_SALE",
                 "image_url": d["image_url"],
                 # 회원 전용·리다이렉트로 홈 주소만 남은 건(badblood 208, haleine 14)은 cafe24 표준 상세 주소로 복원
