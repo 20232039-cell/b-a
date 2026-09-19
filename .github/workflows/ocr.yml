@@ -324,6 +324,33 @@ jobs:
           for k in ("소재", "색", "디테일"):
               print(f"- {k} {c[k]:,}/{c['판매중']:,} = {c[k]/max(1,c['판매중'])*100:.2f}%")
           PY
+      # 목록에서 뺀 매장의 OCR 이 **두 번 되살아났다**(covernat·partimento·phyps).
+      # 까닭: 이 잡은 시작할 때 데이터 저장소를 받아 두는데, 그 뒤에 사람이 매장을 지우면
+      # 이쪽 사본에는 파일이 그대로 남는다. 마지막에 `git add -A data/crawl/ocr/` 를 하고
+      # 푸시가 부딪혀 `git pull --rebase` 로 사람의 삭제 위에 얹히면, 그 커밋이 지운 파일을
+      # **다시 넣는다.** 일정을 짜는 쪽은 죄가 없다 — 거기는 data/crawl/*.jsonl 을 보므로
+      # 지운 매장을 애초에 안 부른다.
+      #
+      # 그래서 밀기 직전에 맞춰 본다: 그 매장의 상품 목록(data/crawl/<slug>.jsonl)이 없으면
+      # 우리가 안 파는 매장이고, 그 OCR 도 둘 자리가 없다. 브랜드 이름을 적지 않고 가른다.
+      - name: 목록에 없는 매장의 OCR 은 버린다 — 지운 매장이 되살아나는 것을 막는다
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, glob
+          gone = []
+          for p in sorted(glob.glob("data/crawl/ocr/*.jsonl")):
+              slug = os.path.basename(p)[:-6]
+              if slug.startswith("_"):
+                  continue
+              if not os.path.exists(f"data/crawl/{slug}.jsonl"):
+                  os.remove(p)
+                  gone.append(slug)
+                  d = f"data/crawl/detail/{slug}.jsonl"
+                  if os.path.exists(d):
+                      os.remove(d)
+          print("버린 매장:", ", ".join(gone) if gone else "없다")
+          PY
       - name: commit & push (rebase 후, 3회 재시도)
         shell: bash
         run: |
