@@ -62,6 +62,54 @@ DATA = ROOT / "data"
 #
 # 자리 배열로 바꾸면 4% 더 줄지만(gzip 37B/벌) 읽기 어려워지는 값이 더 크다 —
 # gzip 이 반복되는 열쇠를 이미 먹는다. 그래서 **짧은 열쇠 객체**로 둔다(양쪽 합의 2026-09-20).
+# ── 스펙표에 무엇을 그리나 (사람 결정 2026-09-20) ─────────────────────────────
+# 안 그릴 것을 11만 벌치 나르지 않는다.
+#   neckline  25%  하이넥·터틀넥 — 사진이 말한다
+#   hardware  57%  지퍼·단추·YKK — 옷을 고를 때 안 본다
+#   function  28%  신축성·보온성·경량
+#
+# `finish_wash` 는 **빼지 않고 가른다.** 처음엔 빈도(31%)만 보고 빼자고 했는데, 앱 쪽이
+# 짚었다 — 청바지의 「디스트로이드」는 그 옷이 무릎 찢긴 청바지라고 말해 주는 **유일한
+# 줄**이다. 잣대는 빈도가 아니라 붙었을 때 할 말이 있느냐다.
+#
+# 그래서 눈에 보이는 값은 design_element 로 옮기고 공정 이름은 걷는다. 규칙을 양쪽이
+# 따로 들면 한쪽이 낡으므로 **여기 한 군데**에만 둔다(이 저장소가 그걸로 세 번 데였다).
+# 창고 어휘 35값을 전부 가른다 — 열둘만 보고 고르면 나머지가 조용히 샌다.
+DROP_AXES = {"neckline", "hardware", "function"}
+
+# 여러 공정이 같은 결을 낸다 — 사람 눈에는 「워싱」 하나다
+WASH_AS_ONE = {"가먼트워싱", "바이오워싱", "노말워싱", "핸드메이드워싱", "피그먼트워싱",
+               "솔트워싱", "더티워싱", "폴딩워싱", "샌드워시"}
+# 보이는 것 — 디자인 줄로 옮긴다
+FINISH_VISIBLE = {"워싱", "블리치", "빈티지가공", "에이징", "데미지", "페이딩", "디스트로이드",
+                  "페인팅", "코팅", "크링클", "엠보싱", "주름가공", "기모", "피치기모", "브러시드"}
+# 공정 이름 — 옷을 보고 알 수 없고, 알아도 살지 말지가 안 바뀐다.
+# 방수·발수·방풍은 기능이라 function 과 같이 뺀다(그쪽을 살리기로 하면 여기서도 살린다).
+FINISH_PROCESS = {"후가공", "흡습가공", "텐타가공", "덤블가공", "실켓가공", "수축방지",
+                  "링클프리", "가먼트다잉", "방수", "발수", "방풍"}
+
+
+def fold_finish(t: dict) -> dict:
+    """가공 축을 디자인 줄로 접는다 — 보이는 것만, 워싱은 하나로."""
+    fin = t.get("finish_wash") or []
+    if not fin:
+        return {k: v for k, v in t.items() if k not in DROP_AXES}
+    moved = []
+    for x in fin:
+        x = "워싱" if x in WASH_AS_ONE else x
+        if x in FINISH_PROCESS:
+            continue
+        # 모르는 값은 통과시킨다 — 어휘가 자라는 축이라 버리면 새 말이 조용히 사라진다
+        if x in FINISH_VISIBLE or x not in FINISH_PROCESS:
+            if x not in moved:
+                moved.append(x)
+    out = {k: v for k, v in t.items() if k not in DROP_AXES and k != "finish_wash"}
+    if moved:
+        des = list(out.get("design_element") or [])
+        out["design_element"] = des + [x for x in moved if x not in des]
+    return out
+
+
 GENDER_CODE = {"WOMENSWEAR": "W", "MENSWEAR": "M", "UNISEX": "U"}
 
 
@@ -109,7 +157,7 @@ def full(r: dict, tags: dict, sizes: dict, crawl: dict) -> dict:
     d = crawl.get(r["source_url"]) or {}
     out = {"id": f'{r["brand_slug"]}-{r["product_no"]}'}
     out.update({
-        "tags": (tags.get(r["source_url"]) or {}).get("tags") or {},
+        "tags": fold_finish((tags.get(r["source_url"]) or {}).get("tags") or {}),
         "size": sizes.get(r["source_url"]),
         "gallery": d.get("gallery") or [],
         # 설명문을 내보낸다(2026-09-20 사람 결정: 「지금 당장 메울 곳은 메워, 배송이나
