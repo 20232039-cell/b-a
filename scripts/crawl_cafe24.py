@@ -228,7 +228,7 @@ ITEM_TYPE_VOCAB = {
     # 「fur」·「shearling」·「sheepskin」은 소재지 품목이 아니다. 품목으로 넣었더니
     # 「FUR MINIBAG」·「Real Mink Fur Hat」·「퍼 블랙 버블백」이 겉옷이 됐다(2026-09-05).
     # diafvine 가죽 겉옷 17벌은 「기타」로 남는다 — 모자·가방을 잃는 값보다 싸다.
-    "재킷": ["jacket", "자켓", "재킷", "blouson", "블루종", "jk", "트러커", "trucker",
+    "재킷": ["jacket", "자켓", "재킷", "jk",
              # 「N-1 Deck jkt」처럼 jkt 로 줄여 쓰는 이름 10벌이 품목 빈칸이었다(2026-09-08). 다른 이름은 한 개도 안 움직인다.
              "jkt"],
     "코트": ["coat", "코트", "raincoat", "레인코트", "robe", "로브"],
@@ -238,7 +238,7 @@ ITEM_TYPE_VOCAB = {
     "데님": ["jeans", "denim", "데님", "청바지", "jean", "진스", "쟌", "데님팬츠",
             "셀비지", "selvedge", " 진 "],
     "팬츠": ["pants", "trousers", "trouser", "팬츠", "슬랙스", "slacks", "트라우저",
-            "치노", "chino", "판타롱", "pantalon",
+            "판타롱", "pantalon",
              # 「트라우져」 표기 5벌 — 「조거 트라우저」가 팬츠로 가듯 「조거 트라우져」도 팬츠로 간다(표기만 다른 13벌이 같은 답을 받는다).
              "트라우져"],
     "스커트": ["skirt", "스커트",
@@ -253,7 +253,9 @@ ITEM_TYPE_VOCAB = {
     "점프수트": ["jumpsuit", "점프수트", "overall", "오버올"],
     "가디건": ["가디건", "shrug", "슈러그", "볼레로", "bolero"],
     "블레이저": ["blazer", "블레이저", "블레이져", "브레이저"],
-    "트렌치": ["trench", "트렌치"],
+    # 「더블 하이넥 벨티드 트렌치 코트」가 트렌치가 아니라 코트로 갔다 — 뒤에 오는 「코트」가
+    # 이기기 때문이다. 붙은꼴을 넣어야 끝나는 자리가 같아지고 긴 쪽이 이긴다(2026-09-20).
+    "트렌치": ["trench", "트렌치", "트렌치 코트", "트렌치코트", "trench coat", "trenchcoat"],
     "점퍼": ["jumper", "점퍼"],
     "탑": ["top", "탑", "sleeveless", "슬리브리스", "민소매", "tank", "탱크", "뷔스티에", "bustier",
            "캐미솔", "camisole", "브라렛", "bralette", "브라탑", "bra top", " 브라 ",
@@ -281,7 +283,9 @@ ITEM_TYPE_VOCAB = {
     "저지": ["jersey", "저지"],
     "버뮤다": ["bermuda", "버뮤다"],
     "파카": ["parka", "파카"],
-    "MA-1/봄버": ["bomber", "ma-1", "봄버"],
+    # 「BOMBER JACKET」은 뒤의 jacket 이 이겨 재킷으로 갔다 — 붙은꼴을 넣는다(2026-09-20).
+    "MA-1/봄버": ["bomber", "ma-1", "봄버", "봄버 자켓", "봄버자켓", "봄버 재킷",
+               "bomber jacket", "ma-1 jacket"],
     "플리스": ["fleece", "플리스"],
     "후드집업": ["hood zip", "hooded zip", "후드집업", "hoodie zip"],
     "반팔": ["half sleeve", "short sleeve", "half t", "half tee", "반팔", "하프 슬리브", "하프슬리브", "s/s tee", "ss tee",
@@ -291,7 +295,59 @@ ITEM_TYPE_VOCAB = {
            "숏슬리브", "숏 슬리브"],
     "피케": ["polo", "pique", "피케", "폴로"],
     "레깅스": ["leggings", "레깅스"],
-    "조거팬츠": ["jogger", "track pants", "조거"],
+    "조거팬츠": ["jogger", "조거"],
+
+    # ── 굵은 통을 가른다 (사람 요청 2026-09-20, 전수 조사로 고른 것만) ──────────────
+    # 「재킷」 10,021벌의 64%가 아우터 전체였다. 이름을 전수로 헤아려 **진짜 다른 옷**만
+    # 골랐다 — 소재(울·코듀로이)와 핏(와이드·스트레이트)은 이미 태그에 있으니 안 넣는다.
+    # 다만 레더·스웨이드·트위드는 소재이면서 그 자체로 옷 갈래다(사람 판단: 「레더 자켓
+    # 트위드 자켓은 넣는게 맞아. 라이더 자켓은 다 레더 소재야. 무신사에선 레더/라이더로 할걸」).
+    #
+    # match_head 는 이름에서 **가장 뒤에 끝나는** 낱말을 고른다. 그래서 「TRUCKER JACKET」은
+    # jacket 이 뒤라 계속 재킷이 이긴다 — 붙은꼴을 통째로 넣어야 갈린다.
+    "레더자켓": ["레더 자켓", "레더자켓", "레더 재킷", "레더재킷", "가죽 자켓", "가죽자켓",
+             "leather jacket", "leather jk", "라이더 자켓", "라이더자켓", "라이더 재킷",
+             "rider jacket", "biker jacket", "바이커 자켓", "라이더", "rider", "biker"],
+    "스웨이드자켓": ["스웨이드 자켓", "스웨이드자켓", "스웨이드 재킷", "suede jacket", "suede jk"],
+    "트위드자켓": ["트위드 자켓", "트위드자켓", "트위드 재킷", "tweed jacket", "tweed jk"],
+    "트러커": ["트러커", "trucker", "트러커 자켓", "트러커자켓", "트러커 재킷", "trucker jacket",
+             "데님 자켓", "데님자켓", "데님 재킷", "denim jacket"],
+    "워크자켓": ["워크 자켓", "워크자켓", "워크 재킷", "work jacket", "카바롤", "coverall"],
+    "필드자켓": ["필드 자켓", "필드자켓", "필드 재킷", "field jacket", "밀리터리 자켓",
+             "military jacket", "m-65", "m65", "m-64"],
+    # 해링턴·바시티는 블루종의 한 갈래다 — 더 좁은 쪽이 이기게 붙은꼴을 같이 넣는다
+    "해링턴": ["해링턴", "harrington", "해링턴 블루종", "harrington blouson",
+            "해링턴 자켓", "해링턴자켓", "harrington jacket"],
+    "바시티": ["바시티", "varsity", "스타디움 자켓", "stadium jacket", "바시티 블루종",
+            "바시티 자켓", "바시티자켓", "바시티 재킷", "varsity jacket"],
+    "코치자켓": ["코치 자켓", "코치자켓", "코치 재킷", "coach jacket"],
+    "사파리자켓": ["사파리 자켓", "사파리자켓", "사파리 재킷", "safari jacket"],
+    "퀼팅자켓": ["퀼팅 자켓", "퀼팅자켓", "quilted jacket", "quilting jacket"],
+    "블루종": ["블루종", "blouson"],
+    # 코트 — 매장이 이름에 적는 것만. 코트 2,115벌 중 981벌(46%)이 갈린다.
+    # 싱글·더블은 여밈이지만 매장이 그것을 **옷 이름으로** 쓴다(「스텔란 싱글 코트」),
+    # 무신사도 갈라 둔다(사람 2026-09-20). 겹치는 58벌은 더 좁은 이름이 이긴다.
+    "발마칸": ["발마칸", "balmacaan", "발마칸 코트", "발마칸코트", "balmacaan coat"],
+    "더플코트": ["더플 코트", "더플코트", "duffle coat", "duffel coat"],
+    "맥코트": ["맥 코트", "맥코트", "mac coat"],
+    "피코트": ["피 코트", "피코트", "pea coat", "peacoat"],
+    "싱글코트": ["싱글 코트", "싱글코트", "single coat", "single breasted coat",
+              "싱글 브레스티드 코트", "싱글브레스티드 코트"],
+    "더블코트": ["더블 코트", "더블코트", "double coat", "double breasted coat",
+              "더블 브레스티드 코트", "더블브레스티드 코트"],
+    # 하의 — 「이지팬츠」는 안 넣는다. 167벌이 거의 한 매장의 라인 이름이었다
+    # (「Flow Banding Easy Pants」·「River Easy Pants」), 사람이 찾는 갈래가 아니다.
+    "치노": ["치노", "chino", "치노 팬츠", "치노팬츠", "chino pants"],
+    "카펜터팬츠": ["카펜터", "carpenter", "카펜터 팬츠", "카펜터팬츠", "carpenter pants"],
+    "파티그팬츠": ["파티그", "fatigue", "파티그 팬츠", "fatigue pants"],
+    "파라슈트팬츠": ["파라슈트", "parachute", "파라슈트 팬츠", "parachute pants"],
+    "트랙팬츠": ["트랙 팬츠", "트랙팬츠", "track pants", "트랙팬트"],
+    # 상의
+    "케이블니트": ["케이블 니트", "케이블니트", "cable knit", "케이블 스웨터", "cable sweater"],
+    "아가일니트": ["아가일", "argyle", "아가일 니트", "argyle knit"],
+    "링거티": ["링거", "ringer", "링거 티", "링거티", "ringer tee", "ringer t-shirt"],
+    "라글란": ["라글란", "래글런", "raglan"],
+    "웨스턴셔츠": ["웨스턴 셔츠", "웨스턴셔츠", "western shirt"],
 }
 
 # item_type → 대분류. categories_seed.csv 의 depth-1 코드를 따른다
@@ -309,6 +365,16 @@ ITEM_TO_CATEGORY = {
     "언더웨어": "bottoms", "수영복": "tops", "수영복하의": "bottoms",
     "바디수트": "tops",
     "파카": "outer", "MA-1/봄버": "outer", "플리스": "outer",
+    # 2026-09-20 에 가른 품목들 — 갈래는 바뀌지 않는다
+    "레더자켓": "outer", "스웨이드자켓": "outer", "트위드자켓": "outer", "트러커": "outer",
+    "워크자켓": "outer", "필드자켓": "outer", "해링턴": "outer", "바시티": "outer",
+    "코치자켓": "outer", "사파리자켓": "outer", "퀼팅자켓": "outer", "블루종": "outer",
+    "발마칸": "outer", "더플코트": "outer", "맥코트": "outer", "피코트": "outer",
+    "싱글코트": "outer", "더블코트": "outer",
+    "치노": "bottoms", "카펜터팬츠": "bottoms", "파티그팬츠": "bottoms",
+    "파라슈트팬츠": "bottoms", "트랙팬츠": "bottoms",
+    "케이블니트": "tops", "아가일니트": "tops", "링거티": "tops", "라글란": "tops",
+    "웨스턴셔츠": "tops",
     "스니커즈": "shoes", "부츠": "shoes", "샌들": "shoes", "구두": "shoes",
 }
 
@@ -417,9 +483,14 @@ NAME_WOMEN_ONLY = re.compile(
 # 어깨≥54 의 83.1%, 아우터 어깨≥58 의 67.7% 다. 여성 오버핏이 남성 치수를 통째로 덮는다.
 # 하의(허리)는 되는데 상의는 안 된다 — 억지로 넣지 않는다.
 TOP_ITEMS = {"티셔츠", "맨투맨", "셔츠", "니트", "후드", "롱슬리브", "반팔", "탑",
-             "가디건", "집업", "베스트", "피케", "저지"}
+             "가디건", "집업", "베스트", "피케", "저지",
+             # 2026-09-20 에 가른 것 — 여기 안 넣으면 총장 성별 규칙이 그 옷에서 꺼진다
+             "케이블니트", "아가일니트", "링거티", "라글란", "웨스턴셔츠"}
 OUTER_ITEMS = {"재킷", "코트", "점퍼", "블레이저", "패딩", "파카", "바람막이",
-               "MA-1/봄버", "트렌치"}
+               "MA-1/봄버", "트렌치",
+               "레더자켓", "스웨이드자켓", "트위드자켓", "트러커", "워크자켓", "필드자켓",
+               "해링턴", "바시티", "코치자켓", "사파리자켓", "퀼팅자켓", "블루종",
+               "발마칸", "더플코트", "맥코트", "피코트", "싱글코트", "더블코트"}
 TOP_SHORT_CM = 57.0          # 총장 중앙이 이보다 짧으면 여성
 SHOULDER_NARROW_CM = 40.0    # 총장을 모를 때만 본다
 _LEN_KEYS = ("총장", "총길이", "기장", "length", "총기장")
@@ -480,7 +551,9 @@ WAIST_UNRELIABLE = re.compile(
 
 # 품목으로도 같은 것을 거른다 — 어휘표가 든 동의어(「트레이닝 팬츠」·「숏츠」)를 이름
 # 정규식은 못 잡는다. 반대로 띄어 쓴 「SHORT PANTS」는 품목이 못 잡는다. 둘 다 건다.
-WAIST_UNRELIABLE_ITEM = {"숏팬츠", "쇼츠", "버뮤다", "스웨트팬츠", "레깅스", "조거팬츠"}
+WAIST_UNRELIABLE_ITEM = {"숏팬츠", "쇼츠", "버뮤다", "스웨트팬츠", "레깅스", "조거팬츠",
+                         # 허리가 밴딩·스트링이라 실측이 작게 나온다 — 성별을 못 가린다
+                         "트랙팬츠", "파라슈트팬츠"}
 
 
 def waist_span(size_table) -> tuple[float, float] | None:
@@ -971,6 +1044,37 @@ def match_head(text: str, vocab: dict) -> str:
             if m.end() > best_end or (m.end() == best_end and len(m.group(0)) > best_len):
                 best, best_end, best_len = label, m.end(), len(m.group(0))
     return best
+
+
+# 겉옷은 **소재가 품목 이름이 되는** 갈래가 있다(레더/라이더·스웨이드·트위드).
+# 「스웨이드 트러커 재킷」처럼 소재와 모양이 함께 오면 소재가 앞선다 — 사람 판단이다
+# (2026-09-20: 「스웨이드 트러커 자켓에선 스웨이드가 우선이긴해」). 매장 이름도 소재를
+# 앞세운다(「[REAL SUEDE]마우어 더블 스웨이드 자켓」).
+# match_head 는 뒤에서 끝나는 낱말을 고르므로 모양 쪽이 이긴다 — 여기서 되돌린다.
+# 모양 낱말은 사라지지 않는다. 상품 이름에 그대로 남아 검색으로 잡힌다.
+# 소재 갈래 자신도 넣는다 — 「Suede Biker Jacket」은 「biker jacket」에 걸려 이미
+# 레더자켓으로 서 있었고, 그러면 아래 차례가 돌 기회가 없었다(2026-09-20 표본 검사).
+OUTER_SHAPE_ITEMS = {"재킷", "트러커", "워크자켓", "필드자켓", "코치자켓", "사파리자켓",
+                     "퀼팅자켓", "블루종", "바시티", "해링턴",
+                     "레더자켓", "스웨이드자켓", "트위드자켓"}
+# 차례가 중요하다. 스웨이드·트위드는 매장이 **대놓고 적은 소재**고, 「라이더」는 소재가
+# 레더라고 우리가 미루어 짐작하는 것이다. 짐작보다 적힌 쪽이 먼저다 —
+# 「Incision Suede Crop Biker Jacket」이 레더자켓으로 가고 있었다(2026-09-20 표본 검사).
+MATERIAL_OUTER = (
+    (re.compile(r"스웨이드|suede", re.I), "스웨이드자켓"),
+    (re.compile(r"트위드|tweed", re.I), "트위드자켓"),
+    (re.compile(r"레더|가죽|leather|라이더|rider|biker|바이커", re.I), "레더자켓"),
+)
+
+
+def material_outer(head_name: str, item: str) -> str:
+    """겉옷 이름에 소재 갈래가 적혀 있으면 그쪽이 품목이다."""
+    if item not in OUTER_SHAPE_ITEMS:
+        return item
+    for rx, lab in MATERIAL_OUTER:
+        if rx.search(head_name or ""):
+            return lab
+    return item
 
 
 def head_end(text: str, vocab: dict, label: str) -> int:
@@ -3620,6 +3724,7 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
             head_name = strip_trailing_color(_TRAIL_PAREN.sub("", d["name"]))
             acc = match_acc(head_name) if code in ACC_TO_CATEGORY.values() else ""
             item = acc or match_head(head_name, ITEM_TYPE_VOCAB)
+            item = material_outer(head_name, item)
             if fix and fix.get("품목"):
                 item, acc = fix["품목"], fix["품목"]
             if not item and code == "tops" and re.search(r"스웻|스웨트|sweat", head_name, re.I):
@@ -3640,7 +3745,10 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
                 dropped_kidpet += 1
                 continue
             # 데님은 category 라벨을 따로 둔다(기존 데이터 관례: category=Denim)
-            label = "Denim" if item == "데님" else ("Knitwear" if item in ("니트", "가디건") else ("Shirts" if item == "셔츠" else CATEGORY_LABEL.get(code, "")))
+            label = ("Denim" if item == "데님"
+                     else "Knitwear" if item in ("니트", "가디건", "케이블니트", "아가일니트")
+                     else "Shirts" if item in ("셔츠", "웨스턴셔츠")
+                     else CATEGORY_LABEL.get(code, ""))
             # categories_seed.csv 의 depth-2 코드 — 앱이 「가방 > 숄더백」으로 훑을 자리다
             sub_code = ACC_SUB_CODE.get(acc, "") if acc else ""
             rows.append({

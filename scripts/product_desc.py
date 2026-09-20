@@ -77,6 +77,9 @@ _JUNK = re.compile(
     r"기준입니다|측정\s?기준|측정\s?방법|뒷목부터|오차가|오차\s?범위|단면\s?기준|"
     r"구매해\s?주시|구매하시는|참고\s?하?시?어|참고해\s?주|"
     r"size\s?guide|size\s?chart|size\s?info|모델\s?(정보|착용|사이즈)|model\s?(info|size|is)|"
+    # 「Daria is 177cm wearing FREE size」 — 모델 이름이 앞에 와서 model 로는 안 잡힌다
+    r"\b[A-Z][a-z]+\s+is\s+\d{2,3}\s?cm|\bwearing\s+(?:a\s+)?(?:size\s+)?[A-Z0-9]|"
+    r"\b\d{2,3}\s?cm\s*/\s*\d{2,3}\s?kg|착용\s?사이즈|"
     # 매장 안내·법적 고지·행사·푸터
     r"성인\s?인증|미성년자|고객센터|사업자|상호명|통신판매|개인정보|저작권|상표권|"
     r"무단\s?(전재|복제|도용)|제조원|제조국|제조연월|품질보증|"
@@ -205,7 +208,9 @@ def clean(text: str) -> str:
         out = kept
         if not any(mat in p for p in out):
             out.insert(0, mat)
-    return " ".join(out)[:2000]
+    # 조각을 빈칸으로 이어 붙이면 화면에 한 덩이로 주르륵 흐른다(사람 지적 2026-09-20).
+    # 자른 경계가 곧 읽는 사람이 쉬는 자리다 — 줄로 넘겨 앱이 그리게 둔다.
+    return "\n".join(out)[:2000]
 
 
 def from_mined(rec: dict | None) -> str:
@@ -225,7 +230,7 @@ def from_mined(rec: dict | None) -> str:
             continue      # 잡음 줄은 기호·로마자가 많다
         if s not in bits:
             bits.append(s)
-    return " ".join(bits)[:2000]
+    return "\n".join(bits)[:2000]
 
 
 def best(description: str, mined: dict | None = None) -> tuple[str, str]:
