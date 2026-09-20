@@ -45,8 +45,8 @@ jobs:
         run: |
           echo "합계 $(du -sh /tmp/app | cut -f1) · 파일 $(find /tmp/app -name '*.gz' | wc -l)개"
           echo "제일 큰 것 다섯:"
-          find /tmp/app -name '*.gz' -printf '%s %p\n' | sort -rn | head -5 \
-            | awk '{printf "  %6.2f MB  %s\n", $1/1048576, $2}'
+          find /tmp/app -name '*.gz' -printf '%s %p\n' | sort -rn \
+            | awk 'NR<=5 {printf "  %6.2f MB  %s\n", $1/1048576, $2}'
           big=$(find /tmp/app -name '*.gz' -size +50M | wc -l)
           [ "$big" -eq 0 ] || { echo "::error::50MB 넘는 파일이 $big 개 있다"; exit 1; }
 
@@ -54,7 +54,12 @@ jobs:
         if: ${{ inputs.dry != 'true' }}
         working-directory: work
         env:
+          # 이름이 무엇으로 들어갔는지 확실치 않아 몇 가지를 다 넘긴다 — 스크립트가 먼저
+          # 찾은 것을 쓰고 **어느 이름이었는지** 로그에 찍는다(값은 안 찍는다).
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          LAYER: ${{ secrets.LAYER }}
         run: python scripts/upload_supabase.py --dir /tmp/app
 
       # 올린 것을 **공개 주소로 되받아** 확인한다. 이게 없으면 「올렸다」만 믿게 된다 —

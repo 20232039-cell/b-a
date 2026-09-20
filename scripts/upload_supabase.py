@@ -63,10 +63,22 @@ def main() -> int:
 
     base = (os.environ.get("SUPABASE_URL") or "").rstrip("/")
     bucket = os.environ.get("SUPABASE_BUCKET") or "layer"
-    key = os.environ.get("SUPABASE_SERVICE_KEY") or ""
+    # 비밀값 이름이 저장소마다 다를 수 있다 — 먼저 찾은 것을 쓰고 **어느 이름이었는지** 찍는다.
+    # 값은 절대 안 찍는다. 첫 판이 「SUPABASE_SERVICE_KEY: (빈칸)」으로 죽었는데,
+    # 어느 이름이 비었는지 말해 주지 않으면 사람이 또 짐작해야 한다.
+    NAMES = ("SUPABASE_SERVICE_KEY", "SUPABASE_KEY", "LAYER", "layer", "SUPABASE_SERVICE_ROLE_KEY")
+    key = used = ""
+    for n in NAMES:
+        if (os.environ.get(n) or "").strip():
+            key, used = os.environ[n].strip(), n
+            break
     if not base or not key:
-        print("SUPABASE_URL 과 SUPABASE_SERVICE_KEY 가 있어야 한다", file=sys.stderr)
+        print("열쇠를 못 찾았다. 본 이름: " + ", ".join(
+            f"{n}={'있음' if (os.environ.get(n) or '').strip() else '빈칸'}" for n in NAMES),
+            file=sys.stderr)
+        print(f"SUPABASE_URL={'있음' if base else '빈칸'}", file=sys.stderr)
         return 2
+    print(f"열쇠는 `{used}` 에서 읽었다 (길이 {len(key)}자)")
 
     root = Path(args.dir)
     files = sorted(p for p in root.rglob("*.gz") if p.is_file())
