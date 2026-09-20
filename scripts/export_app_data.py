@@ -153,16 +153,20 @@ def img_prefix(urls: list[str]) -> str:
     while i < len(lo) and i < len(hi) and lo[i] == hi[i]:
         i += 1
     head = lo[:i]
-    return head[:head.rfind("/") + 1] if "/" in head else head
+    head = head[:head.rfind("/") + 1] if "/" in head else head
+    # 그 매장 주소가 하나뿐이면 「공통 앞머리」가 주소 **전체**가 된다. 그러면 꼬리가
+    # 비어 앱이 주소를 못 만들거나(앞서 셋이 그랬다), 되살리려고 꼬리에 통째로 적으면
+    # 앞머리 + 주소로 **두 번 붙는다**. 앞머리는 언제나 주소보다 짧아야 한다.
+    while head and any(head == u for u in urls):
+        head = head[:head[:-1].rfind("/") + 1]
+    return head
 
 
-def thin_row(r: dict, tags: dict, bi: dict, ci: dict, pref: dict,
-             upref: dict | None = None) -> dict:
+def thin_row(r: dict, tags: dict, bi: dict, ci: dict, pref: dict) -> dict:
     """목록 한 줄. 열쇠 뜻은 catalog.json 의 "fields" 에 적어 둔다."""
     t = (tags.get(r["source_url"]) or {}).get("tags") or {}
     u = r.get("image_url") or ""
     pre = pref.get(r["brand_slug"], "")
-    upre = (upref or {}).get(r["brand_slug"], "")
     row = {
         "i": f'{r["brand_slug"]}-{r["product_no"]}',
         "b": bi[r["brand_slug"]],
@@ -174,14 +178,6 @@ def thin_row(r: dict, tags: dict, bi: dict, ci: dict, pref: dict,
         "g": GENDER_CODE.get(r.get("gender_target"), "U"),
         "s": 1 if r.get("status") == "ON_SALE" else 0,
     }
-    # 상품 주소 — 「공식몰 보기」가 이것 없이는 안 걸린다(앱 쪽 요청 2026-09-20).
-    # 카페24 표준 주소(?product_no=N)로 퉁치려 했으나 표본 8곳 중 2곳이 404 였다.
-    # 깨진 링크는 없는 링크보다 나쁘므로 **진짜 주소**를 싣되, 사진과 똑같이 매장마다
-    # 공통 앞머리를 떼서 catalog.brands[].up 에 한 번만 적는다.
-    # 실측: 꼬리 평균 35자 · 목록에 평문 +4.28MB · gzip +1.08MB.
-    su = r.get("source_url") or ""
-    if su:
-        row["u"] = su[len(upre):] if upre and su.startswith(upre) else su
     # 빈 값은 아예 안 적는다 — 11만 번 반복되면 그것만으로 수백 KB다
     for k, v in (("co", (t.get("color") or [""])[0]),
                  ("ma", (t.get("material") or [""])[0]),
@@ -192,10 +188,20 @@ def thin_row(r: dict, tags: dict, bi: dict, ci: dict, pref: dict,
     return row
 
 
-def full(r: dict, tags: dict, sizes: dict, crawl: dict) -> dict:
+def full(r: dict, tags: dict, sizes: dict, crawl: dict,
+         upref: dict | None = None) -> dict:
     """상세 한 벌 — 얇은 목록에 없는 것 전부."""
     d = crawl.get(r["source_url"]) or {}
     out = {"id": f'{r["brand_slug"]}-{r["product_no"]}'}
+    # 「공식몰 보기」 주소. **목록이 아니라 여기** 둔다 — 목록 11만 줄에 실으면 첫 화면이
+    # 1.4MB 무거워지는데(앱 실측: 4.70 → 6.07MB · 홈 2,143 → 2,858ms), 주소를 쓰는 것은
+    # 사람이 실제로 여는 몇 벌뿐이고 그때는 어차피 이 조각을 받는다(앱 쪽 제안 2026-09-20).
+    # 매장마다 공통 앞머리를 떼어 catalog.brands[].up 에 한 번만 적는 것은 그대로다.
+    su = r.get("source_url") or ""
+    upre = (upref or {}).get(r["brand_slug"], "")
+    if su:
+        tail = su[len(upre):] if upre and su.startswith(upre) else su
+        out["u"] = tail or su
     out.update({
         "tags": fold_finish((tags.get(r["source_url"]) or {}).get("tags") or {}),
         "size": sizes.get(r["source_url"]),
@@ -335,7 +341,7 @@ def main() -> int:
     shard: dict[str, list] = defaultdict(list)
     for r in rows:
         shard[r.get("category_code") or "other"].append(
-            thin_row(r, tags, bi, ci, pref, upref))
+            thin_row(r, tags, bi, ci, pref))
     files: dict[str, dict] = {}
     idx_gz = 0
     for code, items in sorted(shard.items()):
@@ -373,7 +379,7 @@ def main() -> int:
     big = []
     shards_of: dict[str, int] = {}
     for slug, items in sorted(by.items()):
-        made = [full(r, tags, sizes, crawl) for r in items]
+        made = [full(r, tags, sizes, crawl, upref) for r in items]
         raw = len(json.dumps(made, ensure_ascii=False, separators=(",", ":")).encode())
         bp = max(1, -(-raw // SHARD_BYTES))
         shards_of[slug] = bp
@@ -455,11 +461,12 @@ def main() -> int:
             "c": "cats 번호", "t": "품목(subtype)", "g": "W 여성 · M 남성 · U 남녀공용",
             "s": "1 판매중 · 0 품절", "co": "대표색", "ma": "대표소재", "se": "시즌",
             "cg": "색만 다른 형제 묶음(없으면 안 적힘)",
-            "u": "상품 주소 — brands[b].up 을 앞에 붙인다",
         },
         # 무드는 **브랜드에만** 있다 — 상품마다 붙일 것이 아니다(아래 fold_mood 참고)
         "brand_fields": {"mo": "무드 — moods 안의 말만 쓴다",
                          "p": "사진 주소 앞머리", "up": "상품 주소 앞머리"},
+        # 상세 조각(brands/<slug>.json) 한 벌에만 있는 열쇠
+        "detail_fields": {"u": "상품 주소 — brands[b].up 을 앞에 붙인다"},
         "brands": [{"i": bi[s], "s": s, "n": brand_name.get(s, s), "p": pref.get(s, ""),
                     "c": len(by.get(s, [])), "bp": shards_of.get(s, 1), "dp": parts_of.get(s, 0),
                     "im": next((r.get("image_url") for r in by.get(s, []) if r.get("image_url")), ""),

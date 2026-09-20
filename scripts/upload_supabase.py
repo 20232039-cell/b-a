@@ -93,6 +93,48 @@ def main() -> int:
         return 0
 
     sess = requests.Session()
+
+    # ── 없어진 조각을 쓸어낸다 ─────────────────────────────────────────────
+    # 올리기만 하고 지우지 않아서, 내보내기에서 빠진 파일이 버킷에 그대로 남았다.
+    # 앱이 `descs/99-is.json` 을 다시 받아 「프리오더 마감: 2021/8/23」이 도로 떴다
+    # (앱 쪽 지적 2026-09-20). 도장의 파일 목록에는 없는데 파일은 살아 있었다.
+    #
+    # 지우는 일이라 빗장을 셋 건다:
+    #   ① **우리가 만드는 자리만** 본다 — 다른 것이 같은 버킷에 있어도 안 건드린다
+    #   ② 이번 내보내기가 온전할 때만 — 파일이 100개도 안 되면 뭔가 잘못된 판이다
+    #   ③ 지우기 전에 **무엇을 지우는지 전부 찍는다**
+    MINE = ("catalog.json", "search.json", "index/", "brands/", "descs/")
+    if len(files) >= 100:
+        want = {str(p.relative_to(root)).replace("\\", "/") for p in files}
+        have, stale = [], []
+        for pre in ("index", "brands", "descs", ""):
+            r = sess.post(f"{base}/storage/v1/object/list/{bucket}",
+                          headers={"Authorization": f"Bearer {key}",
+                                   "Content-Type": "application/json"},
+                          json={"prefix": pre, "limit": 5000}, timeout=60)
+            if r.status_code != 200:
+                print(f"버킷 목록 못 읽음({pre or '/'}): {r.status_code} — 쓸어내기 건너뛴다",
+                      file=sys.stderr)
+                have = None
+                break
+            for o in r.json():
+                rel = f"{pre}/{o['name']}" if pre else o["name"]
+                if o.get("id") and rel.endswith(".json"):
+                    have.append(rel)
+        if have is not None:
+            stale = [h for h in have
+                     if h not in want and any(h == m or h.startswith(m) for m in MINE)]
+            if stale:
+                print(f"버킷에만 남은 조각 {len(stale)}개 — 지운다: " + ", ".join(sorted(stale)[:20]))
+                if not args.dry:
+                    d = sess.delete(f"{base}/storage/v1/object/{bucket}",
+                                    headers={"Authorization": f"Bearer {key}",
+                                             "Content-Type": "application/json"},
+                                    json={"prefixes": stale}, timeout=120)
+                    print(f"   지우기 {d.status_code}")
+            else:
+                print("버킷에만 남은 조각 없음")
+
     ok = fail = 0
     errs = []
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
