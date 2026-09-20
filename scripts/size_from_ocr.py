@@ -1885,6 +1885,26 @@ except Exception:
 _STYLE_CODE = re.compile(r"(?:dv\.?lot|lot|style|art|no)\.?\s*#?\s*(\d{2,5})", re.I)
 
 
+# 색 이름의 **앞부분** — 「더스트 핑크」의 더스트, 「애쉬그레이」의 애쉬. 뒤의 색은 이미
+# 지우는데 앞부분을 몰라 이름이 달라지고, 같은 옷의 다른 색이 형제로 안 묶였다.
+#
+# 자동으로는 못 골랐다. 네 가지 잣대를 다 재 보고 버렸다(꼬리말 빈도 · 색 칸이 다른가 ·
+# 치수표가 같은가 · 여러 색 앞에 붙는가). 까닭은 하나다 — 색이 늘 이름 끝에 오니
+# **그 앞 낱말은 무엇이든** 여러 색 앞에 선다. 그래서 후보를 뽑아 점검표로 굽고
+# 사람이 골랐다(2026-09-20, 50개 중 46개가 색 · 7개가 아님).
+#
+# 사람이 「아님」으로 고른 것도 적어 둔다 — 다음에 또 후보로 올라오지 않게:
+#     every(라인 이름) · mini(크기) · restock(재입고) · dot(무늬) · classic · organ · squid
+COLOR_HEAD = {
+    "ash", "애쉬", "dusty", "더스티", "dust", "더스트", "smoke", "스모크", "mid", "미드",
+    "sky", "forest", "off", "오프", "moss", "french", "프렌치", "greyish", "misty", "미스트",
+    "warm", "mix", "wood", "blossom", "baby", "크로우", "sax", "slate", "drab", "드랩",
+    "coral", "oat", "oak", "indi", "ocean", "dove", "midnight", "pure", "fog", "steel",
+    "oyster", "soap", "royal", "로열", "milk", "jade", "powder", "bean",
+}
+
+
+
 # 같은 이름을 네 자리에서 따로 묻는다(2287·2333·2346·2870). 정규식이 다섯 번 도는
 # 함수라 이름 하나당 스무 번씩 헛돈다 — canon_label 과 같은 까닭으로 담아 둔다.
 @lru_cache(maxsize=1 << 18)
@@ -1899,7 +1919,13 @@ def color_base(name: str) -> str:
     if m:
         return f"#{m.group(1)}"          # 제품 코드가 있으면 그것이 알맹이다
     n = _COLOR.sub(" ", n)
-    return re.sub(r"\s+", " ", re.sub(r"[^0-9A-Za-z가-힣]+", " ", n)).strip().lower()
+    out = re.sub(r"\s+", " ", re.sub(r"[^0-9A-Za-z가-힣]+", " ", n)).strip().lower()
+    # 색을 지우고 **끝에 남은** 말이 색 이름의 앞부분이면 그것도 뗀다. 끝에서만 본다 —
+    # 「스모크 그레이 후드」처럼 앞에 붙은 것은 이름의 일부라 안 건드린다.
+    parts = out.split()
+    while len(parts) > 1 and parts[-1] in COLOR_HEAD:
+        parts.pop()
+    return " ".join(parts)
 
 
 def load_manual() -> dict[str, dict]:
