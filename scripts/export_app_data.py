@@ -200,8 +200,14 @@ def full(r: dict, tags: dict, sizes: dict, crawl: dict,
     su = r.get("source_url") or ""
     upre = (upref or {}).get(r["brand_slug"], "")
     if su:
-        tail = su[len(upre):] if upre and su.startswith(upre) else su
-        out["u"] = tail or su
+        # 앞머리는 언제나 주소보다 짧다(img_prefix 가 그렇게 만든다) — 꼬리가 빌 일은 없다.
+        out["u"] = su[len(upre):] if upre and su.startswith(upre) else su
+    # 혼용률. 소재 칸(`tags.material`)은 표준화된 이름(「코튼」)뿐이라 70/30 이 없다.
+    # 설명글이 유일한 자리였다 — 칸으로 옮긴다(앱 쪽 지적 2026-09-20). 전수 9.7% · 12,327벌.
+    # **부위 구조를 뭉개지 않는다.** 스펙표에 어떻게 세울지는 앱이 정한다.
+    mat = product_desc.blend(d.get("description") or "")
+    if mat:
+        out["mat"] = mat
     out.update({
         "tags": fold_finish((tags.get(r["source_url"]) or {}).get("tags") or {}),
         "size": sizes.get(r["source_url"]),
@@ -466,7 +472,8 @@ def main() -> int:
         "brand_fields": {"mo": "무드 — moods 안의 말만 쓴다",
                          "p": "사진 주소 앞머리", "up": "상품 주소 앞머리"},
         # 상세 조각(brands/<slug>.json) 한 벌에만 있는 열쇠
-        "detail_fields": {"u": "상품 주소 — brands[b].up 을 앞에 붙인다"},
+        "detail_fields": {"u": "상품 주소 — brands[b].up 을 앞에 붙인다",
+                          "mat": "혼용률 — [{p: 부위(빈칸이면 구분 없음), v: [[소재, %], …]}, …]"},
         "brands": [{"i": bi[s], "s": s, "n": brand_name.get(s, s), "p": pref.get(s, ""),
                     "c": len(by.get(s, [])), "bp": shards_of.get(s, 1), "dp": parts_of.get(s, 0),
                     "im": next((r.get("image_url") for r in by.get(s, []) if r.get("image_url")), ""),

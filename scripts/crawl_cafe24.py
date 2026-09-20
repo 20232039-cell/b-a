@@ -1250,7 +1250,12 @@ PET_CATEGORY = re.compile(r"^\s*(pet|펫|반려|강아지|고양이|dog|cat)\s*$
 #   「BOY HOOD T-SHIRT」는 그래픽 이름이다. 넓게 걸면 153벌이 잘못 잘린다.
 # 그래서 (1) 매장이 스스로 KIDS 칸에 넣은 것, (2) 이름 맨 앞의 KIDS/키즈,
 # (3) 한국어 낱말(키즈·아동·유아·주니어)만 본다.
-KIDS_CATEGORY = re.compile(r"^\s*(kids?|키즈|아동|주니어|junior|유아|baby|베이비)\s*$", re.I)
+# 칸 이름이 아동 낱말 **하나**일 때만 받다가 「KID SHOES」를 놓쳤다(salondeju 9벌,
+# 사람이 짚었다 2026-09-20). 아동 낱말로 **시작하고 짧은** 칸까지 받는다 — 「KIDS BEST」·
+# 「키즈 아우터」 꼴이다. 길면 기획전 제목일 수 있어 안 받는다.
+KIDS_CATEGORY = re.compile(
+    r"^\s*(kids?|키즈|아동|주니어|junior|유아|baby|베이비)\s*$"
+    r"|^\s*(kids?|키즈|아동|주니어)\s+\S{1,12}\s*$", re.I)
 KIDS_NAME = re.compile(r"^\s*[\[\(]?\s*(kids?|키즈|아동|주니어)\b|키즈|아동복|유아복|주니어", re.I)
 # 「KID MOHAIR」는 새끼염소 털(실 이름)이지 아동복이 아니다 — 성인 니트 넉 벌이 잘렸다
 KIDS_FALSE = re.compile(r"kid[\s-]*mohair|키드[\s-]*모헤어|kid[\s-]*silk", re.I)
@@ -3893,6 +3898,7 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
     url_of = {(r["brand_slug"], str(r["product_no"])): _url_stem(r.get("source_url") or "") for r in rows}
     opt_of = {(r["brand_slug"], str(r["product_no"])): tuple(o.strip() for o in (r.get("options") or "").split("|") if o.strip())
               for r in rows}
+    dropped_kidline = drop_kids_line(rows)
     dropped_rerun = fold_reruns(rows, gal_of, tbl_of, url_of, opt_of)
     fill_season_gaps(rows)
     # 번호 보간으로도 안 채워진 것은 사진 날짜로 한 번 더 — 브랜드마다 먼저 맞혀 보고서만.
@@ -3975,6 +3981,52 @@ def _url_stem(u: str) -> str:
     if "detail.html" in stem or len(stem) < 14:
         return ""
     return stem
+
+
+# ── 아동 라인을 뺀다 ────────────────────────────────────────────────────────
+#
+# 사람 결정(2026-09-20): 「키즈는 아동용 옷이니까 시드에서 아예 빼도 될듯.」
+# 그런데 이름으로만 가리면 **어른 옷이 잘린다.** 처음 잣대로 104벌을 잡았는데 그중
+# 60벌이 멀쩡한 어른 옷이었다:
+#
+#     Nea Kid Mohair Cardigan          「키드 모헤어」는 새끼 염소 털 — **소재**다
+#     UNAFFECTED SKID MARK T-SHIRT     s-KID
+#     베이비퍼플 · 베이비 블루            색 이름
+#     lekim 「COOL KIDS CAP」           어른 모자다(옵션 FREE · HEADWEAR 칸, 매장에서 확인)
+#
+# `classify_category` 는 이름 **맨 앞**의 아동 낱말과 매장 칸만 본다. 그래서 가운데 낀
+# 영문 「KIDS」를 놓친다(「BEADED CAP KIDS BLACK」). 그것까지 이름만으로 받으면 lekim 이
+# 같이 걸린다 — 생김새가 똑같다.
+#
+# 가르는 것은 **매장이 어른 짝을 같이 파는가**이다. 진짜 아동 라인은 같은 이름의 어른
+# 판이 옆에 있다(「BEADED CAP KIDS BLACK」 ↔ 「BEADED CAP BLUE」). 문구로 쓴 곳은 없다.
+# 실측(2026-09-20): 이 잣대로 30벌이 갈리고 lekim 둘은 안 갈린다.
+_KID_MID = re.compile(r"(?<![A-Za-z])kids(?![A-Za-z])", re.I)
+
+
+def _kid_key(name: str) -> str:
+    n = re.sub(r"\[[^\]]*\]", " ", name or "")
+    return re.sub(r"\s+", " ", re.sub(r"[^0-9A-Za-z가-힣]+", " ", n)).strip().lower()
+
+
+def drop_kids_line(rows: list[dict]) -> int:
+    """이름 가운데 「KIDS」가 있고 **같은 매장에 어른 짝이 있는** 것을 뺀다."""
+    have = collections.defaultdict(set)
+    for r in rows:
+        have[r["brand_slug"]].add(_kid_key(r["name"]))
+    drop = []
+    for i, r in enumerate(rows):
+        if KIDS_FALSE.search(r["name"] or "") or not _KID_MID.search(r["name"] or ""):
+            continue
+        k = _kid_key(r["name"])
+        bare = " ".join(t for t in k.split() if t != "kids")
+        if bare and bare != k and bare in have[r["brand_slug"]]:
+            drop.append(i)
+    for i in reversed(drop):
+        rows.pop(i)
+    if drop:
+        print(f"아동 라인 제외 {len(drop)}벌 — 같은 매장에 어른 짝이 있는 것만")
+    return len(drop)
 
 
 def fold_reruns(rows: list[dict], gal: dict, tbl: dict | None = None, url: dict | None = None,

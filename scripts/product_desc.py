@@ -43,9 +43,13 @@
 그래서 불릿(`-`·`·`·`*`)과 쉼표까지 자르고, **길다고 버리지 않는다**(잘라서 본다).
 """
 from __future__ import annotations
+import json
 import re
+from pathlib import Path
 
 from detail_from_ocr import _HARD, _SOFT, _FIBER_PCT, _HANGUL, materials
+
+DATA = Path(__file__).resolve().parent.parent / "data"
 
 # ─── 조각내기 ───
 # HTML 에서 긁은 글은 줄바꿈이 없다 — 한 줄에 수천 자가 붙어 온다.
@@ -158,6 +162,103 @@ def _parts(text: str):
             q = re.sub(r"\s+", " ", q).strip(" :=|·-ㆍ*")
             if q:
                 yield q[:400]
+
+
+# ── 혼용률을 칸으로 ──────────────────────────────────────────────────────────
+#
+# 앱이 짚었다(2026-09-20): 설명 미리보기 두 줄을 「COTTON 70% POLY 30%」가 먹는다.
+# 그런데 그냥 깎으면 그 숫자가 사라진다 — 상세 조각의 소재 칸은 표준화된 이름(「코튼」)
+# 뿐이라 70/30 이 어디에도 없다. **지울 게 아니라 옮길 것이다.**
+#
+# 오는 길에 같은 실수를 세 번 했다. 전부 **글을 안 나누고 먹인 것**이다:
+#     ① 씻은 글의 첫 줄 → 82.1%  (거기 혼용률이 맨 앞인 건 우리가 끼워 넣어서다)
+#     ② 원문의 첫 줄    → 0.7%   (원문에서는 첫 줄이 아니다)
+#     ③ 원문을 줄바꿈으로 나눔 → 0.2%  (**원문에 줄바꿈이 없다.** 통짜 1,000자다)
+# 옆에 있던 `_parts()` 를 쓰면 조각 중앙이 21자다. 그걸로 재니 10.7%.
+#
+# 마지막 빗장은 **소재 흰 목록**이다. 없으면 「더 보기 소재 COW LEATHER」가 소재 이름이
+# 되고 산문에서 「A Nylon 100%」를 줍는다. `vocab_aliases.json` 의 소재 어휘를 그대로
+# 쓴다 — 아는 소재가 아니면 그 부위를 통째로 안 받는다.
+#
+# 전수 9.7%(12,327벌) · 뽑힌 것 40개를 읽었고 애매한 것은 하나였다.
+# **설명글은 안 건드린다** — 「*main pocket 2 / inner pocket 1 *겉감 Nylon 100%」처럼
+# 한 조각에 옷 이야기가 같이 붙어 와서, 조각째 떼면 진짜 설명을 잃는다.
+# 화면에서 깎는 것은 앱이 한다(거기는 스펙표가 바로 위에 있다는 것을 안다).
+_BLEND_LEAD = re.compile(
+    r"^\s*(?:더\s?보기|원단|소재|material|fabric|composition|혼용률)\s*[:：]?\s*", re.I)
+_BLEND_PART = re.compile(
+    r"(겉감|안감|배색|시보리|충전재|shell|lining|body|trim|filling)\s*[-:：]?", re.I)
+_BLEND_ONE = re.compile(r"([A-Za-z가-힣][A-Za-z가-힣\s()-]{0,18}?)\s*(\d{1,3})\s?%")
+_FIBER_CANON: dict[str, str] = {}
+
+
+def _fiber(name: str) -> str | None:
+    """적힌 소재 이름 → 우리 표준 이름. 아는 말이 아니면 None."""
+    if not _FIBER_CANON:
+        try:
+            vocab = json.loads((DATA / "vocab_aliases.json").read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        for k, vs in (vocab.get("material") or {}).items():
+            _FIBER_CANON[k.lower()] = k
+            for v in (vs if isinstance(vs, list) else [vs]):
+                _FIBER_CANON[str(v).lower()] = k
+    s = re.sub(r"[^0-9A-Za-z가-힣 ]", " ", name).strip().lower()
+    if s in _FIBER_CANON:
+        return _FIBER_CANON[s]
+    t = s.split()
+    for w in (3, 2, 1):                    # 긴 이름부터 — 「cow leather」가 「leather」를 이긴다
+        for i in range(len(t) - w + 1):
+            g = " ".join(t[i:i + w])
+            if g in _FIBER_CANON:
+                return _FIBER_CANON[g]
+    return None
+
+
+def _blend_split(s: str) -> list[tuple[str, str]]:
+    """부위로 가른다. 부위마다 따로 검산해야 한다 — 「Cotton 100% / Poly 100%」를
+    합쳐 세면 200이라 버려지는데 실제로는 두 부위가 각각 100%다(앱 쪽이 짚어 줬다)."""
+    if _BLEND_PART.search(s):
+        out, last, name = [], 0, ""
+        for m in _BLEND_PART.finditer(s):
+            if last or name:
+                out.append((name, s[last:m.start()]))
+            name, last = m.group(1), m.end()
+        out.append((name, s[last:]))
+        return [(n, t) for n, t in out if "%" in t]
+    if s.count("%") > 1 and "/" in s:
+        return [("", x) for x in s.split("/") if "%" in x]
+    return [("", s)]
+
+
+def blend(text: str) -> list[dict]:
+    """혼용률을 부위 구조 그대로 — `[{"p": 부위, "v": [[소재, 퍼센트], …]}, …]`."""
+    for seg0 in _parts(text):
+        seg0 = seg0.strip()
+        if "%" not in seg0 or len(seg0) > 160:
+            continue
+        out = []
+        for name, seg in _blend_split(_BLEND_LEAD.sub("", seg0)):
+            got = _BLEND_ONE.findall(seg)
+            tot = sum(int(x) for _, x in got)
+            left = len(_BLEND_ONE.sub("", seg).strip(" /,·:：|"))
+            if not got or not (90 <= tot <= 110) or left > 6:
+                out = []
+                break
+            vs = []
+            for m, x in got:
+                f = _fiber(m)
+                if not f:
+                    vs = []
+                    break              # 아는 소재가 아니면 이 부위는 안 받는다
+                vs.append([f, int(x)])
+            if not vs:
+                out = []
+                break
+            out.append({"p": name.lower(), "v": vs})
+        if out:
+            return out
+    return []
 
 
 def material_of(text: str) -> str:
