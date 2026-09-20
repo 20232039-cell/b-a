@@ -772,6 +772,88 @@ def is_soldout(d: dict) -> bool:
     return False
 
 
+# ── 갤러리에서 「길쭉한 상세페이지 조각」을 뺀다 ────────────────────────────────
+# 사람 지시(2026-09-20): 「그냥 상품 사진만 여러장 있는건 괜찮은데, 길쭉한 상세 페이지를
+# 크롭해서 개별로 넣은건 다 빼야돼.」 앱 시드 갤러리에서 Diafvine 의 1296×6710 이 나왔다 —
+# 넘겨도 같은 페이지의 다른 부분이 나오니 사진이 아니라 문서를 넘기는 셈이다.
+#
+# **주소로는 못 가린다.** 갤러리는 /web/product/extra|medium|small 에서만 오는데 매장이
+# 거기에 상세 조각을 올린다. 크기를 재는 수밖에 없다 — JPEG·PNG 는 크기가 머리말에 있어
+# 앞 8KB 면 된다.
+#
+# 문턱 2.5배는 실측으로 골랐다: 정상 갤러리의 제일 긴 비율이 2000×3000(1.5배)이고
+# 사고 난 것이 5.2배다. 둘 사이가 넓어 여유가 있다.
+#
+# 값이 싸야 하므로 **매장 단위로 맛보고 걸리는 매장만 전부 잰다.** 그림마다 재면 요청이
+# 여섯 배가 되어 3,000벌짜리 매장이 50분에서 다섯 시간이 된다. 209곳을 훑어 보니
+# 1,793장 중 0장이라, 대부분의 매장에서는 맛보기 몇십 번으로 끝난다.
+#
+# **대표컷(image_url)은 안 건드린다.** 사진이 한 장뿐인데 그게 세로로 길면 빗장이 그걸
+# 먹어 사진 0장인 상품이 생긴다 — 격자에 빈 칸이 뜨는 게 조각 한 장 섞이는 것보다 나쁘다.
+TALL_RATIO = 2.5
+_TALL_TASTE = 8         # 매장마다 맛볼 상품 수
+# 맛보기는 **꼬리부터** 본다. 상세 조각은 상품컷 **다음에** 붙으므로 앞쪽만 보면 못 만난다 —
+# 처음엔 앞 4장만 봤다가 Diafvine 의 1296×6710(12장 중 12번째)을 놓쳤다(2026-09-20).
+_TALL_TASTE_IMG = 5
+
+
+def _img_size(http, url: str):
+    """그림 크기 — 머리말만 받는다. 못 재면 None."""
+    try:
+        r = http.get(url, retries=0, headers={"Range": "bytes=0-8191"})
+        if r is None or r.status_code not in (200, 206):
+            return None
+        from PIL import Image
+        import io as _io
+        return Image.open(_io.BytesIO(r.content)).size
+    except Exception:
+        return None
+
+
+def drop_tall_gallery(http, slug: str, rows: list[dict], log=print) -> int:
+    """갤러리에서 세로로 긴 그림을 뺀다. 뺀 장수를 돌려준다(0 이면 아무것도 안 했다)."""
+    have = [d for d in rows if (d.get("gallery") or [])]
+    if not have:
+        return 0
+    seen: dict[str, tuple] = {}
+    hit = False
+    for d in have[:_TALL_TASTE]:
+        g = d.get("gallery") or []
+        for u in (g[-_TALL_TASTE_IMG:] + g[:1]):
+            if u in seen:
+                continue
+            seen[u] = _img_size(http, u)
+            sz = seen[u]
+            if sz and sz[1] >= sz[0] * TALL_RATIO:
+                hit = True
+    if not hit:
+        return 0
+    # 걸렸다 — 이 매장은 전부 잰다
+    dropped = 0
+    for d in have:
+        keep = []
+        for u in (d.get("gallery") or []):
+            if u not in seen:
+                seen[u] = _img_size(http, u)
+            sz = seen[u]
+            if sz and sz[1] >= sz[0] * TALL_RATIO:
+                dropped += 1
+                continue
+            keep.append(u)
+        if len(keep) != len(d.get("gallery") or []):
+            d["gallery"] = keep
+            d["_gal_cut"] = True
+    if dropped:
+        # 조용히 버리면 걸러지고 있다는 사실 자체를 잊는다 — 매장 이름과 장수를 남긴다.
+        # 이 수가 올라가면 그 매장 수집 방식을 다시 볼 신호다(사람 지시 2026-09-20).
+        hurt = sum(1 for d in have if d.get("_gal_cut"))
+        for d in have:
+            d.pop("_gal_cut", None)
+        log(f"[{slug}] 갤러리에서 길쭉한 상세 조각 {dropped}장을 뺐다 (상품 {hurt}벌) "
+            f"— 이 매장이 상세 조각을 갤러리에 올린다. 수집 방식을 다시 볼 것")
+    return dropped
+
+
 def is_category_page(html_text: str) -> bool:
     """상품 페이지인 줄 알고 열었는데 칸(카테고리) 페이지인 것을 가려낸다.
 
@@ -1730,7 +1812,8 @@ class PoliteSession:
         with self._glock:
             return self._locks.setdefault(host, threading.Lock())
 
-    def get(self, url: str, retries: int = 2) -> requests.Response | None:
+    def get(self, url: str, retries: int = 2, headers: dict | None = None) -> requests.Response | None:
+        """headers 는 이번 한 번에만 얹는다 — 그림 머리말만 받을 때 Range 를 쓴다."""
         host = urlparse(url).netloc
         lock = self._lock_for(host)
         for attempt in range(retries + 1):
@@ -1741,7 +1824,7 @@ class PoliteSession:
                 self._last[host] = time.monotonic()
                 self.requests_made += 1
                 try:
-                    r = self.s.get(url, timeout=TIMEOUT, allow_redirects=True)
+                    r = self.s.get(url, timeout=TIMEOUT, allow_redirects=True, headers=headers)
                 except requests.RequestException as e:
                     r = None
                     err = e
@@ -3342,6 +3425,13 @@ def crawl_brand(http: PoliteSession, shop: Shop, refresh: bool, log, refetch_ids
         if renamed:
             f.flush()
             log(f"[{shop.slug}] 칸 이름만 고쳐 다시 적은 상품 {renamed}")
+
+    # 갤러리 빗장 — 저장이 끝난 뒤 한 번. 걸리는 매장이 아니면 맛보기 몇십 번으로 끝난다.
+    tall = drop_tall_gallery(http, shop.slug, list(done.values()), log)
+    if tall:
+        with out_path.open("a", encoding="utf-8") as f2:
+            for d in done.values():
+                f2.write(jsonl_line(d) + "\n")
 
     if shop.failures:
         (CRAWL_DIR / f"_failures_{shop.slug}.jsonl").write_text(
