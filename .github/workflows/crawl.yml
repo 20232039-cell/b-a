@@ -96,12 +96,19 @@ jobs:
             # **우리가 본 원본에 대해서는 맞다.** 그러니 남의 커밋 위에 우리 생성물을
             # 그대로 얹는다. 그 사이 늘어난 원본은 다음 판이 반영한다 — 지금 구조에서는
             # 아무것도 못 얻는 것보다 낫다.
+            #
+            # 얹을 것에 data/crawl/detail 도 넣는다. 앞서는 셋만 챙기고 reset 했는데,
+            # detail_from_ocr.py 가 방금 만든 121→189곳치 설명글이 그 reset 에 통째로
+            # 날아가고 「add 했는데 바뀐 게 없는」 꼴이 됐다. 같이 만든 것은 같이 챙긴다.
             echo "밀기 막힘 $i — 남의 커밋을 받고 **우리 생성물을 그 위에 얹는다**(다시 안 만든다)"
-            mkdir -p /tmp/gen && cp $GEN /tmp/gen/
+            rm -rf /tmp/gen && mkdir -p /tmp/gen
+            cp $GEN /tmp/gen/
+            cp -r data/crawl/detail /tmp/gen/detail
             git fetch origin "$DATA_BRANCH"
             git reset --hard "origin/$DATA_BRANCH"
             cp /tmp/gen/products_full.csv /tmp/gen/product_sizes.json \
                /tmp/gen/product_tags_full.json data/
+            mkdir -p data/crawl/detail && cp -r /tmp/gen/detail/. data/crawl/detail/
             sleep 5
           done
           exit 1
