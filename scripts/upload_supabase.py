@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""내보낸 조각을 슈퍼베이스 Storage 공개 버킷에 올린다.
+
+사람 결정(2026-09-20): 앱 데이터는 **따로 올린다.** 데이터 저장소의 app/ 폴더도,
+layer-web 저장소 직접도 아니다 — 그러면 데이터 갱신이 앱 배포에 묶인다. 코드를 한 줄도
+안 고쳤는데 매일 새 배포가 나가고, 배포를 미루면 데이터가 낡는다.
+
+지켜야 할 둘(사람이 댄 것):
+  ① `.json.gz` 로 올리고 메타데이터에 `Content-Encoding: gzip` 을 붙인다.
+     슈퍼베이스는 **올린 그대로** 내보내므로 이게 없으면 브라우저가 못 풀고 앱이 깨진다.
+  ② 한 파일이 50MB 를 넘으면 안 된다(버킷 상한). 지금은 제일 큰 조각이 gzip 2MB
+     안쪽이라 걸릴 게 없지만, 설명이나 상세를 한 파일로 합치면 걸린다 — 그래서 여기서 막는다.
+
+    py scripts/upload_supabase.py --dir /tmp/app --prefix ""
+"""
+from __future__ import annotations
+import argparse, os, sys, time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+import requests
+
+MAX_BYTES = 50 * 1024 * 1024
+
+
+def one(sess, base: str, bucket: str, key: str, path: Path, root: Path) -> tuple[str, int, str]:
+    rel = str(path.relative_to(root)).replace(os.sep, "/")
+    size = path.stat().st_size
+    if size > MAX_BYTES:
+        return rel, size, f"너무 크다 ({size/1048576:.0f}MB > 50MB) — 쪼개야 한다"
+    url = f"{base}/storage/v1/object/{bucket}/{rel}"
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        # 이 둘이 핵심이다 — 없으면 브라우저가 압축을 못 푼다
+        "Content-Encoding": "gzip",
+        "Cache-Control": "public, max-age=300",
+        "x-upsert": "true",
+    }
+    body = path.read_bytes()
+    for attempt in range(3):
+        try:
+            r = sess.post(url, headers=headers, data=body, timeout=120)
+            if r.status_code in (200, 201):
+                return rel, size, ""
+            if r.status_code == 409:      # 이미 있다 — 덮어쓴다
+                r = sess.put(url, headers=headers, data=body, timeout=120)
+                if r.status_code in (200, 201):
+                    return rel, size, ""
+            err = f"HTTP {r.status_code} {r.text[:120]}"
+        except requests.RequestException as e:
+            err = type(e).__name__
+        time.sleep(2 ** attempt)
+    return rel, size, err
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--dir", required=True, help="내보낸 폴더")
+    ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--dry", action="store_true")
+    args = ap.parse_args()
+
+    base = (os.environ.get("SUPABASE_URL") or "").rstrip("/")
+    bucket = os.environ.get("SUPABASE_BUCKET") or "layer"
+    key = os.environ.get("SUPABASE_SERVICE_KEY") or ""
+    if not base or not key:
+        print("SUPABASE_URL 과 SUPABASE_SERVICE_KEY 가 있어야 한다", file=sys.stderr)
+        return 2
+
+    root = Path(args.dir)
+    files = sorted(p for p in root.rglob("*.gz") if p.is_file())
+    total = sum(p.stat().st_size for p in files)
+    big = [p for p in files if p.stat().st_size > MAX_BYTES]
+    print(f"올릴 것 {len(files):,}개 · 합계 {total/1048576:.1f} MB · 버킷 {bucket}")
+    if big:
+        print("50MB 넘는 파일:", ", ".join(p.name for p in big), file=sys.stderr)
+    if args.dry:
+        print("(--dry 라 안 올렸다)")
+        return 0
+
+    sess = requests.Session()
+    ok = fail = 0
+    errs = []
+    with ThreadPoolExecutor(max_workers=args.workers) as ex:
+        for rel, size, err in ex.map(lambda p: one(sess, base, bucket, key, p, root), files):
+            if err:
+                fail += 1
+                if len(errs) < 10:
+                    errs.append(f"{rel}: {err}")
+            else:
+                ok += 1
+            if (ok + fail) % 200 == 0:
+                print(f"  {ok + fail}/{len(files)}", flush=True)
+    print(f"올렸다 {ok:,} · 실패 {fail:,}")
+    for e in errs:
+        print("   ", e, file=sys.stderr)
+    if fail:
+        return 1
+    print(f"\n공개 주소: {base}/storage/v1/object/public/{bucket}/catalog.json.gz")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

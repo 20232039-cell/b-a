@@ -1,0 +1,88 @@
+# 앱이 읽을 조각을 만들어 **슈퍼베이스 Storage 공개 버킷**에 올린다.
+#
+# 왜 저장소가 아니라 따로 올리나(사람 결정 2026-09-20): 데이터 저장소의 app/ 폴더에 두고
+# 앱이 빌드 때 가져가면 **데이터 갱신이 앱 배포에 묶인다.** 코드를 한 줄도 안 고쳤는데
+# 매일 새 배포가 나가고, 배포를 미루면 데이터가 낡는다. layer-web 저장소에 직접 넣는 것은
+# 더 나쁘다 — git 히스토리에 200MB 가 영구히 남아 나중에 클론이 계속 무거워진다.
+#
+# 필요한 것: Settings → Secrets 에 DATA_TOKEN · SUPABASE_SERVICE_KEY
+name: publish-app-data
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry:
+        description: "true 면 만들기만 하고 안 올린다"
+        required: false
+        default: "false"
+  workflow_call:
+    secrets:
+      DATA_TOKEN: {required: true}
+      SUPABASE_SERVICE_KEY: {required: true}
+
+env:
+  SUPABASE_URL: https://bwppqohyxparuiigiziu.supabase.co
+  SUPABASE_BUCKET: layer
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: 데이터 저장소(비공개) 받기
+        uses: ./.github/actions/data-repo
+        with: {token: "${{ secrets.DATA_TOKEN }}"}
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: pip install -q requests
+
+      - name: 앱 조각 만들기
+        working-directory: work
+        run: python scripts/export_app_data.py --out /tmp/app | tail -20
+
+      - name: 크기 확인 — 한 파일이 50MB 를 넘으면 버킷이 안 받는다
+        run: |
+          echo "합계 $(du -sh /tmp/app | cut -f1) · 파일 $(find /tmp/app -name '*.gz' | wc -l)개"
+          echo "제일 큰 것 다섯:"
+          find /tmp/app -name '*.gz' -printf '%s %p\n' | sort -rn | head -5 \
+            | awk '{printf "  %6.2f MB  %s\n", $1/1048576, $2}'
+          big=$(find /tmp/app -name '*.gz' -size +50M | wc -l)
+          [ "$big" -eq 0 ] || { echo "::error::50MB 넘는 파일이 $big 개 있다"; exit 1; }
+
+      - name: 슈퍼베이스에 올리기
+        if: ${{ inputs.dry != 'true' }}
+        working-directory: work
+        env:
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python scripts/upload_supabase.py --dir /tmp/app
+
+      # 올린 것을 **공개 주소로 되받아** 확인한다. 이게 없으면 「올렸다」만 믿게 된다 —
+      # Content-Encoding 이 안 붙으면 브라우저에서만 깨지고 여기서는 초록으로 끝난다.
+      - name: 되받아 확인 — gzip 과 CORS
+        if: ${{ inputs.dry != 'true' }}
+        run: |
+          set -e
+          PUB="$SUPABASE_URL/storage/v1/object/public/$SUPABASE_BUCKET"
+          echo "■ 머리말"
+          curl -sSI "$PUB/catalog.json.gz" | tr -d '\r' | grep -iE 'HTTP/|content-encoding|content-type|access-control' || true
+          enc=$(curl -sSI "$PUB/catalog.json.gz" | tr -d '\r' | grep -i '^content-encoding:' | tr -d ' ' | cut -d: -f2)
+          [ "$enc" = "gzip" ] || { echo "::error::Content-Encoding 이 gzip 이 아니다: '$enc'"; exit 1; }
+          echo "■ 브라우저처럼 받아서 읽히나"
+          curl -sS --compressed "$PUB/catalog.json.gz" -o /tmp/catalog.json
+          python -c "
+          import json,sys
+          d=json.load(open('/tmp/catalog.json',encoding='utf-8'))
+          print('  v =',d['v'],'· 상품',f\"{d['count']:,}\",'· 매장',len(d['brands']),'· 갈래',len(d['cats']),'· 파일',len(d['files']))
+          assert d['count']>1000 and d['brands'] and d['cats'], '도장이 비었다'
+          "
+          echo "■ 갈래 조각 하나"
+          curl -sS --compressed "$PUB/index/outer.json.gz" -o /tmp/outer.json
+          python -c "
+          import json
+          x=json.load(open('/tmp/outer.json',encoding='utf-8'))
+          print('  아우터',f'{len(x):,}벌 · 첫 줄',json.dumps(x[0],ensure_ascii=False)[:120])
+          "
+          echo "■ 다른 곳에서 부를 수 있나 (CORS)"
+          curl -sSI -H 'Origin: https://layer.example' "$PUB/catalog.json.gz" \
+            | tr -d '\r' | grep -i 'access-control-allow-origin' || echo "  (머리말 없음 — 앱 쪽에서 확인 필요)"

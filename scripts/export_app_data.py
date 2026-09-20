@@ -183,11 +183,21 @@ def full(r: dict, tags: dict, sizes: dict, crawl: dict) -> dict:
     return out
 
 
+# 올리는 곳이 슈퍼베이스 Storage 공개 버킷이다(사람 결정 2026-09-20). 거기는 **올린 그대로**
+# 내보내므로 우리가 미리 압축해 두고 메타데이터에 Content-Encoding: gzip 을 붙여야 한다.
+# 안 붙이면 브라우저가 못 풀고 앱이 깨진다. 그래서 파일 이름은 `.json.gz` 다.
+# (gzip 을 쓰면 목록 한 갈래가 1.88MB → 그대로, 원본 7.6MB 대신 그것만 오간다.)
+GZ = True
+
+
 def write(path: Path, obj, dry: bool) -> int:
-    b = json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
+    """쓴 바이트 수를 돌려준다 — **압축한 뒤**의 크기다(그게 실제로 오가는 값이다)."""
+    raw = json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
+    b = gzip.compress(raw, 6) if GZ else raw
     if not dry:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(b)
+        out = path.with_suffix(path.suffix + ".gz") if GZ else path
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b)
     return len(b)
 
 
@@ -266,16 +276,13 @@ def main() -> int:
     for r in rows:
         shard[r.get("category_code") or "other"].append(thin_row(r, tags, bi, ci, pref))
     files: dict[str, dict] = {}
-    idx_bytes = idx_gz = 0
+    idx_gz = 0
     for code, items in sorted(shard.items()):
-        raw = json.dumps(items, ensure_ascii=False, separators=(",", ":")).encode()
-        n = write(out / "index" / f"{code}.json", items, args.dry)
-        gz = len(gzip.compress(raw, 6))
-        files[f"index/{code}.json"] = {"n": len(items), "bytes": n, "gzip": gz}
-        idx_bytes += n
-        idx_gz += gz
-    print(f"목록 {len(rows):,}벌 · 갈래 {len(shard)}개 · {idx_bytes/1048576:.1f} MB "
-          f"(gzip {idx_gz/1048576:.2f} MB · 한 벌 {idx_gz/len(rows):.0f}B) — "
+        n = write(out / "index" / f"{code}.json", items, args.dry)   # 압축한 크기다
+        files[f"index/{code}.json.gz"] = {"n": len(items), "gzip": n}
+        idx_gz += n
+    print(f"목록 {len(rows):,}벌 · 갈래 {len(shard)}개 · "
+          f"gzip {idx_gz/1048576:.2f} MB (한 벌 {idx_gz/len(rows):.0f}B) — "
           + " · ".join(f"{k} {len(v):,}" for k, v in sorted(shard.items(), key=lambda x: -len(x[1]))[:4]))
 
     by = defaultdict(list)
@@ -356,10 +363,10 @@ def main() -> int:
     # 그래서 **매장마다** 앞머리(p)를 적는다. 그러면 115,934장이 100% 접힌다.
     #   사진 주소 = brands[b].p + 줄의 m
     for slug, bp in shards_of.items():
-        files[f"brands/{slug}.json" if bp == 1 else f"brands/{slug}.<0..{bp-1}>.json"] = {
+        files[f"brands/{slug}.json.gz" if bp == 1 else f"brands/{slug}.<0..{bp-1}>.json.gz"] = {
             "n": len(by[slug]), "parts": bp}
     for slug, dp in parts_of.items():
-        files[f"descs/{slug}.json" if dp == 1 else f"descs/{slug}.<0..{dp-1}>.json"] = {
+        files[f"descs/{slug}.json.gz" if dp == 1 else f"descs/{slug}.<0..{dp-1}>.json.gz"] = {
             "n": len(desc_of[slug]), "parts": dp}
     catalog = {
         "v": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),
