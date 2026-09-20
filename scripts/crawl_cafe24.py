@@ -656,7 +656,7 @@ def carry_over(prev: dict, d: dict, when: str) -> None:
         plog.append([when[:10], d["price"]])
     d["price_log"] = plog[-20:]
     slog = list(prev.get("stock_log") or [])
-    now_stock = "품절" if d.get("soldout") else "판매중"
+    now_stock = "품절" if is_soldout(d) else "판매중"
     if not slog or slog[-1][1] != now_stock:
         slog.append([when[:10], now_stock])
     d["stock_log"] = slog[-20:]
@@ -666,6 +666,38 @@ def carry_over(prev: dict, d: dict, when: str) -> None:
     for k in ("detail_text", "description"):
         if len(d.get(k) or "") < len(prev.get(k) or "") // 2:
             d[k] = prev.get(k)
+
+# 매장이 품절 딱지를 붙여 놨는데 **우리 손의 기록엔 살아 있는 치수가 있는** 상품이 있다.
+# 전수로 가르니 자리가 넷이다(2026-09-20 · 163,461줄 중 품절 딱지 50,762):
+#
+#     옵션이 아예 없다              9,276   매장 말을 따른다 — 견줄 것이 없다
+#     모든 옵션에 품절 표시         8,211   매장 말을 따른다 — 실제로 다 팔렸다
+#     일부 옵션만 품절 표시         5,364   → 판다. 「M 품절」이면 S 는 살 수 있다
+#     품절 표시된 옵션이 하나도 없다 27,911  → 판다 (사람 결정 2026-09-20 「판매중으로 돌려」)
+#
+# 확인한 보기: kijun 2481 은 options=['S','M'] · soldout_options=['M'] 인데 soldout=True 다.
+# S 는 살 수 있다. parse_detail 은 soldout_icon·품절 아이콘·JSON-LD 만 보고 **옵션을 안 본다**.
+#
+# 뒤의 27,911 은 근거가 약하다 — 매장이 딱지만 붙이고 옵션엔 표시를 안 한 것일 수도 있고,
+# 그 옵션이 치수가 아니라 색일 수도 있다. 되돌릴 수 있게 잣대를 따로 둔다.
+TRUST_SOLDOUT_WITHOUT_MARKS = False   # True 면 「표시 없는」 27,911 벌을 품절로 둔다
+
+
+def is_soldout(d: dict) -> bool:
+    """이 상품을 지금 살 수 있나 — 매장의 딱지와 우리가 받아 둔 옵션을 같이 본다."""
+    if not d.get("soldout"):
+        return False
+    opts = [o for o in (d.get("options") or []) if str(o).strip()]
+    if not opts:
+        return True
+    dead = set(d.get("soldout_options") or [])
+    live = [o for o in opts if o not in dead]
+    if not live:
+        return True
+    if not dead and TRUST_SOLDOUT_WITHOUT_MARKS:
+        return True
+    return False
+
 
 def is_category_page(html_text: str) -> bool:
     """상품 페이지인 줄 알고 열었는데 칸(카테고리) 페이지인 것을 가려낸다.
@@ -3450,6 +3482,7 @@ def length_is_placeholder(rows: list[dict]) -> bool:
 
 
 def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
+    import product_desc
     rows = []
     per_brand: dict[str, int] = {}
     seen_images: set[str] = set()
@@ -3481,6 +3514,16 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
         # 자기 CDN(depound.cafe24.com/img/…)을 쓰는 매장의 진짜 사진 107장이 빠진다(2026-09-02).
         # 총장이 실측이 아니라 자리표시인 매장에서는 총장·어깨 규칙을 끈다
         len_bad = length_is_placeholder(list(latest.values()))
+        # 그림에서 읽어 둔 상품 글 — 매장 글이 찌꺼기뿐일 때 이걸로 메운다
+        mined: dict[str, dict] = {}
+        mp = CRAWL_DIR / "detail" / f"{slug}.jsonl"
+        if mp.exists():
+            for ln in mp.read_text(encoding="utf-8").splitlines():
+                try:
+                    m = json.loads(ln)
+                except Exception:
+                    continue
+                mined[str(m.get("product_no"))] = m
         img_uses = collections.Counter(d.get("image_url", "") for d in latest.values())
         # 한 브랜드는 제 도메인 하나(또는 en.· /shopN/ 같은 같은 도메인의 변형)를 쓴다.
         # 다른 도메인이 소수로 끼어 있으면 그건 훑다가 흘러든 남의 매장이다.
@@ -3615,7 +3658,7 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
                 "representative_color": pick_color(d["name"], d.get("description", ""), d.get("spec"),
                                                    d.get("options")),
                 "season": season_of(d["name"], d.get("detail_images"), d.get("category_names")),
-                "status": "SOLD_OUT" if (d.get("soldout") or d.get("delisted")) else "ON_SALE",
+                "status": "SOLD_OUT" if (is_soldout(d) or d.get("delisted")) else "ON_SALE",
                 "image_url": d["image_url"],
                 # 회원 전용·리다이렉트로 홈 주소만 남은 건(badblood 208, haleine 14)은 cafe24 표준 상세 주소로 복원
                 "source_url": d["source_url"] if product_no_of(d["source_url"]) else f"{d['source_url'].rstrip('/')}/product/detail.html?product_no={d['product_no']}",
@@ -3630,8 +3673,11 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
                 "options": " | ".join(d.get("options", [])),
                 "delisted": "1" if d.get("delisted") else "",
                 "last_seen": d.get("last_seen", ""),
-                "detail_empty": "1" if (not d.get("detail_images") and len(d.get("detail_text") or "") < 50
-                                        and len(d.get("description") or "") < 50) else "",
+                # 「보여 줄 설명이 없다」 — 글자 수가 아니라 **옷 이야기가 있나**로 센다.
+                # 앞서는 길이로만 봤는데, cpgn-studio 처럼 매장 푸터가 1,000자씩 들어오는
+                # 곳이 전부 「설명 있음」이었다(2026-09-20).
+                "detail_empty": "" if product_desc.best(d.get("description") or "",
+                                                        mined.get(str(d["product_no"])))[0] else "1",
             })
             # 상세 그림도 증거에 넣는다 — 매장이 갤러리는 다시 찍어 올리고 상세 그림은
             # 그대로 쓰는 경우가 있다(2026-09-07: 중복 175묶음 중 51묶음이 그랬다).

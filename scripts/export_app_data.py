@@ -27,10 +27,14 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
+import product_desc
 import size_from_ocr
 import tag_items
 
 WITH_DESC = False
+# 그림에서 읽어 둔 상품 글 — (brand_slug, product_no) → detail_from_ocr 이 뽑아 둔 줄.
+# 매장 글이 아무 말도 안 할 때 이걸로 메운다(설명이 빈 29,083벌 중 22,214벌이 여기 있다).
+MINED: dict[tuple, dict] = {}
 # 같은 옷의 다른 색을 한 묶음으로 묶는 번호. 매장은 색마다 상품을 따로 올린다 —
 # badblood 「Everyday Scoop Neck Long Sleeve T-Shirt」는 여덟 색이 여덟 상품이다.
 # 앱 상세 화면의 「색상 · N」 칩 줄이 이 번호로 형제를 찾는다.
@@ -65,24 +69,25 @@ def thin(r: dict, tags: dict) -> dict:
 def full(r: dict, tags: dict, sizes: dict, crawl: dict) -> dict:
     """상세 한 벌 — 얇은 목록에 없는 것 전부."""
     d = crawl.get(r["source_url"]) or {}
+    _d, _s = product_desc.best(d.get("description") or "",
+                               MINED.get((r["brand_slug"], str(r["product_no"]))))
     out = dict(thin(r, tags))
     out.update({
         "tags": (tags.get(r["source_url"]) or {}).get("tags") or {},
         "size": sizes.get(r["source_url"]),
         "gallery": d.get("gallery") or [],
-        # 설명문(31MB)은 기본으로 안 내보낸다 — 사람 결정을 기다린다(2026-09-07).
-        # 매장 「description」 칸은 상품 설명이 아니라 페이지를 긁은 것이라, 앱에 그대로
-        # 보여 주면 남의 말이 상품 설명 자리에 뜬다. 브랜드별로 무엇이 들어 있었는지:
+        # 설명문을 내보낸다(2026-09-20 사람 결정: 「지금 당장 메울 곳은 메워, 배송이나
+        # 세탁/후기 문의 같은 찌꺼기들은 싹 지우고」). 2026-09-07 에 안 내보내기로 한 까닭이
+        # 사라졌다 — 그때는 씻는 자리가 없어 남의 말이 상품 설명 자리에 떴다:
         #   siyazu 783벌  손님 후기 통째로 —「커서 스몰사이즈로 교환했는데도 크네요」
-        #   vunque·kirsh·blayer·andersson-bell  후기 신고 안내문 —「관련없는 내용 욕설/비방 …」
+        #   vunque·kirsh·blayer·andersson-bell  후기 신고 안내문
         #   divein   「Q & A Write View all 상품명 … 판매가 109,000원」
-        #   dnsr     「RELATED ITEMS 원턱 버뮤다 데님 팬츠 블루 KRW 74,000 …」 옆 상품 목록
-        #   badblood 「Delivery / Returns * Estimated delivery dates …」 배송 안내
-        # 태거는 이것들을 걷어 내고 읽지만, 걷어 낸 결과는 사람에게 보여 줄 글이 아니다
-        # (「원턱 버뮤다 데님 팬츠 블루 KRW 74,000」 → 「원턱 버뮤다 턱 버뮤다」).
-        # 상품이 어떤 옷인지는 tags 가 말한다. 정말 필요하면 --with-desc 로 켠다.
-        **({"desc": tag_items.strip_other_products(
-            tag_items.strip_reviews(d.get("description") or "")).strip()} if WITH_DESC else {}),
+        #   dnsr     「RELATED ITEMS 원턱 버뮤다 데님 팬츠 블루 KRW 74,000 …」
+        #   badblood 「Delivery / Returns * Estimated delivery dates …」
+        # 이제 product_desc 가 그것들을 걷어내고, 매장 글이 아무 말도 안 하면 그림에서
+        # 읽어 둔 글로 메운다. --with-desc 는 씻기 전 원문까지 보고 싶을 때만 쓴다.
+        **({"desc": _d, "desc_src": _s} if _d else {}),
+        **({"desc_raw": (d.get("description") or "")[:4000]} if WITH_DESC else {}),
         "options": r.get("options") or "",
         "color_name": r.get("representative_color") or "",
         "price_log": d.get("price_log") or [],
@@ -125,6 +130,15 @@ def main() -> int:
                 continue
             if d.get("source_url"):
                 crawl[d["source_url"]] = d
+
+    for p in sorted((DATA / "crawl" / "detail").glob("*.jsonl")):
+        for ln in p.open(encoding="utf-8"):
+            try:
+                m = json.loads(ln)
+            except Exception:
+                continue
+            MINED[(m.get("brand_slug") or p.stem, str(m.get("product_no")))] = m
+    print(f"그림에서 읽어 둔 상품 글 {len(MINED):,}벌")
 
     # 색만 다른 형제 묶기 — 둘 이상 모인 묶음에만 번호를 준다(단독은 0)
     fam: dict[tuple, list[str]] = defaultdict(list)

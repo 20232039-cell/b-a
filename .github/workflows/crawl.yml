@@ -71,13 +71,17 @@ jobs:
         shell: bash
         run: |
           build() {
+            # 그림에서 읽어 둔 글을 먼저 뽑는다 — build-csv 가 「보여 줄 설명이 있나」를
+            # 여기 결과로 가린다(2026-09-20). 앞서는 이걸 ocr 판에서만 돌려서, OCR 은
+            # 189곳을 읽어 뒀는데 뽑아 둔 것은 121곳뿐이었다.
+            python scripts/detail_from_ocr.py | tail -3
             python scripts/crawl_cafe24.py --build-csv | tail -3
             python scripts/size_from_ocr.py | tail -4
             python scripts/tag_items.py | tail -3
           }
           for i in 1 2 3; do
             build
-            git add data/products_full.csv data/product_sizes.json data/product_tags_full.json
+            git add data/products_full.csv data/product_sizes.json data/product_tags_full.json data/crawl/detail
             git diff --cached --quiet && { echo "변화 없음"; exit 0; }
             git commit -m "생성물 재생성 $(date -u +%Y-%m-%d) (Actions)"
             git push && exit 0
