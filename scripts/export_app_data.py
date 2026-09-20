@@ -110,6 +110,36 @@ def fold_finish(t: dict) -> dict:
     return out
 
 
+# ── 무드 ────────────────────────────────────────────────────────────────────
+#
+# 앱 쪽 지적(2026-09-20): 무드를 아는 매장이 195곳 중 49곳뿐이라 「스트릿」을 눌러도
+# 카탈로그의 4분의 1만 보인다. 옛 앱 씨앗 64곳을 되재 보니 **한 브랜드 안에서 무드가
+# 늘 하나뿐**이었다 — 상품 무드는 처음부터 브랜드 무드였다. 그러니 상품에 붙이지 않고
+# 브랜드 줄에 싣는다.
+#
+# 값은 이미 `brands_seed.csv` 의 `mood_tags` 에 279곳 전부 있다(사람이 손으로 정했다).
+# 앱 씨앗 49곳과 견주면 47곳이 그대로 같다 — 저기서 온 값이 맞다.
+#
+# 다만 창고 어휘가 14낱말이고 앱 어휘가 9낱말이다. 남는 다섯을 그냥 버리면 10곳이
+# 무드 없는 채로 남아 **고치려던 구멍이 작아질 뿐 그대로다.** 그래서 접는다.
+# 접는 자리는 브랜드가 아니라 **낱말**이다 — 매장 이름을 코드에 적지 않는다.
+MOOD_APP = ["스트릿", "미니멀", "빈티지", "캐주얼", "걸리시", "시크", "클래식", "워크웨어", "Y2K"]
+# 창고에만 있는 말 → 앱 말. 페미닌·로맨틱은 앱의 아홉 중 여성스러움을 말하는 유일한
+# 낱말인 걸리시로 간다. 이 접기가 닿는 곳은 상품표에 있는 195곳 중 **10곳**이다.
+MOOD_FOLD = {"페미닌": "걸리시", "로맨틱": "걸리시", "아방가르드": "시크",
+             "스포티": "캐주얼", "고프코어": "캐주얼"}
+
+
+def fold_mood(raw: str) -> list[str]:
+    """브랜드 무드를 앱 어휘로 옮긴다 — 모르는 말은 버린다(틀린 값보다 없는 값이 낫다)."""
+    out: list[str] = []
+    for x in (raw or "").replace("|", ",").split(","):
+        x = MOOD_FOLD.get(x.strip(), x.strip())
+        if x in MOOD_APP and x not in out:
+            out.append(x)
+    return out
+
+
 GENDER_CODE = {"WOMENSWEAR": "W", "MENSWEAR": "M", "UNISEX": "U"}
 
 
@@ -279,10 +309,11 @@ def main() -> int:
         c = r.get("category_code") or "other"
         cat_label.setdefault(c, r.get("category") or "")
         grp_label.setdefault(c, r.get("group") or "")
-    brand_name = {}
+    brand_name, brand_mood = {}, {}
     with (DATA / "brands_seed.csv").open(encoding="utf-8-sig") as f:
         for r in csv.DictReader(f):
             brand_name[r["slug"]] = r.get("name") or r["slug"]
+            brand_mood[r["slug"]] = fold_mood(r.get("mood_tags") or "")
 
     shard: dict[str, list] = defaultdict(list)
     for r in rows:
@@ -407,12 +438,16 @@ def main() -> int:
             "s": "1 판매중 · 0 품절", "co": "대표색", "ma": "대표소재", "se": "시즌",
             "cg": "색만 다른 형제 묶음(없으면 안 적힘)",
         },
+        # 무드는 **브랜드에만** 있다 — 상품마다 붙일 것이 아니다(아래 fold_mood 참고)
+        "brand_fields": {"mo": "무드 — moods 안의 말만 쓴다"},
         "brands": [{"i": bi[s], "s": s, "n": brand_name.get(s, s), "p": pref.get(s, ""),
                     "c": len(by.get(s, [])), "bp": shards_of.get(s, 1), "dp": parts_of.get(s, 0),
-                    "im": next((r.get("image_url") for r in by.get(s, []) if r.get("image_url")), "")}
+                    "im": next((r.get("image_url") for r in by.get(s, []) if r.get("image_url")), ""),
+                    **({"mo": brand_mood[s]} if brand_mood.get(s) else {})}
                    for s in slugs],
         "cats": [{"i": ci[c], "c": c, "n": cat_label.get(c, ""), "g": grp_label.get(c, "")}
                  for c in codes],
+        "moods": MOOD_APP,
         "files": files,
     }
     b = write(out / "catalog.json", catalog, args.dry)
