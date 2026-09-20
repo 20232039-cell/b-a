@@ -23,6 +23,7 @@ import json
 import re
 import statistics
 from collections import Counter, defaultdict
+from functools import lru_cache
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -116,6 +117,11 @@ def iter_jsonl(p):
             _BAD_LINES[p.name] += 1
 
 
+# 같은 낱말을 수백만 번 다시 본다 — 치수표의 낱말은 「총장」·「가슴」·숫자 몇 가지가
+# 끝없이 되풀이되는데, 그때마다 정규식을 네댓 번씩 다시 돌렸다. py-spy 로 40번 찍어
+# 보니 이 함수 안에 있던 것이 **17/40** 이었다(2026-09-20). 값은 글자에만 달렸고
+# 돌려주는 것이 문자열이나 None 이라 담아 둬도 남이 못 고친다.
+@lru_cache(maxsize=1 << 18)
 def canon_label(s: str) -> str | None:
     key = re.sub(r"[\s()（）:：]", "", s).lower()
     # 「화장」이 든 라벨은 무조건 화장이다. 뒷목 중심에서 소매끝까지를 가리키는 한 낱말이고,
@@ -1879,6 +1885,9 @@ except Exception:
 _STYLE_CODE = re.compile(r"(?:dv\.?lot|lot|style|art|no)\.?\s*#?\s*(\d{2,5})", re.I)
 
 
+# 같은 이름을 네 자리에서 따로 묻는다(2287·2333·2346·2870). 정규식이 다섯 번 도는
+# 함수라 이름 하나당 스무 번씩 헛돈다 — canon_label 과 같은 까닭으로 담아 둔다.
+@lru_cache(maxsize=1 << 18)
 def color_base(name: str) -> str:
     """상품 이름에서 색 이름과 대괄호를 걷어낸 알맹이 — 같은 옷의 다른 색을 한 묶음으로 묶는 열쇠."""
     n = re.sub(r"\[[^\]]*\]", "", name or "")

@@ -1171,7 +1171,10 @@ def head_end(text: str, vocab: dict, label: str) -> int:
 
 # 신발 낱말이지만 옷인 것 — 부츠컷은 바지, 카고부츠는 없다. match_vocab 은 부분 일치라
 # 어휘로는 못 막고 여기서 먼저 걸러야 한다(2026-09-05: 「레이스업 부츠컷 데님」이 신발이 됐다).
-SHOE_FALSE = re.compile(r"부츠\s*[-–]?\s*컷|boot\s*[-–]?\s*cut|bootcut", re.I)
+# 「Boots Cut」·「Boots-Cut」은 안 걸렸다 — boot 와 cut 사이에 s 가 끼면 못 읽었다.
+# 그래서 facade-pattern 「Boots Cut Fit」과 ava-molli 「Inside Slit Semi Boots-Cut PT」가
+# 신발 칸에 서 있었다(앱 쪽 지적 2026-09-20). 한글 「부츠컷」만 걸리고 있었다.
+SHOE_FALSE = re.compile(r"부츠\s*[-–]?\s*컷|boots?\s*[-–]?\s*cut|bootcut", re.I)
 
 # 옥스포드는 구두 이름이면서 셔츠 원단이다. 이름에 옷 낱말이 같이 있으면 원단 쪽이다.
 # moif 는 「WIDE UTILITY SHIRT / BLACK OXFORD」처럼 뒤에 색·원단을 적어서, 「뒤에 걸린 쪽이
@@ -3813,8 +3816,12 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
             # 가방이 청바지 칸에 떴다(23벌, 2026-09-06).
             head_name = strip_trailing_color(_TRAIL_PAREN.sub("", d["name"]))
             acc = match_acc(head_name) if code in ACC_TO_CATEGORY.values() else ""
-            item = acc or match_head(head_name, ITEM_TYPE_VOCAB)
-            item = material_outer(head_name, item)
+            # 「웨스턴 세미 부츠컷」은 바지다. 갈래는 SHOE_FALSE 가 이미 막는데 품목은 안 막혀
+            # 여섯 벌이 하의 통에서 「부츠」로 서 있었다(앱 쪽 지적 2026-09-20). 낱말을 지우고
+            # 다시 고른다 — 지우기만 하면 「데님」·「팬츠」가 제 차례에 걸린다.
+            item_name = SHOE_FALSE.sub(" ", head_name)
+            item = acc or match_head(item_name, ITEM_TYPE_VOCAB)
+            item = material_outer(item_name, item)
             if fix and fix.get("품목"):
                 item, acc = fix["품목"], fix["품목"]
             if not item and code == "tops" and re.search(r"스웻|스웨트|sweat", head_name, re.I):

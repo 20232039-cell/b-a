@@ -156,11 +156,13 @@ def img_prefix(urls: list[str]) -> str:
     return head[:head.rfind("/") + 1] if "/" in head else head
 
 
-def thin_row(r: dict, tags: dict, bi: dict, ci: dict, pref: dict) -> dict:
+def thin_row(r: dict, tags: dict, bi: dict, ci: dict, pref: dict,
+             upref: dict | None = None) -> dict:
     """목록 한 줄. 열쇠 뜻은 catalog.json 의 "fields" 에 적어 둔다."""
     t = (tags.get(r["source_url"]) or {}).get("tags") or {}
     u = r.get("image_url") or ""
     pre = pref.get(r["brand_slug"], "")
+    upre = (upref or {}).get(r["brand_slug"], "")
     row = {
         "i": f'{r["brand_slug"]}-{r["product_no"]}',
         "b": bi[r["brand_slug"]],
@@ -172,6 +174,14 @@ def thin_row(r: dict, tags: dict, bi: dict, ci: dict, pref: dict) -> dict:
         "g": GENDER_CODE.get(r.get("gender_target"), "U"),
         "s": 1 if r.get("status") == "ON_SALE" else 0,
     }
+    # 상품 주소 — 「공식몰 보기」가 이것 없이는 안 걸린다(앱 쪽 요청 2026-09-20).
+    # 카페24 표준 주소(?product_no=N)로 퉁치려 했으나 표본 8곳 중 2곳이 404 였다.
+    # 깨진 링크는 없는 링크보다 나쁘므로 **진짜 주소**를 싣되, 사진과 똑같이 매장마다
+    # 공통 앞머리를 떼서 catalog.brands[].up 에 한 번만 적는다.
+    # 실측: 꼬리 평균 35자 · 목록에 평문 +4.28MB · gzip +1.08MB.
+    su = r.get("source_url") or ""
+    if su:
+        row["u"] = su[len(upre):] if upre and su.startswith(upre) else su
     # 빈 값은 아예 안 적는다 — 11만 번 반복되면 그것만으로 수백 KB다
     for k, v in (("co", (t.get("color") or [""])[0]),
                  ("ma", (t.get("material") or [""])[0]),
@@ -315,9 +325,17 @@ def main() -> int:
             brand_name[r["slug"]] = r.get("name") or r["slug"]
             brand_mood[r["slug"]] = fold_mood(r.get("mood_tags") or "")
 
+    # 상품 주소도 매장마다 앞머리가 같다 — 사진과 같은 방식으로 접는다.
+    # `by` 는 아래에서 만들어지므로 여기서는 rows 에서 바로 모은다(안 그러면 NameError).
+    _u_of: dict[str, list[str]] = defaultdict(list)
+    for r in rows:
+        _u_of[r["brand_slug"]].append(r.get("source_url") or "")
+    upref = {slug: img_prefix(us) for slug, us in _u_of.items()}
+
     shard: dict[str, list] = defaultdict(list)
     for r in rows:
-        shard[r.get("category_code") or "other"].append(thin_row(r, tags, bi, ci, pref))
+        shard[r.get("category_code") or "other"].append(
+            thin_row(r, tags, bi, ci, pref, upref))
     files: dict[str, dict] = {}
     idx_gz = 0
     for code, items in sorted(shard.items()):
@@ -437,12 +455,15 @@ def main() -> int:
             "c": "cats 번호", "t": "품목(subtype)", "g": "W 여성 · M 남성 · U 남녀공용",
             "s": "1 판매중 · 0 품절", "co": "대표색", "ma": "대표소재", "se": "시즌",
             "cg": "색만 다른 형제 묶음(없으면 안 적힘)",
+            "u": "상품 주소 — brands[b].up 을 앞에 붙인다",
         },
         # 무드는 **브랜드에만** 있다 — 상품마다 붙일 것이 아니다(아래 fold_mood 참고)
-        "brand_fields": {"mo": "무드 — moods 안의 말만 쓴다"},
+        "brand_fields": {"mo": "무드 — moods 안의 말만 쓴다",
+                         "p": "사진 주소 앞머리", "up": "상품 주소 앞머리"},
         "brands": [{"i": bi[s], "s": s, "n": brand_name.get(s, s), "p": pref.get(s, ""),
                     "c": len(by.get(s, [])), "bp": shards_of.get(s, 1), "dp": parts_of.get(s, 0),
                     "im": next((r.get("image_url") for r in by.get(s, []) if r.get("image_url")), ""),
+                    **({"up": upref[s]} if upref.get(s) else {}),
                     **({"mo": brand_mood[s]} if brand_mood.get(s) else {})}
                    for s in slugs],
         "cats": [{"i": ci[c], "c": c, "n": cat_label.get(c, ""), "g": grp_label.get(c, "")}
