@@ -172,10 +172,28 @@ def material_of(text: str) -> str:
     return " ".join(mix if part == "겉감" else f"{part} {mix}" for part, mix in got.items())
 
 
+# 매장 화면의 구간 이름표 — 어떤 소비자에게도 정보가 아니다(전수 2,006편).
+_SECTION_HEAD = re.compile(
+    r"^\s*(?:feature|features|detail|details|description|info|information|fabric|"
+    r"material|composition|상품\s?설명|제품\s?설명|패브릭\s?정보|소재\s?정보|디테일)"
+    r"\s*[:：]?\s*$", re.I)
+# 치수표가 글로 흘러든 첫 줄(전수 275편). 사이즈표가 바로 위에 있는데 또 적힌다.
+_SIZE_HEAD = re.compile(r"^\s*(?:총장|기장|어깨|가슴|허리|엉덩이|밑단|소매|허벅지|밑위)\s*\d")
+# 글 **앞에 붙은** 이름표 — 「Detail 24/2합의 두꺼운 면 …」(앱 쪽 예시 2026-09-20).
+# **영문만** 뗀다. 한글 「디테일」·「소재」는 문장에 그대로 쓰이므로 건드리면 안 된다
+# (「디테일한 자수」·「소재가 좋은」). 뒤에 글이 넉넉히 남을 때만 뗀다.
+_INLINE_HEAD = re.compile(
+    r"^(?:feature|features|detail|details|description|info|information|fabric|"
+    r"material|composition)\s*[:：]?\s+(?=.{10,})", re.I)
+
+
 def clean(text: str) -> str:
     """찌꺼기를 걷어내고 옷 이야기만 남긴다. 남는 게 없으면 빈 글자열."""
     out: list[str] = []
     for part in _parts(text):
+        if _SECTION_HEAD.match(part) or _SIZE_HEAD.match(part):
+            continue
+        part = _INLINE_HEAD.sub("", part)
         m = _JUNK.search(part) or _PRICE.search(part)
         if m:
             # 조각 하나에 옷 이야기와 안내문이 같이 있으면 **통째로 버리지 않는다**.
@@ -211,6 +229,11 @@ def clean(text: str) -> str:
                 continue
             kept.append(part)
         out = kept
+        # 혼용률을 맨 앞에 세운다. 앱이 「미리보기 두 줄을 이 줄이 먹는다」고 짚었고
+        # 그 말이 맞지만(2026-09-20), **칸으로 옮기려다 접었다** — 전수로 재니 0.2%만
+        # 잡히고 그마저 산문 조각을 주웠다(「… 리본에서 … 린넨 36%」 → 안감 100%).
+        # 상세 조각의 소재 칸은 표준화된 이름뿐이라, 여기서 빼면 70/30 이 사라진다.
+        # 앱이 화면에서 좁혀 깎기로 했다(퍼센트 하나 · 99 이상일 때만).
         if not any(mat in p for p in out):
             out.insert(0, mat)
     # 조각을 빈칸으로 이어 붙이면 화면에 한 덩이로 주르륵 흐른다(사람 지적 2026-09-20).
