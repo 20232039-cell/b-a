@@ -183,11 +183,23 @@ def full(r: dict, tags: dict, sizes: dict, crawl: dict) -> dict:
     return out
 
 
-# 올리는 곳이 슈퍼베이스 Storage 공개 버킷이다(사람 결정 2026-09-20). 거기는 **올린 그대로**
-# 내보내므로 우리가 미리 압축해 두고 메타데이터에 Content-Encoding: gzip 을 붙여야 한다.
-# 안 붙이면 브라우저가 못 풀고 앱이 깨진다. 그래서 파일 이름은 `.json.gz` 다.
-# (gzip 을 쓰면 목록 한 갈래가 1.88MB → 그대로, 원본 7.6MB 대신 그것만 오간다.)
-GZ = True
+# 미리 압축하지 않는다 — **평문 JSON 으로 올린다.**
+#
+# 처음엔 `.json.gz` 로 올리고 Content-Encoding: gzip 을 붙이려 했다. 슈퍼베이스가 올린
+# 그대로 내보낸다고 들어서다. 실제로 올려 되받아 보니 둘 다 틀렸다:
+#
+#   · 슈퍼베이스는 그 머리말을 **안 붙여 준다** (content-encoding 이 아예 없다)
+#   · 그런데 앞에 **클라우드플레어**가 있고, 그쪽이 알아서 압축해 준다
+#         --compressed 로 부르면 content-encoding: br 로 온다
+#
+# 그래서 이미 gzip 인 것을 brotli 로 한 번 더 감싸는 꼴이 됐다 — 728,949 → 728,959 바이트,
+# 열 바이트가 **늘었다**. 두 번 압축하면 아무것도 안 줄어든다.
+#
+# 평문으로 올리면 클라우드플레어가 brotli 로 줄이는데 그게 gzip 보다 낫고, 머리말 문제도
+# 사라지고, 앱은 그냥 `.json` 을 받으면 된다.
+#
+# 여기서 세는 크기는 **평문 크기**다. 실제로 오가는 값은 그보다 작다(brotli 가 줄인다).
+GZ = False
 
 
 def write(path: Path, obj, dry: bool) -> int:
@@ -279,10 +291,10 @@ def main() -> int:
     idx_gz = 0
     for code, items in sorted(shard.items()):
         n = write(out / "index" / f"{code}.json", items, args.dry)   # 압축한 크기다
-        files[f"index/{code}.json.gz"] = {"n": len(items), "gzip": n}
+        files[f"index/{code}.json"] = {"n": len(items), "gzip": n}
         idx_gz += n
-    print(f"목록 {len(rows):,}벌 · 갈래 {len(shard)}개 · "
-          f"gzip {idx_gz/1048576:.2f} MB (한 벌 {idx_gz/len(rows):.0f}B) — "
+    print(f"목록 {len(rows):,}벌 · 갈래 {len(shard)}개 · 평문 {idx_gz/1048576:.1f} MB "
+          f"(오갈 때는 brotli 로 줄어든다) — "
           + " · ".join(f"{k} {len(v):,}" for k, v in sorted(shard.items(), key=lambda x: -len(x[1]))[:4]))
 
     by = defaultdict(list)
@@ -363,10 +375,10 @@ def main() -> int:
     # 그래서 **매장마다** 앞머리(p)를 적는다. 그러면 115,934장이 100% 접힌다.
     #   사진 주소 = brands[b].p + 줄의 m
     for slug, bp in shards_of.items():
-        files[f"brands/{slug}.json.gz" if bp == 1 else f"brands/{slug}.<0..{bp-1}>.json.gz"] = {
+        files[f"brands/{slug}.json" if bp == 1 else f"brands/{slug}.<0..{bp-1}>.json"] = {
             "n": len(by[slug]), "parts": bp}
     for slug, dp in parts_of.items():
-        files[f"descs/{slug}.json.gz" if dp == 1 else f"descs/{slug}.<0..{dp-1}>.json.gz"] = {
+        files[f"descs/{slug}.json" if dp == 1 else f"descs/{slug}.<0..{dp-1}>.json"] = {
             "n": len(desc_of[slug]), "parts": dp}
     catalog = {
         "v": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),

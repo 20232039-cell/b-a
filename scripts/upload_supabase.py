@@ -6,8 +6,9 @@ layer-web 저장소 직접도 아니다 — 그러면 데이터 갱신이 앱 �
 안 고쳤는데 매일 새 배포가 나가고, 배포를 미루면 데이터가 낡는다.
 
 지켜야 할 둘(사람이 댄 것):
-  ① `.json.gz` 로 올리고 메타데이터에 `Content-Encoding: gzip` 을 붙인다.
-     슈퍼베이스는 **올린 그대로** 내보내므로 이게 없으면 브라우저가 못 풀고 앱이 깨진다.
+  ① 평문 JSON 으로 올린다. 미리 압축하지 않는다 — 앞의 클라우드플레어가 brotli 로
+     줄여 준다. 미리 gzip 해서 올리면 그 위에 brotli 가 한 번 더 걸려 오히려 늘었다
+     (728,949 → 728,959 바이트, 실측 2026-09-20).
   ② 한 파일이 50MB 를 넘으면 안 된다(버킷 상한). 지금은 제일 큰 조각이 gzip 2MB
      안쪽이라 걸릴 게 없지만, 설명이나 상세를 한 파일로 합치면 걸린다 — 그래서 여기서 막는다.
 
@@ -32,8 +33,8 @@ def one(sess, base: str, bucket: str, key: str, path: Path, root: Path) -> tuple
     headers = {
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
-        # 이 둘이 핵심이다 — 없으면 브라우저가 압축을 못 푼다
-        "Content-Encoding": "gzip",
+        # Content-Encoding 은 안 붙인다. 슈퍼베이스가 어차피 안 전해 주고, 앞의
+        # 클라우드플레어가 알아서 brotli 로 줄여 준다(실측 2026-09-20).
         "Cache-Control": "public, max-age=300",
         "x-upsert": "true",
     }
@@ -81,7 +82,7 @@ def main() -> int:
     print(f"열쇠는 `{used}` 에서 읽었다 (길이 {len(key)}자)")
 
     root = Path(args.dir)
-    files = sorted(p for p in root.rglob("*.gz") if p.is_file())
+    files = sorted(p for p in root.rglob("*.json") if p.is_file())
     total = sum(p.stat().st_size for p in files)
     big = [p for p in files if p.stat().st_size > MAX_BYTES]
     print(f"올릴 것 {len(files):,}개 · 합계 {total/1048576:.1f} MB · 버킷 {bucket}")

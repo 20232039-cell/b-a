@@ -43,11 +43,11 @@ jobs:
 
       - name: 크기 확인 — 한 파일이 50MB 를 넘으면 버킷이 안 받는다
         run: |
-          echo "합계 $(du -sh /tmp/app | cut -f1) · 파일 $(find /tmp/app -name '*.gz' | wc -l)개"
+          echo "합계 $(du -sh /tmp/app | cut -f1) · 파일 $(find /tmp/app -name '*.json' | wc -l)개"
           echo "제일 큰 것 다섯:"
-          find /tmp/app -name '*.gz' -printf '%s %p\n' | sort -rn \
+          find /tmp/app -name '*.json' -printf '%s %p\n' | sort -rn \
             | awk 'NR<=5 {printf "  %6.2f MB  %s\n", $1/1048576, $2}'
-          big=$(find /tmp/app -name '*.gz' -size +50M | wc -l)
+          big=$(find /tmp/app -name '*.json' -size +50M | wc -l)
           [ "$big" -eq 0 ] || { echo "::error::50MB 넘는 파일이 $big 개 있다"; exit 1; }
 
       - name: 슈퍼베이스에 올리기
@@ -69,12 +69,17 @@ jobs:
         run: |
           set -e
           PUB="$SUPABASE_URL/storage/v1/object/public/$SUPABASE_BUCKET"
-          echo "■ 머리말"
-          curl -sSI "$PUB/catalog.json.gz" | tr -d '\r' | grep -iE 'HTTP/|content-encoding|content-type|access-control' || true
-          enc=$(curl -sSI "$PUB/catalog.json.gz" | tr -d '\r' | grep -i '^content-encoding:' | tr -d ' ' | cut -d: -f2)
-          [ "$enc" = "gzip" ] || { echo "::error::Content-Encoding 이 gzip 이 아니다: '$enc'"; exit 1; }
+          echo "■ 머리말 — 브라우저처럼 Accept-Encoding 을 얹고 본다"
+          curl -sSI --compressed "$PUB/catalog.json" | tr -d '\r' \
+            | grep -iE '^(HTTP/2|content-encoding|content-type|access-control|server)' || true
+          # 평문으로 올리고 앞의 클라우드플레어가 줄여 주는 구조다. br 이든 gzip 이든
+          # 무엇으로든 줄어서 와야 한다 — 안 오면 4MB 가 24MB 로 오간다.
+          enc=$(curl -sSI --compressed "$PUB/index/tops.json" | tr -d '\r' \
+                | grep -i '^content-encoding:' | tr -d ' \n' | cut -d: -f2)
+          case "$enc" in br|gzip|deflate|zstd) echo "  압축 $enc — 좋다" ;;
+            *) echo "::error::목록이 압축 없이 온다 (content-encoding='$enc')"; exit 1 ;; esac
           echo "■ 브라우저처럼 받아서 읽히나"
-          curl -sS --compressed "$PUB/catalog.json.gz" -o /tmp/catalog.json
+          curl -sS --compressed "$PUB/catalog.json" -o /tmp/catalog.json
           python -c "
           import json,sys
           d=json.load(open('/tmp/catalog.json',encoding='utf-8'))
@@ -82,12 +87,12 @@ jobs:
           assert d['count']>1000 and d['brands'] and d['cats'], '도장이 비었다'
           "
           echo "■ 갈래 조각 하나"
-          curl -sS --compressed "$PUB/index/outer.json.gz" -o /tmp/outer.json
+          curl -sS --compressed "$PUB/index/outer.json" -o /tmp/outer.json
           python -c "
           import json
           x=json.load(open('/tmp/outer.json',encoding='utf-8'))
           print('  아우터',f'{len(x):,}벌 · 첫 줄',json.dumps(x[0],ensure_ascii=False)[:120])
           "
           echo "■ 다른 곳에서 부를 수 있나 (CORS)"
-          curl -sSI -H 'Origin: https://layer.example' "$PUB/catalog.json.gz" \
+          curl -sSI -H 'Origin: https://layer.example' "$PUB/catalog.json" \
             | tr -d '\r' | grep -i 'access-control-allow-origin' || echo "  (머리말 없음 — 앱 쪽에서 확인 필요)"
