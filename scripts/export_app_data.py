@@ -290,9 +290,25 @@ def main() -> int:
     files: dict[str, dict] = {}
     idx_gz = 0
     for code, items in sorted(shard.items()):
-        n = write(out / "index" / f"{code}.json", items, args.dry)   # 압축한 크기다
-        files[f"index/{code}.json"] = {"n": len(items), "gzip": n}
+        n = write(out / "index" / f"{code}.json", items, args.dry)
+        # 열쇠 이름은 **압축 전** 크기라는 뜻이다. 앞서 `gzip` 이라 적고 평문 값을 넣어
+        # 앱이 다섯 배 잘못 판단할 뻔했다(앱 쪽 지적 2026-09-20: tops 가 gzip 11.08MB 로
+        # 적혀 있는데 실제 전송량은 2.23MB). 오가는 값은 클라우드플레어가 정하므로 우리가
+        # 알 수 없다 — 아는 것(평문)만 그 이름으로 적는다.
+        files[f"index/{code}.json"] = {"n": len(items), "bytes": n}
         idx_gz += n
+    # ── 검색 조각 — 11만 벌 **이름 전부**를 한 파일에 ──────────────────────────────
+    # 갈래로 쪼개 두면 상의만 열어 본 사람이 검색을 누를 때 나머지를 그 자리에서 받아야
+    # 한다(4.7MB). 이름·번호만 담으면 훨씬 작다 — 사진 주소가 목록 무게의 절반이다.
+    # 자리로 적는다. 여기서는 사람이 읽을 일이 없고, 11만 번 반복되는 열쇠가 그대로 무게다.
+    #   [브랜드번호, 상품번호, 이름, 갈래번호, 성별(0 여 · 1 남 · 2 공용), 판매중(1/0)]
+    search = [[t["b"], int(t["i"].rsplit("-", 1)[1]), t["n"], t["c"],
+               "WMU".index(t["g"]), t["s"]]
+              for items in shard.values() for t in items]
+    sn = write(out / "search.json", search, args.dry)
+    files["search.json"] = {"n": len(search), "bytes": sn}
+    print(f"검색 조각 {len(search):,}줄 · 평문 {sn/1048576:.2f} MB (이름만)")
+
     print(f"목록 {len(rows):,}벌 · 갈래 {len(shard)}개 · 평문 {idx_gz/1048576:.1f} MB "
           f"(오갈 때는 brotli 로 줄어든다) — "
           + " · ".join(f"{k} {len(v):,}" for k, v in sorted(shard.items(), key=lambda x: -len(x[1]))[:4]))
