@@ -4026,6 +4026,12 @@ def _url_stem(u: str) -> str:
 # 판이 옆에 있다(「BEADED CAP KIDS BLACK」 ↔ 「BEADED CAP BLUE」). 문구로 쓴 곳은 없다.
 # 실측(2026-09-20): 이 잣대로 30벌이 갈리고 lekim 둘은 안 갈린다.
 _KID_MID = re.compile(r"(?<![A-Za-z])kids(?![A-Za-z])", re.I)
+# 앞 낱말에 **붙은** 「…KIDS」는 그 자체로 아동 라인 이름이다(「VIBRATEKIDS - CIRCLE BUCKET
+# HAT」). 홀로 선 「KIDS」와 달리 문구로 쓸 수가 없다 — 어른 상품을 「무엇무엇KIDS」라고
+# 이름 붙이는 매장은 없다. 그래서 짝도 증명도 안 보고 바로 뺀다.
+# 오른쪽은 열지 않는다 — 「kidskin」은 새끼 염소 가죽이라 소재다.
+# 창고 전수(130,499벌)로 재니 걸리는 것은 vibrate 둘뿐이다(사람 지시 2026-09-21).
+_KID_GLUED = re.compile(r"[A-Za-z]kids(?![A-Za-z])", re.I)
 
 
 def _kid_key(name: str) -> str:
@@ -4055,6 +4061,8 @@ def drop_kids_line(rows: list[dict]) -> int:
         have[r["brand_slug"]].add(_kid_key(r["name"]))
     mid = [i for i, r in enumerate(rows)
            if _KID_MID.search(r["name"] or "") and not KIDS_FALSE.search(r["name"] or "")]
+    glued = [i for i, r in enumerate(rows)
+             if _KID_GLUED.search(r["name"] or "") and not KIDS_FALSE.search(r["name"] or "")]
     paired = []
     for i in mid:
         k = _kid_key(rows[i]["name"])
@@ -4062,12 +4070,16 @@ def drop_kids_line(rows: list[dict]) -> int:
         if bare and bare != k and bare in have[rows[i]["brand_slug"]]:
             paired.append(i)
     proven = {rows[i]["brand_slug"] for i in paired}
-    drop = [i for i in mid if i in set(paired) or rows[i]["brand_slug"] in proven]
+    keep_paired = set(paired)
+    drop = sorted({i for i in mid if i in keep_paired or rows[i]["brand_slug"] in proven}
+                  | set(glued))
     for i in reversed(drop):
         rows.pop(i)
     if drop:
-        print(f"아동 라인 제외 {len(drop)}벌 — 어른 짝이 있는 것 {len(paired)} + "
-              f"그 매장({', '.join(sorted(proven))})의 나머지 {len(drop) - len(paired)}")
+        n_glue = len(set(glued) - keep_paired - {i for i in mid if rows[i]["brand_slug"] in proven})
+        print(f"아동 라인 제외 {len(drop)}벌 — 어른 짝 {len(paired)} + "
+              f"증명된 매장({', '.join(sorted(proven)) or '없음'})의 나머지 "
+              f"{len(drop) - len(paired) - n_glue} + 붙은 이름 {n_glue}")
     return len(drop)
 
 
