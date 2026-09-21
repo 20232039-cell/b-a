@@ -3526,6 +3526,21 @@ def seed_host_owner() -> dict[str, str]:
 SEED_HOST_OWNER = seed_host_owner()
 
 
+def seed_slugs() -> set[str]:
+    """씨앗에 적힌 매장 slug. **씨앗에서 뺀 매장은 상품표에도 안 넣는다.**
+
+    여태 상품표는 `crawl/*.jsonl` 을 통째로 훑었다. 그래서 씨앗에서 매장을 빼도 이미 받아 둔
+    수확이 그대로 남아 앱까지 나갔다 — 브랜드 이름도 무드도 없이 slug 만 뜬다. 씨앗이 「우리가
+    다루는 매장 목록」인 이상 그쪽을 따르는 게 맞다.
+
+    원본은 지우지 않는다. 씨앗에 줄을 되돌려 놓으면 다음 판에서 그대로 돌아온다.
+    """
+    if not BRANDS_CSV.exists():
+        return set()
+    with BRANDS_CSV.open(encoding="utf-8-sig") as f:
+        return {r["slug"] for r in csv.DictReader(f) if r.get("slug")}
+
+
 def load_manual_items() -> dict[tuple[str, str], dict]:
     """data/manual_items.csv — 사람이 열어 보고 고친 분류.
 
@@ -3699,10 +3714,15 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
     tbl_of: dict[tuple, str] = {}   # 같은 옷인지 가릴 때 실측표를 견준다
     gone = load_dropped()
     manual_items = load_manual_items()
+    seeded = seed_slugs()
+    dropped_unseeded: dict[str, int] = {}
     for path in sorted(CRAWL_DIR.glob("*.jsonl")):
         if path.name.startswith("_"):
             continue
         slug = path.stem
+        if seeded and slug not in seeded:
+            dropped_unseeded[slug] = sum(1 for _ in path.open(encoding="utf-8"))
+            continue
         # 같은 product_no 가 여러 줄이면 마지막 줄이 이긴다 — 다시 받은 행이 뒤에 붙는다.
         latest: dict[int, dict] = {}
         for line in path.read_text(encoding="utf-8").splitlines():
@@ -3905,6 +3925,10 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
     n_img = season_from_image_date(rows)
     if n_img:
         print(f"사진 날짜로 시즌 {n_img}벌을 더 채웠다", file=sys.stderr)
+    if dropped_unseeded:
+        s = " · ".join(f"{k} {v:,}" for k, v in sorted(dropped_unseeded.items(), key=lambda x: -x[1]))
+        print(f"씨앗에 없는 매장 {len(dropped_unseeded)}곳을 상품표에서 뺀다 — {s} "
+              f"(원본은 그대로 둔다. 씨앗에 줄을 되돌리면 다음 판에 돌아온다)", file=sys.stderr)
     with OUT_CSV.open("w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=CSV_FIELDS)
         w.writeheader()
