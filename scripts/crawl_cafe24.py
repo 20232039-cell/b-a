@@ -4010,22 +4010,40 @@ def _kid_key(name: str) -> str:
 
 
 def drop_kids_line(rows: list[dict]) -> int:
-    """이름 가운데 「KIDS」가 있고 **같은 매장에 어른 짝이 있는** 것을 뺀다."""
+    """이름 가운데 「KIDS」가 있는 아동 라인을 뺀다. 두 갈래로 고른다.
+
+    ① **같은 매장에 어른 짝이 있는 것.** 「BEADED CAP KIDS BLUE」 옆에 「BEADED CAP BLUE」가
+       있으면 앞의 것은 그 옷의 아동판이다.
+
+    ② ①로 이미 **아동 라인이 있다고 드러난 매장**의 나머지. ①은 짝을 이름까지 똑같이 맞춰야
+       해서 색이 어긋나면 줄줄이 샌다 — misu-a-barbe 는 30벌 중 26벌이 ①에 걸렸는데
+       「BEADED CAP KIDS WHITE」(어른은 BLUE·BLACK 뿐) 와 「NEW FURRY HAT KIDS」 셋이
+       색 짝이 없다는 이유로 남았다(사람 지적 2026-09-21: 「키즈 모자 셋도 빼」).
+       한 매장에서 ①이 한 번이라도 걸렸다면 그 매장이 아동 라인을 판다는 것은 이미 증명된
+       것이고, 같은 이름표가 붙은 나머지를 어른 옷으로 볼 까닭이 없다.
+
+    ②가 없으면 곤란하지만 ②만으로도 안 된다 — 증명 없이 낱말만 보면 lekim 「COOL KIDS
+    CAP」(옵션 FREE · 어른 모자)과 ronron 「COLLAR KIDS HALF T-SHIRT」가 함께 잘린다.
+    두 매장 모두 ①에 걸린 상품이 하나도 없어 ②의 문이 안 열린다.
+    """
     have = collections.defaultdict(set)
     for r in rows:
         have[r["brand_slug"]].add(_kid_key(r["name"]))
-    drop = []
-    for i, r in enumerate(rows):
-        if KIDS_FALSE.search(r["name"] or "") or not _KID_MID.search(r["name"] or ""):
-            continue
-        k = _kid_key(r["name"])
+    mid = [i for i, r in enumerate(rows)
+           if _KID_MID.search(r["name"] or "") and not KIDS_FALSE.search(r["name"] or "")]
+    paired = []
+    for i in mid:
+        k = _kid_key(rows[i]["name"])
         bare = " ".join(t for t in k.split() if t != "kids")
-        if bare and bare != k and bare in have[r["brand_slug"]]:
-            drop.append(i)
+        if bare and bare != k and bare in have[rows[i]["brand_slug"]]:
+            paired.append(i)
+    proven = {rows[i]["brand_slug"] for i in paired}
+    drop = [i for i in mid if i in set(paired) or rows[i]["brand_slug"] in proven]
     for i in reversed(drop):
         rows.pop(i)
     if drop:
-        print(f"아동 라인 제외 {len(drop)}벌 — 같은 매장에 어른 짝이 있는 것만")
+        print(f"아동 라인 제외 {len(drop)}벌 — 어른 짝이 있는 것 {len(paired)} + "
+              f"그 매장({', '.join(sorted(proven))})의 나머지 {len(drop) - len(paired)}")
     return len(drop)
 
 
