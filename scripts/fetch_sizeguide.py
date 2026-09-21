@@ -89,8 +89,13 @@ def images_after_heading(html: str, base: str) -> list[str]:
     return out[:6]
 
 
-SIZEY = re.compile(r"(?:총장|기장|어깨|가슴|소매|허리|밑단|밑위|허벅지|암홀|"
-                   r"LENGTH|CHEST|SHOULDER|SLEEVE|WAIST|HEM|THIGH)\s*[:=]?\s*\d", re.I)
+_SZ_LAB = (r"총장|기장|어깨|가슴|소매|허리|밑단|밑위|허벅지|암홀|"
+           r"LENGTH|CHEST|SHOULDER|SLEEVE|WAIST|HEM|THIGH")
+# 라벨 바로 뒤에 수가 오는 꼴과, 표를 한 줄로 모았을 때의 「라벨 … | 수」 꼴 둘 다 받는다.
+# 뒤엣것이 없으면 「B 어깨단면 | 49 | 51」이 통째로 떨어진다 — 라벨과 수 사이에 「단면 | 」이
+# 끼어 있기 때문이다(2026-09-21: 그 탓에 cayl 547벌이 size_text 없이 저장됐다).
+# 칸 이름이 길어질 수 있으니 여덟 자까지만 건너뛰고, `|` 를 반드시 지나게 해 문장은 안 받는다.
+SIZEY = re.compile(rf"(?:{_SZ_LAB})\s*[:=]?\s*\d|(?:{_SZ_LAB})[^|\d]{{0,8}}\|\s*\d", re.I)
 
 
 def text_in(html: str) -> list[str]:
@@ -104,11 +109,37 @@ def text_in(html: str) -> list[str]:
 
     그림만 보던 탓에 이런 매장은 통째로 「없음」으로 세었다. 못 채운 옷이 20벌 넘는 매장
     47곳을 찔러 보니 네 곳이 이 꼴이다.
+
+    **표는 칸마다 끊지 않고 한 줄에 모은다**(2026-09-21). 그냥 get_text 로 훑으면
+    `<td>` 하나가 한 줄이 되어 라벨과 값이 떨어진다:
+
+        A 기장 / 앞-뒤        ← 라벨만 있는 줄
+        65.5~70              ← 값만 있는 줄
+        67.5~72
+
+    그러면 두 가지가 한꺼번에 망가진다. ① 라벨과 값을 다시 이어 붙일 수가 없고,
+    ② 라벨 줄은 그 매장 모든 상품에서 똑같으니 **공용 줄로 몰려 지워진다** — 값만 남은
+    숫자 줄이 되어 어느 갈래도 못 읽는다. cayl 이 정확히 이 꼴이었다(옷 1,126벌 가운데
+    547벌이 「치수 없음」인데 창에는 표가 멀쩡히 들어 있다).
+
+    한 줄에 모으면 「B 어깨단면 | 49 | 51 | 53 | 55」가 되어 라벨이 값을 데리고 다니고,
+    공용 줄 거르기도 제대로 걸린다 — 같은 창에 함께 실린 **카페24 공용 인치 환산표**
+    (「가슴 | 22 | 23 | 24 …」)는 상품마다 글자까지 똑같아 거기서 걸러지고, 상품마다
+    다른 실측 줄만 남는다. 그 거르기가 없으면 인치 값이 그대로 들어온다(2026-09-18 에
+    한 번 겪었다 — unaffected 4벌이 가슴 27·28.5·30·32 를 받았다).
     """
     soup = BeautifulSoup(html, "lxml")
     for t in soup(["script", "style", "noscript"]):
         t.decompose()
     out = []
+    for tb in soup.find_all("table"):
+        for tr in tb.find_all("tr"):
+            cells = [re.sub(r"\s+", " ", td.get_text(" ")).strip()
+                     for td in tr.find_all(["td", "th"])]
+            cells = [c for c in cells if c]
+            if len(cells) >= 2:
+                out.append(" | ".join(cells))
+        tb.decompose()          # 아래 get_text 가 같은 글을 두 번 세지 않게 뗀다
     for ln in soup.get_text("\n").splitlines():
         ln = re.sub(r"\s+", " ", ln).strip()
         if ln:
@@ -206,7 +237,13 @@ def fetch_brand(brand: str, recs: list[dict], delay: float, workers: int, limit:
     # **짧은 줄은 안 버린다.** 사이즈 이름이 한 줄에 혼자 서는 매장이 있는데(「M」·「L」·「XL」),
     # 그 줄은 당연히 상품마다 같아서 공용으로 몰려 지워진다 — 값은 남고 이름만 사라졌다
     # (2026-09-18 실측: saintpain 표가 이름 없이 들어왔다). 공용 안내표는 한 줄이 길다.
-    shop_lines = {l for l, c in line_use.items() if c >= 10 and len(l) >= 8}
+    # 문턱을 **매장 크기에 맞춰** 잡는다. 열 벌 고정이면 한 벌의 표를 여러 색·여러 벌이
+    # 나눠 쓰는 매장에서 진짜 실측까지 지워진다 — cayl 은 547벌을 훑었는데 그 탓에 99벌만
+    # 살아남았다(2026-09-21). 공용 안내표는 그 창 **거의 모든 상품**에 붙으므로 절반을
+    # 넘는 줄만 공용으로 보면 충분하고, 한 식구가 나눠 쓰는 표는 그 밑에 한참 못 미친다.
+    # 바닥은 그대로 열 벌 — 상품이 몇 안 되는 매장에서 비율만 보면 다 걸린다.
+    _wide = max(10, int(len(got) * 0.5))
+    shop_lines = {l for l, c in line_use.items() if c >= _wide and len(l) >= 8}
 
     outdir.mkdir(parents=True, exist_ok=True)
     n_img = n_txt = 0

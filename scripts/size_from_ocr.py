@@ -401,6 +401,65 @@ def parse_pair_rows(lines: list[str]) -> tuple[list[str] | None, dict[str, list[
     return (names if all(names) and len(set(names)) == len(names) else None), cols
 
 
+_GRID_NUM = re.compile(r"^\s*\d{1,3}(?:[.,]\d+)?(?:\s*[~\-]\s*\d{1,3}(?:[.,]\d+)?)?\s*(?:cm|CM)?\s*$")
+_GRID_NAME = re.compile(r"^\s*(?:\(?\s*(?:cm|CM|inch|in)\s*\)?|[A-Za-z0-9가-힣]{1,8})\s*$")
+
+
+def parse_grid_rows(lines: list[str]) -> tuple[list[str] | None, dict[str, list[float]]] | None:
+    """「라벨 | 값 | 값 | 값」 꼴로 한 줄에 모아 둔 표.
+
+    fetch_sizeguide.text_in 이 `<table>` 을 줄마다 모아 주면 사이즈가이드 창의 표가 이 꼴로
+    온다(2026-09-21):
+
+        S | M | L | XL
+        A 기장 / 앞-뒤 | 65.5~70 | 67.5~72 | 69.5~74 | 71.5~76
+        B 어깨단면 | 49 | 51 | 53 | 55
+        C 팔기장 | 63.5 | 64 | 65 | 66
+
+    parse_pair_rows 와 **눕는 방향이 반대**다 — 거기서는 한 줄이 한 사이즈인데 여기서는
+    한 줄이 한 라벨이고 열이 사이즈다. 크롤러가 상품 페이지에서 읽어 오는 size_table 과
+    같은 모양이라, 값만 뽑아 주면 뒤는 기존 길을 그대로 탄다.
+
+    **인치 환산표를 안 먹는 것이 이 갈래의 목숨줄이다.** 같은 창에 카페24 공용 표가 함께
+    실리는데 그것도 생김새가 똑같다(「가슴 | 22 | 23 | 24 …」 — 인치다). 막는 것은 둘이다:
+    ① 부르는 쪽(fetch_sizeguide)이 매장 안에서 열 벌 넘게 똑같은 줄을 미리 지운다 —
+       공용표는 글자까지 같아서 거기서 걸린다. ② 여기서는 canon_label 을 통과하는 줄만
+       받는다 — 공용표의 KR·US·JP·UK 행은 치수 라벨이 아니라 그대로 떨어진다.
+    그래도 남는 것이 있을 수 있으니 값의 개수가 줄마다 같기를 요구한다.
+
+    사이즈 이름은 **바로 위의 숫자 아닌 줄**에서 빌린다(위 보기의 「S | M | L | XL」).
+    개수가 안 맞으면 이름 없이 값만 돌려준다 — 없는 이름을 지어내지 않는다.
+    """
+    rows: list[tuple[str, list[str]]] = []
+    head: list[str] | None = None
+    for ln in lines:
+        cells = [c.strip() for c in ln.split("|")]
+        if len(cells) < 3:
+            continue
+        if all(_GRID_NUM.match(c) for c in cells[1:]) and canon_label(cells[0]):
+            rows.append((canon_label(cells[0]), cells[1:]))
+            continue
+        # 값이 하나도 없는 줄은 사이즈 이름 줄 후보다 — 마지막 것을 쓴다.
+        if not rows and all(_GRID_NAME.match(c) and not _GRID_NUM.match(c) for c in cells):
+            head = cells
+    if len(rows) < 2:
+        return None
+    width = Counter(len(v) for _, v in rows).most_common(1)[0][0]
+    rows = [r for r in rows if len(r[1]) == width]
+    if len(rows) < 2 or width < 2:
+        return None
+    cols: dict[str, list[float]] = {}
+    for lab, vals in rows:
+        if lab in cols:
+            continue
+        cols[lab] = [fix_value(lab, v) for v in vals]
+    cols = {c: v for c, v in cols.items() if any(x is not None for x in v)}
+    if len(cols) < 2:
+        return None
+    names = head if head and len(head) == width and len(set(head)) == width else None
+    return names, cols
+
+
 def parse_named_pairs(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] | None:
     """한 줄 안에서 「이름 값 이름 값」이 되풀이되는 표.
 
@@ -2832,6 +2891,11 @@ def main():
                 # parse_pair_rows 는 라벨 뒤에 수가 붙어야 받으므로 그 표를 구조적으로 거른다.
                 sgl = [x.strip() for x in sg.splitlines() if x.strip()]
                 pr = parse_pair_rows(sgl)
+                # 표가 반대로 누운 매장은 parse_grid_rows 가 읽는다(「라벨 | 값 | 값」).
+                # 부르는 쪽이 매장 공용 줄을 이미 지웠고 이 갈래도 canon_label 을 통과하는
+                # 줄만 받으므로, 카페24 인치 환산표는 두 겹으로 걸린다.
+                if not pr:
+                    pr = parse_grid_rows(sgl)
                 if pr:
                     s3 = clean_ocr(pr[1])
                     if len(s3) > len(sizes):
