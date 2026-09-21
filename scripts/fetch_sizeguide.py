@@ -247,8 +247,21 @@ def fetch_brand(brand: str, recs: list[dict], delay: float, workers: int, limit:
 
     outdir.mkdir(parents=True, exist_ok=True)
     n_img = n_txt = 0
-    # force 로 전부 다시 받을 때는 덧붙이지 말고 새로 쓴다 — 안 그러면 같은 상품이 두 줄이 된다.
-    with dst.open("w" if force else "a", encoding="utf-8") as fh:
+    # force 로 다시 받을 때는 **이미 있던 기록 위에 얹는다.** 예전에는 파일을 새로 썼는데,
+    # 대상이 「치수 없는 옷」으로 좁혀져 있으면 이번에 안 훑은 상품이 통째로 사라진다 —
+    # 2026-09-21 전 매장 재수집에서 기록 3,177 → 980, size_text 2,795 → 427 로 줄었고
+    # 옛 판에서 손으로 되살려야 했다. 같은 상품이 두 줄 되는 것은 dict 로 막는다.
+    keep_old: dict[int, dict] = {}
+    if force and dst.exists():
+        for l in dst.read_text(encoding="utf-8").splitlines():
+            if l.strip():
+                try:
+                    o = json.loads(l)
+                except Exception:
+                    continue
+                keep_old[o["product_no"]] = o
+    fresh: dict[int, dict] = {}
+    with dst.open("a", encoding="utf-8") as fh:
         for d, urls, lines in got:
             keep = [u for u in urls if u not in shop_wide]
             mine = [l for l in lines if l not in shop_lines]
@@ -261,7 +274,22 @@ def fetch_brand(brand: str, recs: list[dict], delay: float, workers: int, limit:
             if SIZEY.search(txt):
                 n_txt += 1
                 rec["size_text"] = txt[:4000]
-            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            if force:
+                fresh[d["product_no"]] = rec
+            else:
+                fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    if force:
+        # 이번 판에 글이 나온 기록이 이긴다 — 새 뽑기가 표를 한 줄로 살려 오므로 늘 낫다.
+        merged = dict(keep_old)
+        for no, rec in fresh.items():
+            o = merged.get(no)
+            if o is None or rec.get("size_text") or not o.get("size_text"):
+                merged[no] = rec
+        with dst.open("w", encoding="utf-8") as fh:
+            for no in sorted(merged):
+                fh.write(json.dumps(merged[no], ensure_ascii=False) + "\n")
+        print(f"  [{brand}] 옛 기록 {len(keep_old):,} + 이번 판 {len(fresh):,} → {len(merged):,}",
+              file=sys.stderr)
     return {"brand": brand, "products": len(todo), "with_img": len(got),
             "images": n_img, "texts": n_txt, "shop_wide": len(shop_wide)}
 
