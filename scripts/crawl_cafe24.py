@@ -3885,6 +3885,12 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
                 item, acc = fix["품목"], fix["품목"]
             if not item and code == "tops" and re.search(r"스웻|스웨트|sweat", head_name, re.I):
                 item = "맨투맨"   # 「Toy Sweat」처럼 품목 단어 없이 스웻만 적은 상의 — 비니·백팩은 code 가 다르니 안 걸린다
+            # 이름에 **부츠컷밖에 없는** 바지가 있다 — 「LOOSE BOOTCUT」·「에센셜 부츠컷 블랙진」.
+            # SHOE_FALSE 가 그 낱말을 지우고 나면 고를 것이 남지 않아 품목이 빈칸이 됐고,
+            # 그래서 앱의 핏 묶음이 안 잡혔다(앱 제보 2026-09-21, 17벌). 부츠컷은 그 자체로
+            # 바지를 가리키니 갈래가 하의일 때만 채운다 — 청바지 낱말이 있으면 데님이다.
+            if not item and code == "bottoms" and SHOE_FALSE.search(head_name):
+                item = "데님" if re.search(r"데님|denim|jean|진(?![가-힣])", head_name, re.I) else "팬츠"
             if int(d.get("price") or 0) >= PLACEHOLDER_PRICE:
                 dropped_junk += 1     # 자리표시 값 — 룩북·이벤트 페이지다
                 continue

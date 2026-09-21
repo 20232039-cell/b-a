@@ -286,6 +286,16 @@ _SIZE_HEAD = re.compile(r"^\s*(?:총장|기장|어깨|가슴|허리|엉덩이|�
 _INLINE_HEAD = re.compile(
     r"^(?:feature|features|detail|details|description|info|information|fabric|"
     r"material|composition)\s*[:：]?\s+(?=.{10,})", re.I)
+# 다 고른 뒤 **첫 줄에서만** 떼는 이름표. 뒤에 무엇이 남든(짧아도, 대괄호여도) 뗀다 —
+# 「INFO [FABRIC]」·「DETAIL HOOD」처럼 짧은 줄이 위 잣대의 열 자 조건에 걸려 남았다.
+# 「INFO [FABRIC]」처럼 이름표 뒤에 또 이름표가 대괄호로 오는 매장이 있다(noirer).
+# 붙어 있는 만큼 되풀이해 뗀다. 보이지 않는 글자(BOM·제로폭)도 같이 지운다 —
+# 그것 때문에 「INFO」가 이름표로 안 읽히고 한 줄로 남던 것이 있었다.
+_HEAD_LABEL = re.compile(
+    r"^[\s\ufeff\u200b\[(]*(?:feature|features|detail|details|description|info|information)"
+    r"[\s\ufeff\u200b\])]*[:：]?[\s\ufeff\u200b]*", re.I)
+# 이름표를 뗀 자리에 남는 대괄호 꼬리표 하나 — 「[FABRIC]」·「[COLOR]」.
+_HEAD_BRACKET = re.compile(r"^\[[A-Za-z][A-Za-z\s/&-]{1,18}\]\s*")
 
 
 def clean(text: str) -> str:
@@ -337,6 +347,23 @@ def clean(text: str) -> str:
         # 앱이 화면에서 좁혀 깎기로 했다(퍼센트 하나 · 99 이상일 때만).
         if not any(mat in p for p in out):
             out.insert(0, mat)
+    # 첫 줄 앞머리의 영문 이름표는 **맨 마지막에** 뗀다. 위쪽 고리에서 떼면 남은 조각이
+    # 뒤의 거르개(says_clothes·길이)에 걸려 통째로 사라진다 — 「Detail 평균 모자보다」에서
+    # 라벨만 떼자 「평균 모자보다」가 버려져 다음 줄과 이어지던 문장이 끊겼다(2026-09-21 실측).
+    # 여기서는 이미 고를 것을 다 고른 뒤라 라벨만 떨어지고 글은 그대로 남는다.
+    # 앱이 화면에서 같은 일을 하고 있었다 — 규칙이 두 군데로 갈라지지 않게 이쪽으로 모은다
+    # (앱 제보 2026-09-21: 표본 12,739편 중 6.8%가 INFO·DETAIL·FEATURE 로 시작).
+    if out:
+        head = out[0]
+        for _ in range(3):
+            h2 = _HEAD_BRACKET.sub("", _HEAD_LABEL.sub("", head))
+            if h2 == head:
+                break
+            head = h2
+        head = head.strip(" :：|·-\ufeff\u200b")
+        # 라벨을 떼고 아무것도 안 남으면 그 줄은 이름표뿐이다 — 하나뿐이어도 버린다
+        # (「INFO [FABRIC]」만 있는 설명 아홉 편이 그래서 남아 있었다).
+        out = [head] + out[1:] if head else out[1:]
     # 조각을 빈칸으로 이어 붙이면 화면에 한 덩이로 주르륵 흐른다(사람 지적 2026-09-20).
     # 자른 경계가 곧 읽는 사람이 쉬는 자리다 — 줄로 넘겨 앱이 그리게 둔다.
     return "\n".join(out)[:2000]
