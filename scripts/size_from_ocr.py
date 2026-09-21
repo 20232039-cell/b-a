@@ -513,7 +513,8 @@ def _row_cells(row: str) -> list[str]:
     # 두 칸이 아니다. 칸 구분으로 보면 네 칸짜리 표가 여섯 칸이 되어 통째로 버려지고,
     # 「36:5」는 36 으로 읽혀 값이 조용히 틀어졌다(2026-09-05). 뒤에 빈칸이 오면 구분이다.
     row = re.sub(r"(?<=\d):(?=\d)", ".", row)
-    r = re.sub(r"[|ㅣ:;=_]", " ", row).strip()
+    r = re.sub(r"[|ㅣ:;=]", " ", row).strip()
+    r = re.sub(r"(?<!\S)_+(?!\S)", "-", r)
     r = re.sub(r"(?<=\d)\s*(?:cm|cem|c[^\w\s]m|em|om|¢m|crn)\b", " ", r, flags=re.I)
     # 한 칸에 두 수를 붙여 적는 표 — dnsr 의 레이어드 소매는 「35/19」(겉/안)다. 앞엣것이 값이다.
     # 붙여 쓴 것만 접는다 — 「66 / 34~44」처럼 띄어 쓴 슬래시는 칸 구분이라 접으면 표가 무너진다.
@@ -635,7 +636,12 @@ def parse_slots(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] | 
             # 두 칸이 아니다. 칸 구분으로 보면 네 칸짜리 표가 여섯 칸이 되어 통째로 버려지고,
             # 「36:5」는 36 으로 읽혀 값이 조용히 틀어졌다(2026-09-05). 뒤에 빈칸이 오면 구분이다.
             row = re.sub(r"(?<=\d):(?=\d)", ".", row)
-            r = re.sub(r"[|ㅣ:;=_]", " ", row).strip()
+            # 「_」는 지우지 않는다 — **빈 칸 표시**다. 9999archive 는 래글런이라 어깨 칸을
+            # 비우고 「2 63 60 _ 83」으로 적는데, 구분자로 보고 지우면 값이 셋만 남아
+            # 라벨 넷에 한 칸씩 밀려 붙었다(총장 63 이 가슴이 되고 가슴 60 이 어깨가 됐다,
+            # 2026-09-21 그림 대조). 「-」와 같은 자리에 두면 자리가 그대로 산다.
+            r = re.sub(r"[|ㅣ:;=]", " ", row).strip()
+            r = re.sub(r"(?<!\S)_+(?!\S)", "-", r)
             r = re.sub(r"(?<=\d)\s*(?:cm|cem|em|om|crn)\b", " ", r, flags=re.I)
             tok = re.sub(r"\s+", " ", r).split()
             # 머리줄 첫 칸이 사이즈 이름 칸의 제목일 때가 있다(「Unit(cm) 연령 신장 총장 …」)
@@ -643,7 +649,15 @@ def parse_slots(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] | 
             if len(tok) == len(slots) + 1:
                 nm, cells = tok[0], tok[1:]
                 cslots = slots
-            elif len(tok) == len(slots):
+            elif len(tok) == len(slots) and slots[0] is None:
+                # **머리줄 첫 칸이 아는 라벨이면 이름 칸 제목일 리 없다.** 그 갈래는 첫
+                # 자리를 버리고 한 칸씩 당겨 짝짓는데, 머리줄이 깨져 토막만 하나 늘어난
+                # 표에서 수가 우연히 맞아떨어지면 값이 통째로 한 칸 밀린다 — ronron 은
+                # 동그라미 번호 ①②③이 「@O378S · OFS OFF 62」 같은 부스러기로 읽혀
+                # 「어깨 ? 밑단 ? ? ? ? 총기장」 8토막이 되고, 값 줄도 「free × 56 47 71
+                # 20 X 60」 8토막이라 수가 맞는다. 그 바람에 어깨가 버려지고 밑단이
+                # 가슴 값 56 을 먹었다(진짜 밑단은 47, 2026-09-21 그림 대조).
+                # 첫 칸이 못 알아본 칸일 때만 제목으로 본다.
                 nm, cells = tok[0], tok[1:]
                 cslots = slots[1:]
             else:
@@ -776,7 +790,9 @@ def parse_matrix(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] |
             # 두 칸이 아니다. 칸 구분으로 보면 네 칸짜리 표가 여섯 칸이 되어 통째로 버려지고,
             # 「36:5」는 36 으로 읽혀 값이 조용히 틀어졌다(2026-09-05). 뒤에 빈칸이 오면 구분이다.
             row = re.sub(r"(?<=\d):(?=\d)", ".", row)
-            r = re.sub(r"[|ㅣ:;=_]", " ", row).strip()
+            # 「_」는 빈 칸 표시다 — 지우면 칸이 밀린다(parse_slots 의 같은 자리 주석 참고).
+            r = re.sub(r"[|ㅣ:;=]", " ", row).strip()
+            r = re.sub(r"(?<!\S)_+(?!\S)", "-", r)
             # OCR 이 cm 을 em·cem·c¢m·om 으로 흘려 쓴다(easy-no-easy) — 숫자 뒤에 붙은 것만 지운다
             r = re.sub(r"(?<=\d)\s*(?:cm|cem|c[^\w\s]m|em|om|¢m|crn)\b", " ", r, flags=re.I)
             r = re.sub(r"(?<!\S)(\d[\d.,]*)/(\d[\d.,]*)(?!\S)", r"\1", r)   # 「35/19」= 겉/안
