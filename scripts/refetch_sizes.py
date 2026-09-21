@@ -196,8 +196,12 @@ def refetch(http: cc.PoliteSession, shop: cc.Shop, only_missing: bool, log, fiel
                 prev = dict(d)          # 덮어쓰기 전 옛 줄 — carry_over 가 이걸 본다
                 # options 도 받아 적는다 — 사이즈 표에 이름을 붙이는 유일한 출처인데
                 # 이 목록에 없어서, 수집기를 고쳐도 창고에는 영원히 안 들어왔다(2026-09-07).
+                # gallery 도 받아 적는다 — 수집기가 갤러리에서 남의 상품 사진을 걷어 내게
+                # 고쳤는데(b-a 173d670), 이 목록에 없어서 창고에는 영영 안 들어왔다.
+                # 빈 값은 안 받으므로(아래 조건) 새로 읽어 한 장도 못 얻으면 옛것이 남는다 —
+                # 줄어드는 쪽으로만 바뀌니 안전하다(2026-09-21 사람 제보로 고침).
                 for key in ("description", "description_source", "detail_text", "spec", "detail_images",
-                            "size_table", "soldout", "price", "options", "soldout_options"):
+                            "gallery", "size_table", "soldout", "price", "options", "soldout_options"):
                     if nd.get(key) not in (None, "", [], {}):
                         d[key] = nd[key]
                 if not nd.get("price"):
