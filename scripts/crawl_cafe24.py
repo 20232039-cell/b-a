@@ -2945,11 +2945,45 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
         return re.sub(r"/web/product/(extra/)?(small|medium|tiny)/",
                       lambda mm: f"/web/product/{mm.group(1) or ''}big/", u)
 
+    # 갤러리는 **상품 사진 칸 안에서만** 줍는다. 페이지 전체를 훑으면 아래쪽 추천 레일
+    # (관련 상품·함께 본 상품·최근 본 상품)의 남의 상품 썸네일이 갤러리 꼬리에 붙는다 —
+    # 사람 제보 2026-09-21: annex-archive 「DISTRESSED MIX KNIT ZIP-UP」 갤러리 끝에
+    # 같은 매장의 다른 옷(UNBOUND CARPENTER PANTS) 사진 두 장이 들어가 있었다.
+    # 그 둘은 `span.thumb-box > div.swiper-container` 안에 있었고, 진짜 갤러리는
+    # 카페24 표준인 `.xans-product-image` / `.xans-product-addimage` 안에 있었다.
+    #
+    # 스킨이 그 표준을 안 쓰는 매장도 있으므로(9999archive 는 갤러리가 전부
+    # `/product/medium/` 이다), **칸에서 한 장도 못 얻었을 때만** 예전처럼 페이지를
+    # 통째로 훑는다. 그 되돌림 길에서는 레일로 보이는 조상을 가진 그림을 건너뛴다.
+    IMGSEL = ('img[src*="/web/product/extra/"], img[src*="/web/product/medium/"],'
+              ' img[src*="/web/product/small/"]')
+    RAIL = re.compile(r"relat|recommend|recent|together|rolling|xans-product-list", re.I)
+
+    def _in_rail(tag) -> bool:
+        p = tag.parent
+        for _ in range(8):
+            if p is None or not getattr(p, "get", None):
+                break
+            mark = " ".join(p.get("class") or []) + " " + (p.get("id") or "")
+            if RAIL.search(mark):
+                return True
+            p = p.parent
+        return False
+
     gallery = []
-    for img in soup.select('img[src*="/web/product/extra/"], img[src*="/web/product/medium/"], img[src*="/web/product/small/"]'):
-        src = _big(_fix_url(img.get("src", ""), shop.base))
-        if src and src != image and src not in gallery:
-            gallery.append(src)
+    area = soup.select(".xans-product-image, .xans-product-addimage")
+    for box in area:
+        for img in box.select(IMGSEL):
+            src = _big(_fix_url(img.get("src", ""), shop.base))
+            if src and src != image and src not in gallery:
+                gallery.append(src)
+    if not gallery:
+        for img in soup.select(IMGSEL):
+            if _in_rail(img):
+                continue
+            src = _big(_fix_url(img.get("src", ""), shop.base))
+            if src and src != image and src not in gallery:
+                gallery.append(src)
     # img 태그가 아니라 스크립트 안에 사진 주소를 박아 두는 스킨이 있다 — coor 는 판매중 상품
     # 페이지에도 선택자로 0장, 글에서 정규식으로 5장이 나왔다(932벌 중 781벌이 그래서 빈손,
     # 오래된 상품일수록 심하다). img 태그로 못 얻었을 때만 글에서 줍는다(2026-09-04).
