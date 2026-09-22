@@ -1936,10 +1936,31 @@ _COLOR_EN = ("black|white|ivory|beige|navy|blue|grey|gray|charcoal|khaki|olive|b
              "green|melange|sand|stone|mocha|camel|burgundy|purple|yellow|orange|silver|gold|wine|"
              "indigo|taupe|ecru|sage|salmon|lime|magenta|rose|onyx|tobacco|chocolate|mint|lavender|"
              "peach|butter|oatmeal|mustard|cobalt|turquoise|latte|apricot|graphite|violet|maroon")
+# 색 이름 앞에 붙는 꾸밈머리. 아래 _COLOR 가 쓰므로 그보다 **먼저** 서야 한다
+# (꼬리에 남은 말을 떼는 데에도 그대로 쓴다 — color_base 끝부분).
+COLOR_HEAD = {
+    "ash", "애쉬", "dusty", "더스티", "dust", "더스트", "smoke", "스모크", "mid", "미드",
+    "sky", "forest", "off", "오프", "moss", "french", "프렌치", "greyish", "misty", "미스트",
+    "warm", "mix", "wood", "blossom", "baby", "크로우", "sax", "slate", "drab", "드랩",
+    "coral", "oat", "oak", "indi", "ocean", "dove", "midnight", "pure", "fog", "steel",
+    "oyster", "soap", "royal", "로열", "milk", "jade", "powder", "bean",
+}
+
 # 낱말 경계는 꾸밈말 「앞」에 둔다 — 뒤에 두면 「LIGHTPINK」의 pink 가 t 뒤라서 막힌다.
+#
+# 영문은 색 낱말을 **붙여 쓰는** 꼴이 흔한데(skyblue · greybeige · offwhite) 한 낱말만
+# 보면 앞뒤 경계에 걸려 하나도 안 떨어졌다. 그래서 같은 옷의 형제 가운데 하나만 묶음에서
+# 빠졌다 — depound 「… hairband - brown/pink」는 cg=4006 인데 「- skyblue」만 없었다
+# (2026-09-22 전수: 형제 둘 이상 22,184묶음 중 124묶음이 이 꼴).
+# 고침 둘: ① 색 낱말이 이어 붙은 것을 한 덩이로 본다 `(?:색)+` (greybeige = grey+beige)
+#          ② 꾸밈머리(sky · off · royal …)가 **붙어** 와도 받는다. COLOR_HEAD 는 색을 뗀
+#             뒤 꼬리에만 쓰여서 skyblue 처럼 붙은 것은 거기까지 가지도 못했다.
+# 「blackberry」·「greenhouse」는 여전히 안 걸린다 — berry·house 가 색이 아니라 `(?![a-z])` 가 막는다.
+_HEAD_EN = "|".join(sorted((h for h in COLOR_HEAD if h.isascii() and h.isalpha()),
+                           key=len, reverse=True))
 _COLOR = re.compile(
     rf"[\s_\-\(\[/]*(?:(?:{_MOD_KO})?(?:{_COLOR_KO})"
-    rf"|(?<![a-z])(?:{_MOD_EN})?(?:{_COLOR_EN})(?![a-z]))[\s_\-\)\]/]*",
+    rf"|(?<![a-z])(?:{_MOD_EN})?(?:{_HEAD_EN})?(?:{_COLOR_EN})+(?![a-z]))[\s_\-\)\]/]*",
     re.I)
 
 # 색 목록을 여기에 또 적어 두면 수집기와 어긋난다. 실제로 어긋났다 — 오늘 수집기에 넣은
@@ -1981,13 +2002,6 @@ _STYLE_CODE = re.compile(r"(?:dv\.?lot|lot|style|art|no)\.?\s*#?\s*(\d{2,5})", r
 #
 # 사람이 「아님」으로 고른 것도 적어 둔다 — 다음에 또 후보로 올라오지 않게:
 #     every(라인 이름) · mini(크기) · restock(재입고) · dot(무늬) · classic · organ · squid
-COLOR_HEAD = {
-    "ash", "애쉬", "dusty", "더스티", "dust", "더스트", "smoke", "스모크", "mid", "미드",
-    "sky", "forest", "off", "오프", "moss", "french", "프렌치", "greyish", "misty", "미스트",
-    "warm", "mix", "wood", "blossom", "baby", "크로우", "sax", "slate", "drab", "드랩",
-    "coral", "oat", "oak", "indi", "ocean", "dove", "midnight", "pure", "fog", "steel",
-    "oyster", "soap", "royal", "로열", "milk", "jade", "powder", "bean",
-}
 
 
 
