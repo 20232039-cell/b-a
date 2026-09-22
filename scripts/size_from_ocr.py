@@ -772,7 +772,18 @@ def parse_matrix(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] |
             alt = parse_slots(lines[i:])
             if alt and len(alt[1]) >= 2:
                 _slots_ok = True
-                sc = (len(alt[0]), len(alt[1]))
+                # 아래 판정은 `score = (라벨 수, 사이즈 수)` 로 잰다. 자리 후보를
+                # (사이즈 수, 라벨 수)로 넣어 두면 **앞뒤가 뒤집혀** 견줄 수가 없다.
+                # 사이즈가 하나뿐인 표에서 자리 후보 (1,5) 대 행렬 후보 (5,1) 이 되어
+                # 행렬이 늘 이겼다 — 자리 갈래에 물어보나 마나였다.
+                #   siyazu 2652  머리줄 「size(cm) sa 어깨 가슴 소매기장 소매통 암홀」
+                #                값줄  「One 60.5 48 55 575 26.5 30」
+                #                sa 를 못 알아봐 라벨 5·값 6 이 되어 어깨가 sa 의 값 60.5 를
+                #                먹고 소매통이 57.5(가슴 48 보다 넓다)가 됐다.
+                # 전수 118,844벌로 재니 표를 잃는 상품 0 · 얻는 상품 9 · 값이 바뀌는 상품 936,
+                # 그 936벌에서 「소매통>가슴·암홀>가슴」 같은 말 안 되는 관계가 51벌 → 4벌로
+                # 줄었다(2026-09-22).
+                sc = (len(alt[1]), len(alt[0]))
                 if sc >= best_score:
                     best, best_score = alt, sc
         if _clash and not _slots_ok:
