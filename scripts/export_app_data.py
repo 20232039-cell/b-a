@@ -277,6 +277,13 @@ def main() -> int:
     out = Path(args.out)
 
     rows = list(csv.DictReader(open(DATA / "products_full.csv", encoding="utf-8-sig")))
+    # 걷고 있지만 아직 앱에 안 내보내는 매장(platforms.APP_HOLD) — 설명·소재·실측이 덜 찬 채로
+    # 앱에 서면 「빈 칸 많은 매장」으로 먼저 보인다. 채우고 나서 목록에서 지운다.
+    import platforms
+    held = sum(1 for r in rows if r["brand_slug"] in platforms.APP_HOLD)
+    rows = [r for r in rows if r["brand_slug"] not in platforms.APP_HOLD]
+    if held:
+        print(f"아직 안 내보내는 매장 {sorted(platforms.APP_HOLD)} — {held}벌 뺌")
     tags = json.loads((DATA / "product_tags_full.json").read_text(encoding="utf-8"))
     sizes = json.loads((DATA / "product_sizes.json").read_text(encoding="utf-8"))
     crawl = {}

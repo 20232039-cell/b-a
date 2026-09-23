@@ -18,3 +18,10 @@ SHOPIFY: dict[str, str] = {
 }
 
 NOT_CAFE24: set[str] = set(SHOPIFY)
+
+# 걷기는 하지만 앱에는 아직 안 내보내는 매장 — export_app_data 가 뺀다.
+# 렉토·Hyein Seo·PAF 는 첫 판에서 값·사진·품절은 찼지만 설명·소재·실측이 덜 찼다: 렉토는 진짜 상품
+# 설명이 상품 페이지의 meta description 에만, PAF 는 소재·실측표가 상품 페이지의 접이식 탭
+# (메타필드)에만 있어 목록 API(products.json)로는 안 온다(2026-09-23 사람: 「사이즈, 상세설명,
+# 스펙 수집이 덜 된 거 같은데」). 상품 페이지까지 읽고 나면 지운다.
+APP_HOLD: set[str] = {"recto", "hyein-seo", "post-archive-faction"}
