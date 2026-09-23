@@ -206,6 +206,9 @@ def enrich(d: dict, old: dict | None, updated_at: str, http: cc.PoliteSession) -
     for h, b in ex.get("tabs") or []:
         if not re.search(r"(?i)size|사이즈|실측", h):
             continue
+        # 머리줄에 「Size(」가 없는 꼴(「Length/Chest/Sleeve/Shoulder / S: 62.5cm/52cm/…」)은 from_ocr 가
+        # 사이즈 이름 줄로 보지 않는다 — 감싸 주면 읽힌다(PAF 옷 66벌이 이 꼴이었다).
+        b = re.sub(r"^\s*([A-Za-z][A-Za-z ]*(?:/\s*[A-Za-z][A-Za-z ]*)+)\s*$", r"Size(\1)", b, count=1, flags=re.M)
         names, cols = size_from_ocr.from_ocr(b)
         n = max((len(v) for v in cols.values()), default=0)
         if len(cols) >= 2 and n > width:
