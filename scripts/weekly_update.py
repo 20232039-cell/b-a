@@ -330,10 +330,9 @@ def main():
     other = [s for s in slugs if s in platforms.NOT_CAFE24]
     slugs = [s for s in slugs if s not in platforms.NOT_CAFE24]
     if other:
-        import crawl_shopify
         http_s = cc.PoliteSession(delay=max(args.delay, 2.0))
         for s in other:
-            crawl_shopify.crawl_one(http_s, s)
+            platforms.crawl_other(http_s, s)
     shops = []
     for s in slugs:
         b = brands.get(s)

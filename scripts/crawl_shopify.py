@@ -36,6 +36,8 @@ CRAWL_DIR = cc.CRAWL_DIR
 PAGE_LIMIT = 250          # Shopify 가 한 쪽에 주는 최대
 GUARD_RATIO = 0.5         # weekly_update 와 같다
 DELIST_AFTER = 2          # 연속 이만큼 목록에 없으면 delisted
+# 수집기가 매 판 새로 정하는 칸 중 「없음」이 뜻이 있는 것 — merge_rows 가 지난 판에서 이어받지 않는다
+OWN_KEYS = {"soldout_unknown"}
 # 상품 페이지 간격(초). 목록은 매장당 몇 번이지만 페이지는 수백 번이라 더 천천히 — 봇 이름으로
 # 연 상품 페이지에 매장이 429 를 준 적이 있다(get_patient 주석).
 PAGE_DELAY = 4.0
@@ -229,40 +231,35 @@ def load_prev(slug: str) -> dict[int, dict]:
     return rows
 
 
-def crawl_one(http: cc.PoliteSession, slug: str, log=print) -> dict:
-    base = SHOPIFY[slug]
-    now_ts = datetime.now(cc.KST).strftime("%Y-%m-%dT%H:%M:%S")
+def merge_rows(slug: str, prev: dict[int, dict], got: list[dict], now_ts: str, rep: dict, log=print) -> dict:
+    """이번 판에 받은 줄(got)을 지난 판(prev)에 합쳐 쓴다 — 식스샵 수집기도 이것을 쓴다.
+
+    가드레일 · 첫 등장 · 품절/재입고 · 값 자국(cc.carry_over) · 연속 두 판 없으면 delisted.
+    판단이 매장 종류마다 갈리지 않게 한 곳에 둔다.
+    """
     today = now_ts[:10]
-    rep = {"slug": slug, "listed": 0, "new": 0, "soldout": 0, "restock": 0, "delisted": 0, "guard": ""}
-    got = fetch_all(http, base, log)
-    prev = load_prev(slug)
-    if got is None:
-        rep["guard"] = "목록 받기 실패"
-        return rep
-    rep["listed"] = len(got)
     active = {no for no, d in prev.items() if not d.get("soldout") and not d.get("delisted")}
-    guard = len(active) > 20 and len(got) < GUARD_RATIO * len(active)
-    if guard:
+    if len(active) > 20 and len(got) < GUARD_RATIO * len(active):
         rep["guard"] = f"목록 {len(got)} < 판매중 {len(active)}×{GUARD_RATIO} — 상태 변경 보류"
         log(f"[{slug}] 가드레일: {rep['guard']}")
         return rep
     rows = dict(prev)
     seen: set[int] = set()
-    page_http = cc.PoliteSession(delay=max(http.delay, PAGE_DELAY)) if slug in SHOPIFY_PAGES else None
-    for p in got:
-        d = to_row(p, slug, base, now_ts)
+    for d in got:
         no = d["product_no"]
         seen.add(no)
         old = prev.get(no)
-        if page_http:
-            enrich(d, old, p.get("updated_at") or "", page_http)
         if old:
             for k in ("first_seen", "soldout_since"):
                 if k in old:
                     d[k] = old[k]
-            # 다른 단계가 붙여 둔 것(상세 보정 시각 등)은 잃지 않는다
+            # 다른 단계가 붙여 둔 것(상세 보정 시각 등)은 잃지 않는다. 다만 수집기가 **없어서 안 쓴**
+            # 칸(OWN_KEYS)은 이어받지 않는다 — 품절 표시를 찾은 식스샵 상품에 지난 판의
+            # soldout_unknown 이 남았다(샌드박스 두 번째 판, 2026-09-23). 정가는 여기서 다루지 않는다 —
+            # cc.carry_over 가 「한 번 본 정가는 잇고, 파는 값이 정가 이상이면 뗀다」로 따로 판단한다.
             for k, v in old.items():
-                d.setdefault(k, v)
+                if k not in OWN_KEYS:
+                    d.setdefault(k, v)
             if not old.get("soldout") and d["soldout"]:
                 d["soldout_since"] = today; rep["soldout"] += 1
             elif old.get("soldout") and not d["soldout"]:
@@ -292,6 +289,32 @@ def crawl_one(http: cc.PoliteSession, slug: str, log=print) -> dict:
     tmp.replace(out)
     log(f"[{slug}] 목록 {rep['listed']} · 신상 {rep['new']} · 품절 {rep['soldout']} · 재입고 {rep['restock']} · 삭제 {rep['delisted']}")
     return rep
+
+
+def crawl_one(http: cc.PoliteSession, slug: str, log=print) -> dict:
+    base = SHOPIFY[slug]
+    now_ts = datetime.now(cc.KST).strftime("%Y-%m-%dT%H:%M:%S")
+    rep = {"slug": slug, "listed": 0, "new": 0, "soldout": 0, "restock": 0, "delisted": 0, "guard": ""}
+    got = fetch_all(http, base, log)
+    prev = load_prev(slug)
+    if got is None:
+        rep["guard"] = "목록 받기 실패"
+        return rep
+    rep["listed"] = len(got)
+    active = {no for no, d in prev.items() if not d.get("soldout") and not d.get("delisted")}
+    if len(active) > 20 and len(got) < GUARD_RATIO * len(active):
+        # 상품 페이지를 열기 전에 멈춘다 — 목록이 반쪽이면 수백 쪽을 열 까닭이 없다
+        rep["guard"] = f"목록 {len(got)} < 판매중 {len(active)}×{GUARD_RATIO} — 상태 변경 보류"
+        log(f"[{slug}] 가드레일: {rep['guard']}")
+        return rep
+    page_http = cc.PoliteSession(delay=max(http.delay, PAGE_DELAY)) if slug in SHOPIFY_PAGES else None
+    rows = []
+    for p in got:
+        d = to_row(p, slug, base, now_ts)
+        if page_http:
+            enrich(d, prev.get(d["product_no"]), p.get("updated_at") or "", page_http)
+        rows.append(d)
+    return merge_rows(slug, prev, rows, now_ts, rep, log)
 
 
 def main() -> None:

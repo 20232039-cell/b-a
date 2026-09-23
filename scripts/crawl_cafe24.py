@@ -908,6 +908,11 @@ NOISE_CATEGORY = ["sale", "세일", "new", "신상", "best", "베스트", "all",
                   "project", "week", "event", "이벤트", "off", "drop", "season", "must", "pick", "clearance", "time", "outlet"]
 
 
+# 순위 목록 칸 — 「TOP20」의 top 은 상의가 아니다. 넘버링(주얼리)의 목걸이·반지 20벌이 이 칸 이름 때문에
+# 상의가 됐다(샌드박스, 2026-09-23). 「tops」 칸과 부딪치지 않게 숫자가 붙은 것만 본다.
+RANK_CATEGORY = re.compile(r"^\s*top\s*\d+\s*$|^\s*(?:hot|weekly|monthly)?\s*(?:ranking|랭킹)\s*$", re.I)
+
+
 # 이름 폴백용 어휘 — match_head 의 캐시는 dict 의 id 로 잡으므로 미리 한 번만 만들어 둔다
 CATEGORY_NAME_VOCAB = {code: keys for code, keys in CATEGORY_NAME_RULES}
 
@@ -1399,7 +1404,7 @@ def classify_category(name: str, category_names: list[str], description: str = "
         return "other"
     for cat in category_names:
         low = cat.lower()
-        if any(n in low for n in NOISE_CATEGORY):
+        if any(n in low for n in NOISE_CATEGORY) or RANK_CATEGORY.match(low):
             continue
         for code, keys in CATEGORY_NAME_RULES:
             if any(k in low for k in keys):
@@ -2127,6 +2132,21 @@ def load_categories(http: PoliteSession, shop: Shop, soup: BeautifulSoup, html_t
     # 홈에 걸린 상품 링크도 후보다
     for no, href in harvest_product_links(html_text, shop):
         shop.product_urls.setdefault(no, href)
+    # 메뉴를 자바스크립트로 그리는 매장은 홈 HTML 에 카테고리 링크가 하나도 없다 — numbering 이 그래서
+    # 0벌이었다(_skipped_non_cafe24 「메뉴가 자바스크립트」, 2026-09-06). 카페24 는 그 메뉴를
+    # /exec/front/Product/SubCategory 라는 공개 JSON 으로 받아 그린다(아스트라 D 가 찾아 줬다,
+    # 2026-09-23). 링크를 하나도 못 주웠을 때만 묻는다 — 멀쩡한 매장의 메뉴를 흔들지 않게.
+    if not shop.categories:
+        r = http.get(f"{shop.base}/exec/front/Product/SubCategory", retries=1)
+        if r is not None and r.status_code == 200 and "json" in (r.headers.get("content-type") or ""):
+            try:
+                cats = r.json()
+            except ValueError:
+                cats = []
+            for c in cats if isinstance(cats, list) else []:
+                no, nm = c.get("cate_no"), (c.get("name") or "").strip()
+                if isinstance(no, int) and nm and len(nm) <= 40 and not is_shop_name(shop, nm):
+                    shop.categories.setdefault(no, nm)
 
 
 # 임직원·사내·관계자 전용 칸은 손님이 살 수 있는 상품이 아니다. 목록에서 아예 뺀다(사람 결정 2026-09-04).
@@ -3930,8 +3950,10 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
                 "season": season_of(d["name"], d.get("detail_images"), d.get("category_names")),
                 "status": "SOLD_OUT" if (is_soldout(d) or d.get("delisted")) else "ON_SALE",
                 "image_url": d["image_url"],
-                # 회원 전용·리다이렉트로 홈 주소만 남은 건(badblood 208, haleine 14)은 cafe24 표준 상세 주소로 복원
-                "source_url": d["source_url"] if product_no_of(d["source_url"]) else f"{d['source_url'].rstrip('/')}/product/detail.html?product_no={d['product_no']}",
+                # 회원 전용·리다이렉트로 홈 주소만 남은 건(badblood 208, haleine 14)은 cafe24 표준 상세 주소로 복원.
+                # 카페24 가 아닌 매장(platform 칸이 있는 줄)은 수집기가 적은 주소가 곧 상품 주소다 — 여기에 카페24
+                # 꼴을 붙여 렉토·Hyein Seo·PAF 710벌이 「…/products/x/product/detail.html?product_no=…」가 됐다(2026-09-23).
+                "source_url": d["source_url"] if (d.get("platform") or product_no_of(d["source_url"])) else f"{d['source_url'].rstrip('/')}/product/detail.html?product_no={d['product_no']}",
                 "crawled_at": d.get("crawled_at", ""),
                 "group": GROUP_OF.get(label, ""),
                 "category": label,
@@ -4256,10 +4278,9 @@ def main():
     if other:
         slugs = [s for s in slugs if s not in platforms.NOT_CAFE24]
         if not args.refetch_ids:
-            import crawl_shopify
             http_s = PoliteSession(delay=max(args.delay, 2.0))
             for s in other:
-                crawl_shopify.crawl_one(http_s, s)
+                platforms.crawl_other(http_s, s)
     shops = []
     for s in slugs:
         b = brands.get(s)
