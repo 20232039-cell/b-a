@@ -19,6 +19,16 @@ SHOPIFY: dict[str, str] = {
 
 NOT_CAFE24: set[str] = set(SHOPIFY)
 
+# 상품 페이지의 meta description 을 상품 설명으로 쓰는 매장. 렉토는 body_html 이 실측표뿐이고 진짜 설명이
+# 여기에 있다(표본 6벌 모두 제목과 맞았다). **Hyein Seo 는 쓰지 않는다** — 매장이 다른 상품 설명을
+# 복사해 둔 칸이 있다(니트 미니 원피스의 meta 가 「Multi-strap, adjustable button closure …」).
+SHOPIFY_META_DESC: set[str] = {"recto"}
+
+# 상품 페이지까지 여는 매장 — 목록 API 에 없는 것이 페이지에만 있는 곳(렉토 설명 · PAF 소재·실측 탭).
+# Hyein Seo 는 목록 API 글에 혼용률(159벌 중 158)과 실측표(149)가 다 있어 열지 않는다. 페이지를
+# 여는 만큼 매장에 짐이 되고, 봇 이름으로 연 상품 페이지에는 매장이 429 를 준다(2026-09-23 실측).
+SHOPIFY_PAGES: set[str] = {"recto", "post-archive-faction"}
+
 # 걷기는 하지만 앱에는 아직 안 내보내는 매장 — export_app_data 가 뺀다.
 # 렉토·Hyein Seo·PAF 는 첫 판에서 값·사진·품절은 찼지만 설명·소재·실측이 덜 찼다: 렉토는 진짜 상품
 # 설명이 상품 페이지의 meta description 에만, PAF 는 소재·실측표가 상품 페이지의 접이식 탭

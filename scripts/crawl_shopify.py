@@ -25,16 +25,20 @@ import html
 import json
 import re
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
 import crawl_cafe24 as cc
-from platforms import SHOPIFY
+from platforms import SHOPIFY, SHOPIFY_META_DESC, SHOPIFY_PAGES
 
 CRAWL_DIR = cc.CRAWL_DIR
 PAGE_LIMIT = 250          # Shopify 가 한 쪽에 주는 최대
 GUARD_RATIO = 0.5         # weekly_update 와 같다
 DELIST_AFTER = 2          # 연속 이만큼 목록에 없으면 delisted
+# 상품 페이지 간격(초). 목록은 매장당 몇 번이지만 페이지는 수백 번이라 더 천천히 — 봇 이름으로
+# 연 상품 페이지에 매장이 429 를 준 적이 있다(get_patient 주석).
+PAGE_DELAY = 4.0
 
 
 def _text(body_html: str) -> str:
@@ -48,13 +52,35 @@ def _img(u: str) -> str:
     return (u or "").split("?")[0]
 
 
+def get_patient(http: cc.PoliteSession, url: str, log=print, tries: int = 4):
+    """429 를 받으면 매장이 말한 만큼(Retry-After, 없으면 30·60·120초) 쉬고 다시 받는다.
+
+    PoliteSession 은 429 에 2·4초만 물러나고 포기한다. Shopify 는 IP 하나에 짧은 시간 요청이 몰리면
+    429 를 주는데, 상품 페이지를 한 벌씩 여는 이 수집기는 매장당 수백 번을 부른다. 같은 날 여러 판을
+    돌리다 렉토·PAF 가 목록부터 429 로 막았다(2026-09-23, 가드레일이 걸려 데이터는 안 바뀌었다).
+    """
+    r = None
+    for i in range(tries):
+        r = http.get(url, retries=0)
+        if r is None or r.status_code != 429:
+            return r
+        try:
+            wait = float(r.headers.get("Retry-After") or 0)
+        except ValueError:
+            wait = 0
+        wait = max(wait, 30 * (2 ** i))
+        log(f"  429 — {wait:.0f}초 쉬고 다시 ({i + 1}/{tries}) {url[:70]}")
+        time.sleep(wait)
+    return r
+
+
 def fetch_all(http: cc.PoliteSession, base: str, log=print) -> list[dict] | None:
     out: list[dict] = []
     for page in range(1, 200):
         # **통화를 못 박는다.** Accept-Language 를 붙이면 Shopify 가 요청 IP 의 나라 돈으로 바꿔
         # 준다 — 이 컨테이너(미국)에서 렉토 395,000원이 「315.00」(달러)으로 왔다. Actions
         # 러너도 미국이다. currency=KRW 를 붙이면 원화로 온다(2026-09-23 실측).
-        r = http.get(f"{base}/products.json?limit={PAGE_LIMIT}&page={page}&currency=KRW")
+        r = get_patient(http, f"{base}/products.json?limit={PAGE_LIMIT}&page={page}&currency=KRW", log)
         if r is None or r.status_code != 200:
             log(f"  {base} {page}쪽 받기 실패({getattr(r, 'status_code', '없음')}) — 이 판은 상태를 안 바꾼다")
             return None
@@ -115,6 +141,78 @@ def to_row(p: dict, slug: str, base: str, now: str) -> dict:
     return d
 
 
+_META_DESC = re.compile(r'(?is)<meta\s+(?:property="og:description"|name="description")\s+content="([^"]*)"')
+_TAB = re.compile(r'(?is)<details[^>]*>\s*<summary[^>]*>(.*?)</summary>(.*?)</details>')
+_RICH = re.compile(r'(?is)<div class="metafield-rich_text_field">(.*?)</div>')
+
+
+def page_extras(html_text: str) -> dict:
+    """상품 페이지에만 있는 것 — 목록 API(products.json)에는 안 온다.
+
+    - meta description: 렉토는 진짜 상품 설명이 여기에만 있다(body_html 은 실측표뿐).
+      「플레어 핏 실루엣의 수트 팬츠 … 고밀도 울 소재 MADE IN KOREA」
+    - 접이식 탭의 메타필드: PAF 는 「Composition / Cotton 100%」, 「Size Guide / Size(Length/
+      Chest/Arm/Shoulder) S : 69.5cm/54cm/…」가 여기에만 있다.
+    메타필드가 든 탭만 받는다 — 테마의 탭에는 배송·반품 같은 매장 공용 안내도 있고, 그건 상품 글이 아니다.
+    """
+    meta = ""
+    m = _META_DESC.search(html_text or "")
+    if m:
+        meta = html.unescape(m.group(1)).strip()
+    tabs: list[tuple[str, str]] = []
+    for head, body in _TAB.findall(html_text or ""):
+        rich = _RICH.findall(body)
+        if not rich:
+            continue
+        h = _text(head).splitlines()[-1] if _text(head) else ""
+        tabs.append((h, "\n".join(_text(x) for x in rich)))
+    return {"meta": meta, "tabs": tabs}
+
+
+def enrich(d: dict, old: dict | None, updated_at: str, http: cc.PoliteSession) -> None:
+    """상품 페이지를 읽어 설명·스펙·실측을 채운다. 상품이 안 바뀌었으면 지난 판 것을 쓴다."""
+    ex = None
+    if old and old.get("page_updated_at") == updated_at and "page_extras" in old:
+        ex = old["page_extras"]
+    else:
+        r = get_patient(http, d["source_url"])
+        if r is not None and r.status_code == 200:
+            ex = page_extras(r.text)
+            d["page_updated_at"] = updated_at
+    if not ex:
+        return
+    d["page_extras"] = ex
+    parts = [d.get("description") or ""]
+    # meta 설명은 그것이 진짜 상품 설명인 매장에서만 쓴다(platforms.SHOPIFY_META_DESC 주석).
+    meta = (ex.get("meta") or "") if d["brand_slug"] in SHOPIFY_META_DESC else ""
+    flat = re.sub(r"\s+", " ", d.get("description") or "")
+    if meta and re.sub(r"\s+", " ", meta)[:40] not in flat:
+        parts.insert(0, meta)
+    tab_text = "\n".join(f"{h}\n{b}" for h, b in ex.get("tabs") or [])
+    d["description"] = "\n".join(x for x in parts if x).strip()
+    d["detail_text"] = "\n".join(x for x in (d["description"], tab_text) if x).strip()
+    spec = dict(d.get("spec") or {})
+    for h, b in ex.get("tabs") or []:
+        if h and b:
+            spec[h] = b
+            if re.search(r"(?i)composition|material|fabric|소재|혼용", h):
+                spec["소재"] = b
+    d["spec"] = spec
+    # 탭의 실측은 「Size(Length/Chest/Arm/Shoulder) / S : 69.5cm/54cm/…」 꼴이다. HTML 표 추출기
+    # (extract_size_any)로는 첫 줄 S 하나만 잡혔다 — 글 표를 읽는 from_ocr 는 네 줄을 다 읽는다.
+    import size_from_ocr
+    width = max((len(v) for k, v in (d.get("size_table") or {}).items()
+                 if not k.startswith("_") and isinstance(v, list)), default=0)
+    for h, b in ex.get("tabs") or []:
+        if not re.search(r"(?i)size|사이즈|실측", h):
+            continue
+        names, cols = size_from_ocr.from_ocr(b)
+        n = max((len(v) for v in cols.values()), default=0)
+        if len(cols) >= 2 and n > width:
+            d["size_table"] = {**cols, **({"_names": names} if names else {})}
+            break
+
+
 def load_prev(slug: str) -> dict[int, dict]:
     p = CRAWL_DIR / f"{slug}.jsonl"
     rows: dict[int, dict] = {}
@@ -147,11 +245,14 @@ def crawl_one(http: cc.PoliteSession, slug: str, log=print) -> dict:
         return rep
     rows = dict(prev)
     seen: set[int] = set()
+    page_http = cc.PoliteSession(delay=max(http.delay, PAGE_DELAY)) if slug in SHOPIFY_PAGES else None
     for p in got:
         d = to_row(p, slug, base, now_ts)
         no = d["product_no"]
         seen.add(no)
         old = prev.get(no)
+        if page_http:
+            enrich(d, old, p.get("updated_at") or "", page_http)
         if old:
             for k in ("first_seen", "soldout_since"):
                 if k in old:
