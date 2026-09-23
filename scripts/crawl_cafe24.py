@@ -589,7 +589,9 @@ def shoulder_width(size_table) -> float | None:
 PACKAGING = re.compile(r"쇼핑백|shopping\s*bag|기프트\s*백|gift\s*(?:bag|box)|더스트\s*백|dust\s*bag|포장\s*백", re.I)
 PACKAGING_MAX = 10000
 
-JUNK_NAME = re.compile(r"^@|^[¥*\s]+$|실장님|이사님|원장님|디자이너\s*님|\s님\s*$|개인\s*결제|테스트|샘플|배송비|추가\s*금|lookbook|룩북|campaign|캠페인|\d{4}\s*(spring|summer|fall|autumn|winter)", re.I)
+# 「적립금 반영」「적립금 전환 전용」 — 적립금을 넣어 주려고 만든 결제 항목이다(고낙 「wool angora mods parka 적립금 반영」 ·
+# siyazu 「[캠핑 페스티벌 보증금] 적립금 전환 전용」, 2026-09-23 창고 전수 2벌).
+JUNK_NAME = re.compile(r"^@|^[¥*\s]+$|실장님|이사님|원장님|디자이너\s*님|\s님\s*$|개인\s*결제|테스트|샘플|배송비|추가\s*금|적립금\s*(?:반영|전환|지급)|lookbook|룩북|campaign|캠페인|\d{4}\s*(spring|summer|fall|autumn|winter)", re.I)
 
 # 상품이 아니라 룩북·에디토리얼·팝업·시즌 캠페인 페이지 — cafe24 매장이 이런 것도 /product/
 # 에 올려 둔다(amomento 34 · rough-side 25 · haleine 11). JUNK_NAME 과 달리 이름만으로는

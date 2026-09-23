@@ -66,8 +66,39 @@ def _desc_text(el) -> str:
         return ""
     t = el.get_text("\n", strip=True)
     t = re.sub(r"[\xa0　]", " ", t)
-    t = re.sub(r"\n(?=[\d.]+(?:[ \t]+[\d.]+)+[ \t]*$)", " ", t, flags=re.M)
+    # 「77.1 / 78.1」「77/ 78」「76/77」(앞/뒤 두 값)이 든 숫자 줄도 숫자 줄이다 — 못 붙여 고낙 셔츠 표가 갈라졌다
+    t = re.sub(r"\n(?=[\d.]+(?:(?:[ \t]*/[ \t]*|[ \t]+)[\d.]+)+[ \t]*$)", " ", t, flags=re.M)
     return "\n".join(re.sub(r"[ \t]+", " ", ln).strip() for ln in t.splitlines() if ln.strip())
+
+
+_FB_HEAD = re.compile(r"\(\s*앞\s*/\s*뒤\s*\)")
+_FB_PAIR = re.compile(r"(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)")
+
+
+def front_back(text: str) -> str:
+    """「총장(앞/뒤)」 칸에 「77.1 / 78.1」처럼 값이 둘인 표 — 매장이 기준을 적었을 때만 하나를 고른다.
+
+    고낙 셔츠 19벌이 이 꼴이라 표를 못 읽었다. 같은 글에 「* 총장 넥 뒷중심 기준입니다」가 있다 — 매장이
+    말한 기준이 뒤이므로 뒤 값을 쓴다. 기준이 안 적힌 표는 그 칸을 뺀다 — 고르면 짐작이고, 그대로 두면
+    표 해석기가 앞 값을 조용히 집는다(washed glitch half shirt 에서 총장 75 가 들어갔다).
+    값 줄(숫자 셋 이상, kg 없음)에서만 바꾼다 — 「168 / 58kg」 같은 모델 줄은 건드리지 않는다.
+    """
+    if not _FB_HEAD.search(text or ""):
+        return text
+    if re.search(r"뒷\s*중심|뒤\s*중심|뒤\s*기준|back\s*(?:center|neck)", text, re.I):
+        pick = 2
+    elif re.search(r"앞\s*중심|앞\s*기준", text):
+        pick = 1
+    else:
+        pick = 0          # 기준이 없다 — 그 칸(총장)만 빼고 어깨·가슴·소매처럼 확실한 칸은 살린다
+    out = []
+    for ln in text.splitlines():
+        if _FB_HEAD.search(ln):
+            ln = _FB_HEAD.sub("", ln) if pick else re.sub(r"\S*\(\s*앞\s*/\s*뒤\s*\)", " ", ln)
+        elif len(re.findall(r"\d+(?:\.\d+)?", ln)) >= 4 and not re.search(r"(?i)kg|모델|model", ln):
+            ln = _FB_PAIR.sub(lambda m: m.group(pick) if pick else " ", ln)
+        out.append(ln)
+    return "\n".join(out)
 
 
 def parse_page(html_text: str, url: str, slug: str, now: str) -> dict | None:
@@ -123,7 +154,7 @@ def parse_page(html_text: str, url: str, slug: str, now: str) -> dict | None:
     mw = re.search(r'data-productSoldOut="(\w+)"', html_text)
     whole = mw.group(1) if mw else ""
     import size_from_ocr
-    names, cols = size_from_ocr.from_ocr(text) if text else (None, {})
+    names, cols = size_from_ocr.from_ocr(front_back(text)) if text else (None, {})
     d = {
         "product_no": int(m.group(1)),
         "name": name,
