@@ -37,6 +37,8 @@ MANUAL = DATA / "manual_sizes.csv"   # 사람이 그림을 보고 옮겨 적은 
 NON_APPAREL_CODES = {"shoes", "bags", "accessories", "headwear", "jewelry", "lifestyle", "pet"}
 # 옷에만 있는 실측 항목 — 잡화 행에 이게 있으면 표를 잘못 물어 온 것이다
 GARMENT_ONLY = {"어깨", "가슴", "밑위", "뒤밑위", "허벅지", "암홀", "화장", "소매길이"}
+# 우리 치수 축(총장·허리 …)이 뜻을 갖지 않는 갈래 — 이 갈래는 표를 통째로 안 붙인다
+NO_SIZE_AXIS_CODES = {"bags", "headwear", "shoes"}
 GARMENT_LABELS = {"Tops", "Pants", "Outerwear", "Knitwear", "Shirts", "Denim", "Skirts", "Dresses"}
 LABELS = json.loads((DATA / "size_labels.json").read_text(encoding="utf-8"))
 RANGES = LABELS["_ranges_cm"]
@@ -956,6 +958,12 @@ def parse_matrix(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] |
         # kirsh 「ㆍ 암홀, 밑단 뒷부분 밴딩」(라벨 2)이 「(cm) 총장 어깨 가슴」(라벨 3)을
         # 눌러서 {'밑단': [41, 43]} 한 칸만 남았다(2026-09-04, 100건이 이 꼴이었다).
         # 표의 머리줄은 라벨이 많고, 문장은 어쩌다 두 개가 걸린다.
+        # (2026-09-23 해 본 것 — 되돌렸다) 「줄마다 한 칸씩 남으면 머리줄에서 라벨이 빠진 것이니
+        # 버린다」를 넣었다. etmon 「(cm) 어깨 가슴 소매길이 밑단 / FREE 51.5 36 41 12 59.5」는
+        # 맨 앞 총장이 빠져 한 칸씩 밀렸기 때문이다. 그런데 OCR 전수(11.8만 벌)로 재니 **맞게 읽던
+        # 표 112벌을 잃었다** — 남는 칸이 대개 **맨 뒤**다(aeae 「Shoulder Chest Sleeve Length」를
+        # 이름 셋으로 읽어 끝의 총장만 못 받음, easy-no-easy 넷째 이름이 「AKZO!」로 뭉개짐).
+        # 앞이 빠졌는지 뒤가 빠졌는지 가를 표지가 없어서, 한 벌을 고치자고 백 벌을 버리지 않는다.
         score = (len(labels), len(names))
         if names and (best is None or score > best_score):
             best_score = score
@@ -1763,6 +1771,103 @@ def drop_lone_outlier(vs: list, thr: float = 0.15) -> list:
         return vs
     out = list(vs)
     out[best[1]] = None
+    return out
+
+
+_TOTAL_ALIASES = {"총기장", "총장", "총길이", "전체기장", "length", "totallength"}
+_SLEEVE_IN_BODY = re.compile(r"(?:소매|팔)\s*기장")
+_MODEL_AT = re.compile(r"(?i)\bmodel\b|모델")
+_BODY_WORD = re.compile(r"(?i)(bust|chest|waist|hips?|가슴|허리|엉덩이|힙)\s*[:\-]?\s*(\d{2,3}(?:\.\d+)?)")
+# 모델 구간이라는 표지 — 키. 「Model(M) : 185cm」처럼 키라는 말 없이 수만 적는 매장도 있다.
+_MODEL_HEIGHT = re.compile(r"(?i)(?:height|hegit|신장|키)\s*[:\-]?\s*1[5-9]\d|\b1[5-9]\d(?:\.\d)?\s*cm")
+_SIZE_WORD = re.compile(r"(?i)size|사이즈")
+_HEIGHT_WORD = re.compile(r"(?i)(?:height|hegit|신장|키)\s*[:\-]?\s*1[5-9]\d(?:\.\d)?\s*(?:cm)?")
+_BODY_KEY_EN = {"bust": "bust", "chest": "bust", "waist": "waist", "hip": "hip", "hips": "hip"}
+_BODY_KEY = {**_BODY_KEY_EN, "가슴": "bust", "허리": "waist", "엉덩이": "hip", "힙": "hip"}
+
+
+def clean_html_table(st: dict, body: str) -> dict:
+    """크롤러가 저장해 둔 HTML 표에서, 옷 치수가 아닌 것이 섞인 세 꼴을 걷는다.
+
+    아스트라가 가린 판으로 200벌을 옮겨 적어 준 것과 대 보다가 찾았다(2026-09-23).
+    셋 다 수확된 표 자체에 흔적이 남아 있어서, 다시 걷지 않고 여기서 고칠 수 있다.
+
+    ① 번호 목록 — 「1.허리 2.엉덩이 3.허벅지 … 6.총장」을 라벨 뒤 숫자로 읽어
+       엉덩이 3 · 허벅지 4 · 밑위 5 · 밑단 6 · 총장 44(첫 사이즈 이름 44(28))가 됐다.
+       값 하나짜리 칸들이 1씩 느는 작은 정수면 표가 아니다 — 통째로 버린다(legacy 60벌 전부).
+    ② 「소매기장」의 「소매」가 잘려 맨 「기장」만 남은 것 — 총장으로 읽혀 **소매 값이 총장
+       자리에 앉고 진짜 총기장은 밀려났다**(lememe 「소매기장 54 · 총기장 63」→ 총장 54).
+       총장 이름이 따로 있는 표에서만 본다. 원문에 소매기장·팔기장이 있으면 소매로 옮기고,
+       없으면 버린다 — 밑위기장·랩기장·끈기장·앞중심기장·프린지기장도 같은 꼴로 잘려 들어와
+       있었다(창고 전수 2,219벌, 매장마다 한 벌씩 원문과 대 봤다).
+    ③ 모델 몸 치수 — 「Model(M): 185cm / CHEST 34" / WAIST 28" / HIP 37"」이 표에
+       waist 28 · hip 37 로 들어가 윗옷에 허리·엉덩이가 생겼다(rest-recreation · nick-nicole ·
+       mooneed …). 원문의 모델 구간(아래 주석)에만 나오고 옷 표에는 안 나오는 부위·수면 뺀다.
+       모델 구간을 못 찾으면, 한글 표에 끼어 있고 칸 수가 표보다 모자란 영문 몸 부위만 뺀다 —
+       영문으로 표를 적는 매장(slowacid 「waist 39·41·43」)은 칸이 가득 차 있어 안 걸린다.
+    """
+    keys = [k for k in st if not str(k).startswith("_")]
+
+    singles = sorted(v[0] for k in keys
+                     if isinstance(st[k], list) and len(st[k]) == 1
+                     for v in [st[k]]
+                     if isinstance(v[0], (int, float)) and float(v[0]).is_integer() and v[0] <= 12)
+    # 번호는 1~3 에서 시작해 넷 넘게 잇닿는다. 「암홀 10 · 소매단 11 · 소매통 12」 같은
+    # 진짜 한 벌 표가 걸리지 않도록 둘 다 요구한다.
+    best, start, run = 0, None, 1
+    for a, b in zip(singles, singles[1:]):
+        run = run + 1 if b == a + 1 else 1
+        if run > best:
+            best, start = run, b - run + 1
+    if best >= 4 and start is not None and start <= 3:
+        return {}
+
+    out = dict(st)
+    norm = {re.sub(r"[\s()（）:：]", "", str(k)).lower(): k for k in keys}
+    if "기장" in norm and set(norm) & (_TOTAL_ALIASES - {"기장"}):
+        raw = norm["기장"]
+        v = out.pop(raw)
+        if _SLEEVE_IN_BODY.search(body or "") and "소매기장" not in norm:
+            out["소매기장"] = v
+
+    width = max((len(v) for v in out.values() if isinstance(v, list)), default=0)
+    # 모델 구간 — 「키 → 가슴·허리·엉덩이」가 바짝 붙어 나온다. 키가 없으면 모델 줄이 아니고,
+    # 키 뒤라도 「사이즈」라는 말이 나오면 거기서 끊는다 — anotheroffice 는 「모델 착용
+    # 사이즈 182cm / 02사이즈 … 사이즈 가이드 01SIZE 총길이 70/ 어깨 54/ 가슴 57.5」라
+    # 넓게 잡은 창 안에 **진짜 옷 표**가 들어와, 옷 가슴이 모델 치수로 오인됐다(전수 408벌).
+    body = body or ""
+    spans: list[tuple[int, int]] = []
+    heights = [h for m in _MODEL_AT.finditer(body)
+               for h in [_MODEL_HEIGHT.search(body, m.start(), m.start() + 160)] if h]
+    # 「키 172」처럼 키라는 말이 붙은 줄은 앞에 model 이 없어도 모델 줄이다 — 옷 표에는 키가 없다.
+    # j-koo 는 같은 모델 줄을 「MODEL SIZE HEIGHT 172CM …」와 「구매해주세요. HEIGHT 172CM …」로
+    # 두 번 싣는다. 뒤엣것을 구간 밖으로 세면 몸 치수가 옷 표에서도 나온 것처럼 보인다.
+    heights += list(_HEIGHT_WORD.finditer(body))
+    for h in heights:
+        a, b = h.end(), min(len(body), h.end() + 80)
+        cut = _SIZE_WORD.search(body, a, b)
+        spans.append((a, cut.start() if cut else b))
+    # 부위·수 쌍마다 「모델 구간 밖에서도 나오는가」를 센다. 모델 구간에만 나오는 쌍만 몸 치수다 —
+    # not-your-rose 는 옷 표 「… Hem 105 / Hip 86」과 모델 「Hips 86」이 우연히 같은 수라, 구간 안에
+    # 보였다는 것만으로 빼면 옷 치수가 지워진다.
+    inside: dict[str, set] = {}
+    outside: dict[str, set] = {}
+    for m in _BODY_WORD.finditer(body):
+        part, n = _BODY_KEY[m.group(1).lower()], float(m.group(2))
+        (inside if any(a <= m.start() < b for a, b in spans) else outside).setdefault(part, set()).add(n)
+    has_ko = any(re.search(r"[가-힣]", str(k)) for k in out)
+    for k in [k for k in out if not str(k).startswith("_")]:
+        name = re.sub(r"\s", "", str(k)).lower()
+        kk = _BODY_KEY.get(name)
+        v = out[k]
+        if not kk or not isinstance(v, list):
+            continue
+        nums = [x for x in v if isinstance(x, (int, float))]
+        if spans:
+            if nums and all(x in inside.get(kk, ()) and x not in outside.get(kk, ()) for x in nums):
+                del out[k]
+        elif name in _BODY_KEY_EN and has_ko and len(v) < width:
+            del out[k]
     return out
 
 
@@ -2872,7 +2977,9 @@ def main():
                 st = _cc2.collapse_repeated_columns(dict(st))
             sizes, names, source = {}, None, None
             if isinstance(st, dict) and st and (k[0], json.dumps(st, sort_keys=True, ensure_ascii=False)) not in shared:
-                sizes = normalize_html(st, k[0], girth_keys, label_med)
+                # 공용 표 판정은 저장된 그대로의 표로 한다(위 줄). 걷어 내는 것은 그 뒤다.
+                st = clean_html_table(st, "\n".join(t for t in (d.get("description") or "", d.get("detail_text") or "") if t))
+                sizes = normalize_html(st, k[0], girth_keys, label_med) if st else {}
                 source = "html"
                 # 크롤러가 표의 사이즈 이름 열을 「_names」로 함께 넘긴다(2026-09-05).
                 hn = st.get("_names")
@@ -2972,6 +3079,12 @@ def main():
             # 「가슴 허리」를 물려 주고 있었다(thebarnnet 33 등 96건, 2026-09-05 검사).
             # 가방에 어깨너비가 있을 리 없고, 있다면 그건 남의 옷 표다.
             if r.get("category_code") in NON_APPAREL_CODES and set(sizes) & GARMENT_ONLY:
+                continue
+            # 가방·모자·신발에는 우리 치수 축이 하나도 안 맞는다. 위 문은 총장·허리를 통과시켜
+            # 가방 스트랩 길이가 「총장」, 모자 둘레가 「허리」로 앱에 섰다(창고 전수 가방 645 ·
+            # 모자 171 · 신발 58벌, 2026-09-23). 벨트·스카프(accessories)와 목걸이(jewelry)의
+            # 길이는 총장이 맞는 말이라 남긴다.
+            if r.get("category_code") in NO_SIZE_AXIS_CODES:
                 continue
             # 사이즈 개수가 라벨마다 다르면(모델 치수 한 줄·OCR 누락) 칸 수를 골라 맞춘다.
             # 짧은 라벨은 뺀다 — 앞칸만 남겨 두면 M 의 치수가 그 옷의 유일한 치수로 적힌다.
