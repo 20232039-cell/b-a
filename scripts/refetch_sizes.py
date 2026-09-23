@@ -257,6 +257,10 @@ def main():
         cats.setdefault(r["brand_slug"], {})[int(r["product_no"])] = r["category"]
     if args.brands == ["all"]:
         args.brands = sorted(p.stem for p in cc.CRAWL_DIR.glob("*.jsonl") if not p.name.startswith("_"))
+    # 카페24 가 아닌 매장(platforms.py)은 다시 받지 않는다. 그 수집기가 판마다 표·설명을 새로
+    # 읽고, 이 스크립트는 카페24 상세 페이지 모양으로 읽으므로 멀쩡한 값을 덮어쓴다.
+    import platforms
+    args.brands = [b for b in args.brands if b not in platforms.NOT_CAFE24]
     with cc.BRANDS_CSV.open(encoding="utf-8-sig") as f:
         brands = {r["slug"]: r for r in csv.DictReader(f)}
     shops = []
@@ -270,6 +274,8 @@ def main():
         units = []
         for u in args.units.split(","):
             brand, sh = u.strip().split(":")
+            if brand in platforms.NOT_CAFE24:
+                continue
             k, n = (int(x) for x in sh.split("/"))
             if brand in brands and brands[brand].get("official_url"):
                 pu = urlparse(brands[brand]["official_url"].strip())

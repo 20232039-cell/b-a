@@ -4141,7 +4141,14 @@ def fold_reruns(rows: list[dict], gal: dict, tbl: dict | None = None, url: dict 
     남길 쪽: 판매중을 품절보다, 그다음 번호가 큰 쪽(새로 올린 것)을 남긴다.
     """
     groups: dict[tuple, list[dict]] = {}
+    # Shopify 매장(platforms.py)은 접지 않는다. 그쪽은 상품 주소(handle) 하나가 곧 상품 하나이고,
+    # **상품명에 색을 안 쓴다** — PAF 「SOUVENIR TEE 8」이 grey-green·white 두 벌, Hyein Seo 는
+    # 사진 이름에만 색 부호(TS4W·TS4K)가 있다. 이름·값이 같고 표가 같다는 이유로 색만 다른 옷
+    # 92벌이 접혀 사라졌다(2026-09-23 첫 수집).
+    import platforms
     for r in rows:
+        if r["brand_slug"] in platforms.NOT_CAFE24:
+            continue
         k = (r["brand_slug"], (r["name"] or "").strip().casefold(),
              (r["representative_color"] or "").strip().casefold(), r["price"])
         groups.setdefault(k, []).append(r)
@@ -4242,6 +4249,17 @@ def main():
     else:
         with PRODUCTS_SEED.open(encoding="utf-8-sig") as f:
             slugs = sorted({r["brand_slug"] for r in csv.DictReader(f)})
+    # 카페24 가 아닌 매장은 제 수집기로 넘긴다(platforms.py). 이 수집기로 훑으면 0벌이 나온다 —
+    # 렉토는 씨앗에 있는데 줄이 0이었다. 상세 다시 받기(--refetch-ids)는 그쪽에 뜻이 없어 뺀다.
+    import platforms
+    other = [s for s in slugs if s in platforms.NOT_CAFE24]
+    if other:
+        slugs = [s for s in slugs if s not in platforms.NOT_CAFE24]
+        if not args.refetch_ids:
+            import crawl_shopify
+            http_s = PoliteSession(delay=max(args.delay, 2.0))
+            for s in other:
+                crawl_shopify.crawl_one(http_s, s)
     shops = []
     for s in slugs:
         b = brands.get(s)

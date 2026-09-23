@@ -324,6 +324,16 @@ def main():
         print(f"CSV {n}행")
         return
     slugs = args.brands or sorted(p.stem for p in CRAWL_DIR.glob("*.jsonl") if not p.name.startswith("_"))
+    # 카페24 가 아닌 매장(platforms.py)은 제 수집기가 주간 점검까지 한다 — 목록 한 번에 품절·값이
+    # 다 온다. 카페24 방식으로 훑으면 목록이 0이라 가드레일에 걸려 아무것도 갱신되지 않는다.
+    import platforms
+    other = [s for s in slugs if s in platforms.NOT_CAFE24]
+    slugs = [s for s in slugs if s not in platforms.NOT_CAFE24]
+    if other:
+        import crawl_shopify
+        http_s = cc.PoliteSession(delay=max(args.delay, 2.0))
+        for s in other:
+            crawl_shopify.crawl_one(http_s, s)
     shops = []
     for s in slugs:
         b = brands.get(s)
