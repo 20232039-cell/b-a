@@ -188,6 +188,21 @@ def thin_row(r: dict, tags: dict, bi: dict, ci: dict, pref: dict) -> dict:
     return row
 
 
+def size_entry(e: dict | None) -> dict | None:
+    """상품 하나의 사이즈를 앱 모양으로. 세트는 size_parts 로 하의 표를 따로 싣는다.
+
+    part 값은 「하의」 하나뿐이다(size_from_ocr.SIZE_PARTS 주석) — 기본 size 가 상의다.
+    다른 말이 섞이면 앱이 옷장 카테고리와 짝을 못 맞추니 여기서 한 번 더 거른다.
+    """
+    if not e:
+        return e
+    parts = [p for p in (e.get("size_parts") or []) if p.get("part") == "하의" and p.get("sizes")]
+    out = {k: v for k, v in e.items() if k != "size_parts"}
+    if parts:
+        out["size_parts"] = parts
+    return out
+
+
 def full(r: dict, tags: dict, sizes: dict, crawl: dict,
          upref: dict | None = None) -> dict:
     """상세 한 벌 — 얇은 목록에 없는 것 전부."""
@@ -210,7 +225,7 @@ def full(r: dict, tags: dict, sizes: dict, crawl: dict,
         out["mat"] = mat
     out.update({
         "tags": fold_finish((tags.get(r["source_url"]) or {}).get("tags") or {}),
-        "size": sizes.get(r["source_url"]),
+        "size": size_entry(sizes.get(r["source_url"])),
         "gallery": d.get("gallery") or [],
         # 설명문을 내보낸다(2026-09-20 사람 결정: 「지금 당장 메울 곳은 메워, 배송이나
         # 세탁/후기 문의 같은 찌꺼기들은 싹 지우고」). 2026-09-07 에 안 내보내기로 한 까닭이

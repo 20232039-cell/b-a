@@ -34,6 +34,10 @@ OCR = CRAWL / "ocr"
 BROWSER = CRAWL / "browser"
 OUT = DATA / "product_sizes.json"
 MANUAL = DATA / "manual_sizes.csv"   # 사람이 그림을 보고 옮겨 적은 값 — 무엇보다 앞선다
+# 세트 상품의 부위 이름. **이 두 말만 쓴다** — 앱이 이 이름으로 옷장 카테고리와 짝을 맞춰
+# 핏 비교할 표를 고른다. 「바지」·「팬츠」가 섞이면 짝을 못 찾는다(앱 세션 2026-09-24).
+# size_parts 가 있는 상품의 기본 size 는 상의로 읽힌다 — size_parts 에는 하의만 담는다.
+SIZE_PARTS = ("상의", "하의")
 
 NON_APPAREL_CODES = {"shoes", "bags", "accessories", "headwear", "jewelry", "lifestyle", "pet"}
 # 옷에만 있는 실측 항목 — 잡화 행에 이게 있으면 표를 잘못 물어 온 것이다
@@ -2272,13 +2276,21 @@ def load_manual() -> dict[str, dict]:
     서버 HTML 에도 상세 그림 목록에도 없다. 브라우저를 붙일 값어치가 없는 몇 벌은 사람이
     보고 적는 편이 빠르다(2026-09-05 사람이 etce 두 벌을 그렇게 넘겨 줬다).
 
-    한 줄이 한 라벨이다:  링크, 사이즈이름, 항목, 값, 왜
-      https://etce.kr/...963/, S·M·L, 총장, 102·104·106, 사이즈가이드 그림
+    한 줄이 한 라벨이다:  링크, 사이즈이름, 항목, 값, 왜, 부위
+      https://etce.kr/...963/, S·M·L, 총장, 102·104·106, 사이즈가이드 그림,
+
+    「부위」는 세트(셋업)처럼 한 상품에 표가 둘일 때만 쓴다 — 비우거나 「상의」면 기본 표,
+    「하의」면 size_parts 로 따로 나간다(앱 세션과 정한 모양 2026-09-24, SIZE_PARTS 주석).
     """
     if not MANUAL.exists():
         return {}
     acc: dict[str, dict] = {}
+    parts: dict[str, dict[str, dict]] = {}
     for r in csv.DictReader(MANUAL.open(encoding="utf-8-sig")):
+        part = (r.get("부위") or "").strip()
+        if part and part not in SIZE_PARTS:
+            print(f"   manual_sizes.csv — 부위는 {'·'.join(SIZE_PARTS)} 만 쓴다: {part!r} ({r.get('링크')})")
+            continue
         url = (r.get("링크") or "").strip()
         lab = canon_label((r.get("항목") or "").strip()) or (r.get("항목") or "").strip()
         vals = [v.strip() for v in re.split(r"[·|]", r.get("값") or "") if v.strip()]
@@ -2290,17 +2302,29 @@ def load_manual() -> dict[str, dict]:
         except ValueError:
             print(f"   manual_sizes.csv — 숫자가 아닌 값 {vals} ({url})")
             continue
-        e = acc.setdefault(url, {"brand_slug": (r.get("브랜드") or "").strip(),
-                                 "source": "manual", "size_names": names or None, "sizes": {}})
+        blank = {"brand_slug": (r.get("브랜드") or "").strip(),
+                 "source": "manual", "size_names": names or None, "sizes": {}}
+        e = parts.setdefault(url, {}).setdefault(part, blank) if part == "하의" else acc.setdefault(url, blank)
         e["sizes"][lab] = nums
         if names and not e["size_names"]:
             e["size_names"] = names
     # 라벨마다 값 개수가 다르면 짧은 쪽에 맞춘다 — 사람도 오타를 낸다
-    for u, e in acc.items():
+    def _trim(e):
         n = min(len(v) for v in e["sizes"].values())
         e["sizes"] = {c: v[:n] for c, v in e["sizes"].items()}
         if e["size_names"]:
             e["size_names"] = e["size_names"][:n]
+    for e in acc.values():
+        _trim(e)
+    for u, ps in parts.items():
+        for e in ps.values():
+            _trim(e)
+        low = ps.get("하의")
+        if u not in acc:
+            # 하의 표만 있으면 그게 기본 표다 — size_parts 는 「기본 = 상의」일 때만 뜻이 있다
+            acc[u] = low
+            continue
+        acc[u]["size_parts"] = [{"part": "하의", "size_names": low["size_names"], "sizes": low["sizes"]}]
     return acc
 
 
@@ -3277,7 +3301,9 @@ def main():
                 continue
             out[r["source_url"]] = {"brand_slug": r["brand_slug"], "source": "sibling",
                                     "sibling_of": donor["source_url"],
-                                    "size_names": base_entry["size_names"], "sizes": base_entry["sizes"]}
+                                    "size_names": base_entry["size_names"], "sizes": base_entry["sizes"],
+                                    # 세트는 색만 달라도 하의 표까지 같다
+                                    **({"size_parts": base_entry["size_parts"]} if base_entry.get("size_parts") else {})}
             lent += 1
     if lent:
         print(f"색만 다른 형제에게서 물려받은 사이즈 {lent}벌")
