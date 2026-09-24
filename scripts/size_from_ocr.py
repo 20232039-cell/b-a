@@ -467,6 +467,78 @@ def parse_grid_rows(lines: list[str]) -> tuple[list[str] | None, dict[str, list[
     return names, cols
 
 
+def _stack_label(s: str) -> str | None:
+    """세로로 쌓인 표의 라벨 줄 — 앞의 번호(「1.어깨」·「A 기장」)는 떼고 본다."""
+    if _GRID_NUM.match(s):
+        return None
+    return canon_label(re.sub(r"^\s*(?:\d{1,2}|[A-Za-z])\s*[.)]\s*", "", s))
+
+
+def parse_stack_rows(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] | None:
+    """표의 칸이 한 줄에 하나씩 흩어져 온 사이즈가이드 글.
+
+    브라우저가 `<table>` 을 칸마다 줄을 바꿔 읽어 오는 매장이 있다. 눕는 방향이 둘이다
+    (2026-09-24 창고 전수 — 결손 옷 가운데 실측이 글로 있는데 못 읽은 것):
+
+      ㉠ 이름 먼저, 라벨마다 값 (lmood 31벌)       ㉡ 라벨 먼저, 사이즈마다 값 (legacy 20벌)
+         44 / 46 / 48                                 사이즈 / 1.어깨 / 2.가슴 / 3.소매 / 4.총길이
+         총장 / 59.5 / 61 / 62.5                      95 / 52 / 60 / 61 / 111.5
+         어깨너비 / 52.5 / 54.5 / 56.5                100 / 53.5 / 62.5 / 62 / 113
+
+    **칸 수가 딱 맞을 때만 받는다.** 이름 줄 수 = 라벨마다의 값 수(㉠), 라벨 수 = 사이즈마다의
+    값 수(㉡)가 끝까지 맞아야 하고, 표가 끝난 다음 줄이 또 숫자면(= 칸을 잘못 셌다) 버린다.
+    라벨은 canon_label 을 통과하는 줄만 — 카페24 공용 환산표(KR·US·JP)는 여기서 떨어진다.
+    """
+    # 「라벨 | 값 | 값」 줄은 parse_grid_rows 몫이다 — 여기서 라벨 줄로 잘못 잡으면 옆 칸의
+    # 값이 사이즈 이름이 된다(2026-09-24 haiq·amomento). 칸마다 줄이 바뀐 글만 본다.
+    L = [x.strip() for x in lines if x.strip() and "|" not in x]
+    n = len(L)
+    num = lambda s: bool(_GRID_NUM.match(s))
+    for j in range(n):
+        if not _stack_label(L[j]):
+            continue
+        # ㉠ 라벨 뒤 숫자 줄 수 = 사이즈 수. 바로 앞의 같은 수만큼이 사이즈 이름이다.
+        w = 0
+        while j + 1 + w < n and num(L[j + 1 + w]):
+            w += 1
+        if 2 <= w <= 8 and j >= w:
+            names = L[j - w:j]
+            before = L[j - w - 1] if j - w - 1 >= 0 else ""
+            # 이름 자리 바로 앞이 라벨이면 그 「이름」은 앞 라벨의 값이다 — slowacid 가
+            # Length 값 103·105·107… 을 사이즈 이름으로 받았다(2026-09-24).
+            if (all(_row_name_ok(x) and not _stack_label(x) for x in names) and len(set(names)) == w
+                    and not num(before) and not _stack_label(before)):
+                cols: dict[str, list[float]] = {}
+                p = j
+                while p + w < n and _stack_label(L[p]) and all(num(x) for x in L[p + 1:p + 1 + w]):
+                    lab = _stack_label(L[p])
+                    cols.setdefault(lab, [fix_value(lab, x) for x in L[p + 1:p + 1 + w]])
+                    p += 1 + w
+                cols = {c: v for c, v in cols.items() if any(x is not None for x in v)}
+                if len(cols) >= 2 and not (p < n and num(L[p])):
+                    return names, cols
+        # ㉡ 라벨이 k 줄 잇달아 서고, 그 뒤로 「이름 + 값 k 개」가 되풀이된다.
+        k = 0
+        while j + k < n and _stack_label(L[j + k]):
+            k += 1
+        if k >= 2:
+            labs = [_stack_label(x) for x in L[j:j + k]]
+            if len(set(labs)) == k:
+                rows: list[tuple[str, list[str]]] = []
+                p = j + k
+                while (p + k < n and _row_name_ok(L[p]) and not _stack_label(L[p])
+                       and all(num(x) for x in L[p + 1:p + 1 + k])):
+                    rows.append((L[p], L[p + 1:p + 1 + k]))
+                    p += 1 + k
+                if (len(rows) >= 2 and len({r[0] for r in rows}) == len(rows)
+                        and not (p < n and num(L[p]))):
+                    cols = {lab: [fix_value(lab, r[1][c]) for r in rows] for c, lab in enumerate(labs)}
+                    cols = {c: v for c, v in cols.items() if any(x is not None for x in v)}
+                    if len(cols) >= 2:
+                        return [r[0] for r in rows], cols
+    return None
+
+
 def parse_named_pairs(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] | None:
     """한 줄 안에서 「이름 값 이름 값」이 되풀이되는 표.
 
@@ -3109,6 +3181,29 @@ def main():
         print(f"사이즈가이드 창의 글 가운데 매장 공용으로 판단해 버림 {len(_sg_wide)}가지")
     if sg_text:
         print(f"사이즈가이드 창의 글 {len(sg_text)}건")
+    # 세로로 쌓인 표(parse_stack_rows)는 글 전체가 달라도 **표만** 매장 공용일 수 있다 —
+    # lmood 는 가디건·셔츠·체인 목걸이 28벌에 같은 「44·46·48 총장 59.5…」가 실렸다
+    # (2026-09-24). 위와 같은 잣대(열 벌 넘게 × 품목 셋 이상)를 읽어 낸 표에 한 번 더 건다.
+    sg_stack: dict[str, tuple] = {}
+    _st_seen: dict[tuple, list] = defaultdict(lambda: [0, set()])
+    for u3, t3 in sg_text.items():
+        r3 = _by_url.get(u3)
+        if not r3:
+            continue
+        st = parse_stack_rows([x.strip() for x in t3.splitlines() if x.strip()])
+        if not st:
+            continue
+        sg_stack[u3] = st
+        k3 = (r3["brand_slug"], json.dumps(st, ensure_ascii=False, sort_keys=True))
+        _st_seen[k3][0] += 1
+        if r3.get("category"):
+            _st_seen[k3][1].add(r3["category"])
+    _st_wide = {k for k, (n, cats) in _st_seen.items() if n >= 10 and len(cats) >= 3}
+    if _st_wide:
+        sg_stack = {u: st for u, st in sg_stack.items()
+                    if (_by_url[u]["brand_slug"], json.dumps(st, ensure_ascii=False, sort_keys=True))
+                    not in _st_wide}
+        print(f"세로로 쌓인 사이즈가이드 표 가운데 매장 공용으로 판단해 버림 {len(_st_wide)}가지")
     girth_keys = brand_girth(CRAWL)
     label_med = brand_label_median(CRAWL)
     shared = shop_wide_tables(CRAWL, rows)
@@ -3223,6 +3318,9 @@ def main():
                 # 줄만 받으므로, 카페24 인치 환산표는 두 겹으로 걸린다.
                 if not pr:
                     pr = parse_grid_rows(sgl)
+                # 칸마다 줄이 바뀐 표(legacy · lmood). 매장 공용 표는 위에서 이미 걸렀다.
+                if not pr:
+                    pr = sg_stack.get(r["source_url"])
                 if pr:
                     s3 = clean_ocr(pr[1])
                     if len(s3) > len(sizes):
