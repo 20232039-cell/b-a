@@ -506,6 +506,11 @@ def main() -> int:
                     v["f"] = f
                 if n:
                     v["n"] = n
+                # f·n 이 붙은 줄은 t 를 뺀다 — 같은 글을 두 번 실어 설명 조각이 50 → 96MB 가 됐다. 앱은 t 가 없으면
+                # f·n 을 이어 받는다(layer-web 9e2a4cc 「row?.t ?? [...f, ...n]」). **그 앱이 마스터에 오른 뒤에만**
+                # 이렇게 한다 — t 만 읽는 앱에 t 를 빼면 설명이 다 사라진다(앱 세션 2026-09-24). 그림 글은 t 가 유일한 글이라 둔다.
+                if f or n:
+                    del v["t"]
     print(f"설명에서 매장 되풀이 줄을 뺀 상품 {dropped_rep} · 이름 한 줄뿐이라 비운 설명 {name_only}")
     parts_of: dict[str, int] = {}
     desc_bytes = 0
