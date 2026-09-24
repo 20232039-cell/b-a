@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import csv
 import glob
+import collections
 import json
 import re
 import statistics
@@ -1399,8 +1400,83 @@ def from_ocr(text: str) -> tuple[list[str] | None, dict[str, list[float]]]:
     return names, drop_model_body(text, cols)
 
 
+# 「LENGTH : 66CM LENGTH : 68CM LENGTH : 71CM」 — 항목 이름이 칸마다 되풀이되는 표(포스센스티브 28벌).
+# 느슨한 갈래들이 이 꼴을 읽으면 칸이 밀린다: 첫 칸의 LENGTH 가 「LENGIA - O0OCM」로 깨진 표에서
+# 2사이즈 총장 65 와 1사이즈 가슴 58 이 한 벌 값으로 섞였다(2026-09-24 OCR 전수). 이 꼴은 칸 경계를
+# **항목 이름으로 셀 수 있다** — 깨진 이름도 한 칸이다. 값이 깨진 칸이 있는 줄은 그 항목만 버리고,
+# 칸 수가 다른 줄도 버린다(어느 칸이 빠졌는지 모른다). 이 꼴이 보이면 다른 갈래로 넘기지 않는다.
+_LV_CELL = re.compile(r"([A-Za-z][A-Za-z ]{1,18}?|[가-힣]{1,6})\s*[:\-=]\s*([0-9OoIl.,]{1,6})\s*cm", re.I)
+_LV_WORDS = {"length": "총장", "total length": "총장", "chest": "가슴", "shoulder": "어깨", "sleeve length": "소매길이",
+             "sleeve": "소매길이", "waist": "허리", "hip": "엉덩이", "thigh": "허벅지", "rise": "밑위", "hem": "밑단"}
+
+
+# 모델 몸 치수의 말 — 「HEIGHT: 174cm HEIGHT: 184cm / WAIST : 58cm WAIST : 71cm」(crump 두 모델). 비슷한 말
+# 맞추기가 HEIGHT 를 THIGH 로 읽어 허벅지 174 가 됐다(전후 전수). 이 말이 든 줄과 그 곁 줄은 모델 묶음이다.
+_LV_BODY = re.compile(r"(?i)height|weight|bust|shoes?|model|키|몸무게|신장|체중|모델")
+
+
+def _lv_label(raw: str) -> str | None:
+    import difflib
+    w = re.sub(r"\s+", " ", raw.strip().lower())
+    if _LV_BODY.search(w):
+        return None
+    c = canon_label(w)
+    if c:
+        return c
+    m = difflib.get_close_matches(w, list(_LV_WORDS), n=1, cutoff=0.8)
+    return _LV_WORDS[m[0]] if m else None
+
+
+def parse_label_colon_rows(text: str) -> tuple[bool, list[str] | None, dict[str, list[float]]]:
+    """(이 꼴인가, 사이즈 이름, 칸). 이 꼴이 아니면 (False, None, {})."""
+    lines = (text or "").splitlines()
+    body_at = {i for i, ln in enumerate(lines) if _LV_BODY.search(ln)}
+    rows = []
+    for i, ln in enumerate(lines):
+        cells = _LV_CELL.findall(ln)
+        if len(cells) < 2:
+            continue
+        if {i - 1, i, i + 1} & body_at:
+            continue                       # 모델 묶음(키·몸무게 줄과 그 곁)
+        rows.append(cells)
+    if len(rows) < 2:
+        return False, None, {}             # 이 꼴이 아니다 — 다른 갈래(모델 치수 걷기가 있다)에 맡긴다
+    n = collections.Counter(len(r) for r in rows).most_common(1)[0][0]
+    out: dict[str, list[float]] = {}
+    for cells in rows:
+        if len(cells) != n:
+            continue                       # 칸 수가 다르다 — 어느 칸이 빠졌는지 모른다
+        labs = [_lv_label(a) for a, _ in cells]
+        lab = collections.Counter(x for x in labs if x).most_common(1)
+        if not lab or lab[0][1] * 2 < n or lab[0][0] in out:
+            continue
+        vals = []
+        for _, v in cells:
+            v = v.replace(",", ".")
+            vals.append(float(v) if re.fullmatch(r"\d{1,3}(?:\.\d)?", v) else None)
+        if any(x is None for x in vals):
+            continue                       # 깨진 칸이 있다 — 이 항목은 통째로 버린다(칸을 밀지 않는다)
+        out[lab[0][0]] = vals
+    m = re.search(r"(?im)^.*?((?:\b\w{1,3}\s*size\b\s*){2,})", text or "")
+    names = None
+    if m:
+        got = [g.upper() for g in re.findall(r"(?i)\b(\w{1,3})\s*size\b", m.group(1))]
+        # 머리줄 이름도 OCR 이 틀린다 — 옵션이 1·2 인 바지의 머리가 「4 SIZE 9 SIZE」로 읽혔다(포스센스티브).
+        # 이어지는 숫자(0·1·2)이거나 표준 이름일 때만 받는다. 아니면 비워 두고 옵션에서 채우게 한다.
+        digits = all(g.isdigit() for g in got)
+        seq = digits and [int(g) for g in got] == list(range(int(got[0]), int(got[0]) + len(got)))
+        std = all(g in {"XS", "S", "M", "L", "XL", "XXL", "F", "FREE", "OS"} for g in got)
+        if len(got) == n and (seq or std):
+            names = got
+    return True, names, out
+
+
 def _from_ocr(text: str) -> tuple[list[str] | None, dict[str, list[float]]]:
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    is_lv, lv_names, lv = parse_label_colon_rows(text)
+    if is_lv:
+        clean = clean_ocr(lv) if lv else {}
+        return (lv_names, clean) if len(clean) >= 2 else (None, {})
     for cand in (lines, resegment(text)):
         mat = parse_matrix(cand)
         if mat and len(mat[1]) >= 2:

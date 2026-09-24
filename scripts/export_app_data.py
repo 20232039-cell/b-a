@@ -424,9 +424,27 @@ def main() -> int:
     for r in rows:
         d = crawl.get(r["source_url"]) or {}
         txt, src = product_desc.best(d.get("description") or "",
-                                     MINED.get((r["brand_slug"], str(r["product_no"]))))
+                                     MINED.get((r["brand_slug"], str(r["product_no"]))),
+                                     acc=r.get("category_code") in size_from_ocr.NON_APPAREL_CODES)
         if txt:
             desc_of[r["brand_slug"]][f'{r["brand_slug"]}-{r["product_no"]}'] = {"t": txt, "s": src}
+    # 매장이 설명마다 되풀이하는 줄은 뺀다(product_desc.store_repeats 주석). 매장 글과 그림 글을 따로 센다 —
+    # 그림 글은 벌 수가 적어(포스센스티브 13) 문턱을 5벌로 둔다.
+    # 옷과 잡화를 따로 센다 — 가방에만 붙는 가죽 관리 안내(margesherwood 157벌)는 매장 전체로 세면 40%를 못 넘는다.
+    acc_of = {f'{r["brand_slug"]}-{r["product_no"]}': r.get("category_code") in size_from_ocr.NON_APPAREL_CODES for r in rows}
+    dropped_rep = 0
+    for slug, m in desc_of.items():
+        for (src_kind, min_n), acc in ((k, a) for k in (("shop", 15), ("ocr", 5)) for a in (False, True)):
+            keys = [k for k, v in m.items() if v["s"] == src_kind and acc_of.get(k, False) == acc]
+            rep = product_desc.store_repeats([m[k]["t"] for k in keys], min_n)
+            for k in keys:
+                t2 = product_desc.drop_lines(m[k]["t"], rep)
+                if t2 != m[k]["t"]:
+                    dropped_rep += 1
+                    m[k]["t"] = t2
+        for k in [k for k, v in m.items() if not v["t"]]:
+            del m[k]
+    print(f"설명에서 매장 되풀이 줄을 뺀 상품 {dropped_rep}")
     parts_of: dict[str, int] = {}
     desc_bytes = 0
     for slug, m in sorted(desc_of.items()):

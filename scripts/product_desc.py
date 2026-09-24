@@ -43,6 +43,7 @@
 그래서 불릿(`-`·`·`·`*`)과 쉼표까지 자르고, **길다고 버리지 않는다**(잘라서 본다).
 """
 from __future__ import annotations
+import collections
 import json
 import re
 from pathlib import Path
@@ -96,6 +97,12 @@ _JUNK = re.compile(
     r"agreement|about\s?us|shop\s?guide|follow\s?us|instagram|youtube|our\s?store|"
     r"신상품|재입고|품절|세일|할인|이벤트|회원\s?가입|소식|받아보세요|구독|팔로우|카카오|"
     r"모니터|해상도|실제\s?색상|컬러가\s?다르게|"
+    # 편집 메모가 설명에 남는다 — 「…연하게 보이실 수 있습니다.메인 누끼 사진」(포스센스티브)
+    r"누끼|메인\s?컷|상세\s?컷\s?(?:참고|아래)|"
+    # 주문 칸이 설명으로 흘러든다 — 「Shopping Bag 0원 단독구매상품 0 (0개) 최소주문수량 1개 이상」(ostkaka 209)
+    r"최소\s?주문\s?수량|최대\s?주문\s?수량|단독\s?구매\s?상품|"
+    # 후기의 머리 — 「[1] 키: 몸무게: 사이즈: 평소 사이즈: …」
+    r"키\s?:\s?몸무게|평소\s?사이즈\s?:|^\s*\d{2}\.\d{2}\.\d{2}\s+\d|"
     r"관련\s?상품|related\s?items|추천\s?상품|함께\s?본|more\s?in\s?this",
     re.I)
 
@@ -129,10 +136,32 @@ _HARD_ITEM = re.compile(
     r"라벨|스티치|워시드|밑위|암홀|카라|칼라")
 
 
-def says_clothes(part: str) -> bool:
-    """이 조각이 **옷 이야기**를 하는가 — 옷의 성질이거나, 인상이거나, 혼용률이다."""
-    return bool(_HARD.search(part) or _SOFT.search(part) or _FIBER_PCT.search(part)
-                or _HARD_EN.search(part) or _HARD_ITEM.search(part))
+# 잡화의 말 — 벨트·모자·가방·주얼리 설명이 옷 낱말이 없어서 통째로 버려졌다(포스센스티브 벨트
+# 「천연 소가죽으로 제작 된 제품입니다」·볼캡 「모자챙이 큰편입니다」, 2026-09-24). 매장이 제 손으로 쓴
+# 글(clean)에만 쓴다 — OCR 잡음 줄(from_mined)에는 안 건다(_HARD_ITEM 주석과 같은 까닭).
+_HARD_ACC = re.compile(
+    r"가죽|레더|스웨이드|누벅|캔버스|볼캡|캡|모자|챙|비니|버킷햇|벨트|버클|아일렛|가방|토트|숄더|크로스백|"
+    r"스트랩|지갑|카드홀더|목걸이|네크리스|반지|링|귀걸이|이어링|팔찌|브레이슬릿|체인|펜던트|도금|"
+    r"\b(?:cap|hat|beanie|belt|buckle|bag|tote|strap|wallet|necklace|ring|earring|bracelet|chain|pendant)s?\b", re.I)
+
+
+# 매장 글은 「…니다」체다. 「…샀어요」「…좋아요」는 후기다(rssc 「카시오 시계랑 … 따라 샀어요」 · lookast 벨트 후기).
+_SENTENCE_END = re.compile(r"(?:니다|이다|한다|된다|있다|없다)\s*[.!]?\s*$")
+_ACC_CARE = re.compile(r"불량|하자|현상|주의|보관|세척|세탁|닦|관리|변색|탈락|오염|습기|직사광선|교환|반품|a/?s|수선|"
+                       r"염료|이염|벗겨|손상|마찰|화장품|향수|주름|스크래치|자국|반점")
+
+
+def says_clothes(part: str, acc: bool = False) -> bool:
+    """이 조각이 **옷 이야기**를 하는가 — 옷의 성질이거나, 인상이거나, 혼용률이다.
+    acc=True 면 잡화(벨트·모자·가방·주얼리)의 말도 받는다 — 매장이 쓴 글에서만."""
+    if (_HARD.search(part) or _SOFT.search(part) or _FIBER_PCT.search(part)
+            or _HARD_EN.search(part) or _HARD_ITEM.search(part)):
+        return True
+    # 잡화 낱말로만 통과하는 줄은 관리·하자 안내가 아니어야 한다 — 가방마다 붙은 「천연가죽의 자연스러운
+    # 현상으로 불량 사유가 아닙니다」「화장품·향수가 가죽에 닿으면」(margesherwood 157 · facade-pattern 98)
+    # 그리고 **문장**이어야 한다 — 잡화 낱말은 상품 이름 나열(「VISOR LOGO BALL CAP …」)·메뉴(「… BAG
+    # ACCESSORIES」)·가격 조각에도 나온다. 전후 전수에서 새로 생긴 설명 267벌의 대부분이 그 꼴이었다.
+    return bool(acc and _HARD_ACC.search(part) and not _ACC_CARE.search(part) and _SENTENCE_END.search(part))
 
 
 def _is_table(part: str) -> bool:
@@ -298,8 +327,10 @@ _HEAD_LABEL = re.compile(
 _HEAD_BRACKET = re.compile(r"^\[[A-Za-z][A-Za-z\s/&-]{1,18}\]\s*")
 
 
-def clean(text: str) -> str:
-    """찌꺼기를 걷어내고 옷 이야기만 남긴다. 남는 게 없으면 빈 글자열."""
+def clean(text: str, acc: bool = False) -> str:
+    """찌꺼기를 걷어내고 옷 이야기만 남긴다. 남는 게 없으면 빈 글자열.
+    acc=True(잡화 상품)면 벨트·모자·가방·주얼리의 말도 받는다 — 옷에 켜면 「천연가죽의 자연스러운 현상으로
+    불량 사유가 아닙니다」 같은 안내문이 가죽 낱말 때문에 옷 설명으로 들어왔다(전후 전수 161벌)."""
     out: list[str] = []
     for part in _parts(text):
         if _SECTION_HEAD.match(part) or _SIZE_HEAD.match(part):
@@ -317,7 +348,7 @@ def clean(text: str) -> str:
                 continue
         if len(part) < 4 or _is_table(part) or _is_scale(part):
             continue
-        if not says_clothes(part):
+        if not says_clothes(part, acc=acc):
             continue
         if part in out or any(part in p for p in out):
             continue
@@ -389,9 +420,33 @@ def from_mined(rec: dict | None) -> str:
     return "\n".join(bits)[:2000]
 
 
-def best(description: str, mined: dict | None = None) -> tuple[str, str]:
+# 「안감 없음」「신축성 있음」은 그 옷의 성질이다 — 같은 매장의 여러 벌이 같은 값을 가져도 안내문이 아니다(758벌).
+_ATTR_LINE = re.compile(r"^[\s/·-]*(?:안감|신축성|비침|두께감?|핏|무게감?)\s*[:：]?\s*(?:있음|없음|보통|약간|조금|적음|많음)")
+
+
+def store_repeats(texts: list[str], min_n: int, share: float = 0.4) -> set[str]:
+    """한 매장의 설명들에서 되풀이되는 줄(best 가 만든 글의 줄 단위) — 그 매장의 안내문이다.
+
+    포스센스티브 그림 글 13벌이 모두 「-후가공 디테일이 들어간 제품마다 개체차이가 있을 수 있습니다」를
+    설명으로 달았다(2026-09-24). 옷을 말하는 낱말(디테일)이 들어 있어 줄 하나하나로는 못 거른다 —
+    **그 매장 안에서 되풀이된다**는 것이 안내문의 표시다(tag_items.store_repeats 와 같은 생각).
+    혼용률(%)이 든 줄은 되풀이돼도 둔다 — 같은 원단을 여러 벌에 쓴다.
+    """
+    texts = [t for t in texts if t]
+    if len(texts) < min_n:
+        return set()
+    cnt = collections.Counter(ln for t in texts for ln in set(t.split("\n")) if ln.strip())
+    lim = max(min_n, share * len(texts))
+    return {ln for ln, c in cnt.items() if c >= lim and not _FIBER_PCT.search(ln) and not _ATTR_LINE.search(ln)}
+
+
+def drop_lines(text: str, lines: set[str]) -> str:
+    return "\n".join(ln for ln in (text or "").split("\n") if ln not in lines).strip() if lines else text
+
+
+def best(description: str, mined: dict | None = None, acc: bool = False) -> tuple[str, str]:
     """보여 줄 설명과 그 출처. 매장 글이 먼저고, 아무 말도 안 하면 그림에서 읽은 글."""
-    t = clean(description)
+    t = clean(description, acc)
     if t:
         return t, "shop"
     t = from_mined(mined)
