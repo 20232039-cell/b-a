@@ -103,6 +103,11 @@ _JUNK = re.compile(
     r"최소\s?주문\s?수량|최대\s?주문\s?수량|단독\s?구매\s?상품|"
     # 후기의 머리 — 「[1] 키: 몸무게: 사이즈: 평소 사이즈: …」
     r"키\s?:\s?몸무게|평소\s?사이즈\s?:|^\s*\d{2}\.\d{2}\.\d{2}\s+\d|"
+    # 상품 칸 이름표 — 「상품명 TSHIRT … 판매가 ₩48 / 600 30%」(mardi-mercredi, 값이 쪼개져 _PRICE 를 비켜 간다)
+    r"판매가|소비자가|상품명\s|"
+    # 구매 단추·상품 이름 꼬리·예약 안내·고시 머리글 — 「장바구니 바로구매 … (해외」「[예약발송 10월 07일]」
+    # 「[상품 필수 표시 정보] 제품 소재 SHELL」(dunst 575)
+    r"장바구니|바로\s?구매|\(해외(?:배송)?|예약\s?발송|상품\s?필수\s?표시\s?정보|"
     r"관련\s?상품|related\s?items|추천\s?상품|함께\s?본|more\s?in\s?this",
     re.I)
 
@@ -122,7 +127,11 @@ _HARD_EN = re.compile(
     r"detail|pocket|zipper|button|collar|sleeve|sleeveless|hem|lining|silhouette|"
     r"oversized?|cropped?|relaxed|slim|wide|tapered|straight|boxy|"
     r"stitch|embroider\w*|knit|ribbed|pleat\w*|panel|layered|seam\w*|"
-    r"stretch|lightweight|heavyweight|breathable|water\s?repellent)\b", re.I)
+    r"stretch|lightweight|heavyweight|breathable|water\s?repellent|"
+    # PAF 「Crewneck style jersey T-shirt / Poetic graphic featuring …」 — 생김새 낱말이 없어 빠졌다.
+    # 품목 이름(t-shirt·jacket…)은 **넣지 않는다** — 넣었더니 상품 이름 줄(「22SS UNAFFECTED FUN BOX T-SHIRT
+    # CHARCOAL (해외」)·메뉴(「홈 Collection … softshell jacket」)가 설명으로 들어왔다(전후 전수 587벌).
+    r"crew\s?neck|v-?neck|mock\s?neck|jersey|graphic)\b", re.I)
 
 
 # 매장 설명은 불릿으로 쓴다 — 조각이 네댓 글자로 짧다(「소뿔 단추」·「세미 와이드핏」).
@@ -146,6 +155,7 @@ _HARD_ACC = re.compile(
 
 
 # 매장 글은 「…니다」체다. 「…샀어요」「…좋아요」는 후기다(rssc 「카시오 시계랑 … 따라 샀어요」 · lookast 벨트 후기).
+_PCT_FIBER = re.compile(r"\d{1,3}\s?%\s*[A-Za-z가-힣]|[A-Za-z가-힣]\s*\d{1,3}\s?%")
 _SENTENCE_END = re.compile(r"(?:니다|이다|한다|된다|있다|없다)\s*[.!]?\s*$")
 _ACC_CARE = re.compile(r"불량|하자|현상|주의|보관|세척|세탁|닦|관리|변색|탈락|오염|습기|직사광선|교환|반품|a/?s|수선|"
                        r"염료|이염|벗겨|손상|마찰|화장품|향수|주름|스크래치|자국|반점")
@@ -161,7 +171,12 @@ def says_clothes(part: str, acc: bool = False) -> bool:
     # 현상으로 불량 사유가 아닙니다」「화장품·향수가 가죽에 닿으면」(margesherwood 157 · facade-pattern 98)
     # 그리고 **문장**이어야 한다 — 잡화 낱말은 상품 이름 나열(「VISOR LOGO BALL CAP …」)·메뉴(「… BAG
     # ACCESSORIES」)·가격 조각에도 나온다. 전후 전수에서 새로 생긴 설명 267벌의 대부분이 그 꼴이었다.
-    return bool(acc and _HARD_ACC.search(part) and not _ACC_CARE.search(part) and _SENTENCE_END.search(part))
+    # 매장에 따라 명사형으로 쓴다 — 렉토 「위빙 조직의 시그니처 라운드 버클 장식 벨트 사이즈 조절 가능」.
+    # 문장이 아니어도 한글이 주인 긴 문구면 받는다(상품 이름 나열·메뉴는 대개 영문 대문자다). 「…요」는 후기.
+    if not (acc and _HARD_ACC.search(part)) or _ACC_CARE.search(part) or re.search(r"요\s*[.!~]*\s*$", part):
+        return False
+    return bool(_SENTENCE_END.search(part)
+                or (len(part) >= 12 and len(_HANGUL.findall(part)) >= 0.4 * len(part.replace(" ", ""))))
 
 
 def _is_table(part: str) -> bool:
@@ -346,7 +361,9 @@ def clean(text: str, acc: bool = False) -> str:
             part = re.sub(r"\s+(?:반드시|또한|그리고|다만|단|그리|아울러)$", "", part).strip()
             if len(part) < 4 or _JUNK.search(part) or _PRICE.search(part):
                 continue
-        if len(part) < 4 or _is_table(part) or _is_scale(part):
+        # 혼용률 줄은 숫자가 많아도 표가 아니다 — Hyein Seo 「Material : 100% Cotton, 70% Cotton 27% Silk
+        # 3% Spandex, 100% Cotton[100% Tencel]」이 숫자 비율 0.20 으로 표로 걸려 설명이 통째로 비었다.
+        if len(part) < 4 or (_is_table(part) and len(_PCT_FIBER.findall(part)) < 2) or _is_scale(part):
             continue
         if not says_clothes(part, acc=acc):
             continue
