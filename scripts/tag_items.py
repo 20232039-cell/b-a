@@ -543,7 +543,10 @@ _ABBR = {"C": "코튼", "CO": "코튼", "P": "폴리에스터", "PE": "폴리에
          "MD": "모달", "MO": "모달", "SP": "스판덱스", "SD": "스판덱스", "PU": "스판덱스", "N": "나일론", "NY": "나일론",
          "W": "울", "WO": "울", "L": "린넨", "LI": "린넨", "AC": "아크릴", "CA": "캐시미어", "CS": "캐시미어",
          "SI": "실크", "SK": "실크", "TE": "텐셀", "LY": "텐셀"}
-_ABBR_LABEL = re.compile(r"(?i)(?:혼용률|혼용|composition|fabric)\s*[:：]?\s*")
+# 「겉감 : P 70% C 30%」(포스센스티브 패딩 셔츠) · 「FABRIC\n- C 100%」(포스센스티브 상세 그림 글 19벌) —
+# 이름표 뒤에 목록 기호 「- 」가 먼저 오면 첫 칸을 못 잡아 통째로 버렸다(2026-09-24).
+_ABBR_LABEL = re.compile(r"(?i)(?:혼용률|혼용|composition|fabric|겉감)\s*[:：]?\s*(?:[-–•·*]\s*)?")
+_ABBR_HEAD = re.compile(r"(?i)^\s*(?:fabric|composition)\s*[:：]?\s*$")
 _ABBR_ONE = re.compile(r"\b([A-Z]{1,2})\s*-?\s*(\d{1,3})(?![\d.])")
 
 
@@ -1093,7 +1096,10 @@ def denoise_ocr(text: str) -> str:
                                           # 「flare fit vs wide fit」 — 핏 비교 설명 그림의 캡션(한 매장 13벌, 두 핏이 다 붙었다)
         if _gibberish(l):
             l = _HAN_ANY.sub(" ", l)
-        if _latin_garbage(l):
+        # 「FABRIC」 한 낱말 머리줄은 아는 낱말이 하나뿐이라 아래 영문 잡음 검사에 걸려 지워졌다. 그러면
+        # 바로 아랫줄 「- C 100%」가 이름표를 잃어 약자 혼용률을 못 읽는다(포스센스티브 19벌, 2026-09-24).
+        # 약자 혼용률의 이름표 낱말만 한 줄에 홀로 선 것은 남긴다 — 태그 사전에 걸리는 말이 아니다.
+        if _latin_garbage(l) and not _ABBR_HEAD.match(l):
             continue
         out.append(l)
     return "\n".join(out)
