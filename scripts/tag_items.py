@@ -483,7 +483,12 @@ LEATHER_WORD = re.compile(r"가죽|레더|leather", re.I)
 # 「섬유 NN%」 한 덩이. 이름은 앞의 한두 낱말 — 「DUCK DOWN 80%」「VISCOSE RAYON 48%」는 두 낱말째 받고,
 # 「제품 상세 POLYESTER 69%」는 끝 낱말로 받는다.
 _COMP_ONE = re.compile(r"((?:[A-Za-z가-힣]+[ \t])?[A-Za-z가-힣]+)\s*[:：/]?\s*(\d{1,3}(?:\.\d+)?)\s?%")
-_COMP_NUM_FIRST = re.compile(r"(\d{1,3}(?:\.\d+)?)\s?%\s*([A-Za-z가-힣]+)")
+# 두 번째 낱말이 부위 말이면 받지 않는다 — 「22% Spandex Lining: 98% Polyester」의 Lining 을 먹으면
+# 겉감·안감 경계를 못 봐 안감 폴리에스터가 맨 앞에 선다(Hyein Seo).
+_COMP_NUM_FIRST = re.compile(
+    r"(\d{1,3}(?:\.\d+)?)\s?%\s*([A-Za-z가-힣]+"
+    r"(?:[ \t]+(?!(?:lining|shell|outshell|안감|겉감|배색|trim|contrast|filling|pocketing|fabric|made|body|rib)\b)[A-Za-z가-힣]+)?)",
+    re.I)
 # 부위가 바뀌는 말 — 이 말을 건너면 새 부위다(겉감 순서를 안감이 흐트러뜨리지 않게)
 _COMP_PART = re.compile(r"(?i)안감|배색|충전|시보리|립|포켓|lining|trim|contrast|coloring|filling|rib|pocket|shell\s*2")
 
@@ -522,10 +527,13 @@ def _fiber_name(product_desc, words: str) -> str | None:
     g = _fiber_guess(words)
     if g == "인조가죽":
         return g
-    last = product_desc._fiber(words.split()[-1])
+    parts = words.split()
+    last = product_desc._fiber(parts[-1])
     if last in FIBERS:
         return last
-    return product_desc._fiber(words) or last or g
+    # 「100% Polyester FABRIC2」처럼 섬유 뒤에 다른 낱말이 붙으면 앞 낱말이 섬유다
+    first = product_desc._fiber(parts[0]) if len(parts) > 1 else None
+    return product_desc._fiber(words) or (first if first in FIBERS else None) or last or g
 
 
 # 약자 혼용률 — 일류는 「원단 혼용률: C 75 P 25」「C 57 MD 38 SP5」「P 85 R 13 SP 2 Lining- P 100」로 적는다
@@ -593,14 +601,20 @@ def blend_fibers(body: str, name: str = "") -> tuple[list[str], bool]:
         if f:
             pct = float(m.group(2))
             hits.append((m.start(), m.end(), f, pct if pct <= 100 else 0.0))
+    # 숫자가 앞인 꼴 — 「Outshell: 78% Nylon, 22% Spandex Lining: 98% Polyester」(Hyein Seo 전부).
+    # 예전엔 이름 앞 꼴이 **하나도** 없을 때만 봤다. 그런데 이 글에서도 이름 앞 꼴이 엉뚱하게 한둘
+    # 잡힌다(「Spandex Lining: 98%」 → Lining 98) — 그래서 숫자 앞 꼴을 안 보고 섬유를 잃었다(9벌).
+    # 둘 다 읽고 **알아본 섬유가 많은 쪽**을 쓴다. 비기면 이름 앞 꼴(예전 그대로).
+    num: list[tuple[int, int, str, float]] = []
+    for m in _COMP_NUM_FIRST.finditer(text):
+        f = _fiber_name(product_desc, m.group(2))   # 「100% COW LEATHER」은 두 낱말이라야 소가죽이다(tonywack)
+        if f:
+            pct = float(m.group(1))
+            num.append((m.start(), m.end(), f, pct if pct <= 100 else 0.0))
+    if len(num) > len(hits):
+        hits = num
     if not hits:
         hits = _abbr_hits(text)
-    if not hits:                                     # 「100% 모달 소재」 — 이름 앞 꼴이 하나도 없을 때만
-        for m in _COMP_NUM_FIRST.finditer(text):
-            f = product_desc._fiber(m.group(2)) or _fiber_guess(m.group(2))
-            if f:
-                pct = float(m.group(1))
-                hits.append((m.start(), m.end(), f, pct if pct <= 100 else 0.0))
     if not hits:
         return [], False
     runs: list[list[tuple[str, float]]] = [[]]
