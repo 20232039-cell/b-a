@@ -188,15 +188,27 @@ def thin_row(r: dict, tags: dict, bi: dict, ci: dict, pref: dict) -> dict:
     return row
 
 
-def size_entry(e: dict | None) -> dict | None:
+KNOWN_T: set[str] = set()   # 창고 품목(subtype)에 쓰이는 말 — main 이 채운다(size_entry 주석)
+
+
+def size_entry(e: dict | None, known_t: set[str] | None = None) -> dict | None:
     """상품 하나의 사이즈를 앱 모양으로. 세트는 size_parts 로 하의 표를 따로 싣는다.
 
     part 값은 「하의」 하나뿐이다(size_from_ocr.SIZE_PARTS 주석) — 기본 size 가 상의다.
     다른 말이 섞이면 앱이 옷장 카테고리와 짝을 못 맞추니 여기서 한 번 더 거른다.
+    t(품목)는 상품 품목(subtype)에 실제로 쓰이는 말일 때만 싣는다 — 앱이 이 말로 긴바지·반바지
+    핏 기준을 가르는데(없으면 긴바지), 창고에 없는 말(「쇼츠」 — 창고 말은 「숏팬츠」)은 짝이 안 맞는다.
     """
     if not e:
         return e
-    parts = [p for p in (e.get("size_parts") or []) if p.get("part") == "하의" and p.get("sizes")]
+    parts = []
+    for p in e.get("size_parts") or []:
+        if p.get("part") != "하의" or not p.get("sizes"):
+            continue
+        if p.get("t") and known_t is not None and p["t"] not in known_t:
+            print(f"   size_parts 의 품목 {p['t']!r} 는 창고 품목에 없는 말이라 뺀다")
+            p = {k: v for k, v in p.items() if k != "t"}
+        parts.append(p)
     out = {k: v for k, v in e.items() if k != "size_parts"}
     if parts:
         out["size_parts"] = parts
@@ -225,7 +237,7 @@ def full(r: dict, tags: dict, sizes: dict, crawl: dict,
         out["mat"] = mat
     out.update({
         "tags": fold_finish((tags.get(r["source_url"]) or {}).get("tags") or {}),
-        "size": size_entry(sizes.get(r["source_url"])),
+        "size": size_entry(sizes.get(r["source_url"]), KNOWN_T),
         "gallery": d.get("gallery") or [],
         # 설명문을 내보낸다(2026-09-20 사람 결정: 「지금 당장 메울 곳은 메워, 배송이나
         # 세탁/후기 문의 같은 찌꺼기들은 싹 지우고」). 2026-09-07 에 안 내보내기로 한 까닭이
@@ -301,6 +313,7 @@ def main() -> int:
         print(f"아직 안 내보내는 매장 {sorted(platforms.APP_HOLD)} — {held}벌 뺌")
     tags = json.loads((DATA / "product_tags_full.json").read_text(encoding="utf-8"))
     sizes = json.loads((DATA / "product_sizes.json").read_text(encoding="utf-8"))
+    KNOWN_T.update(r.get("subtype") for r in rows if r.get("subtype"))
     crawl = {}
     for p in sorted((DATA / "crawl").glob("*.jsonl")):
         if p.name.startswith("_"):

@@ -2281,6 +2281,8 @@ def load_manual() -> dict[str, dict]:
 
     「부위」는 세트(셋업)처럼 한 상품에 표가 둘일 때만 쓴다 — 비우거나 「상의」면 기본 표,
     「하의」면 size_parts 로 따로 나간다(앱 세션과 정한 모양 2026-09-24, SIZE_PARTS 주석).
+    「품목」은 하의 표에만 쓴다 — 상품 품목(subtype)과 같은 말(팬츠 · 숏팬츠 · 스커트 …). 앱이 이
+    말로 긴바지와 반바지 핏 기준을 가른다(없으면 긴바지로 본다, 앱 세션 2026-09-24).
     """
     if not MANUAL.exists():
         return {}
@@ -2308,6 +2310,9 @@ def load_manual() -> dict[str, dict]:
         e["sizes"][lab] = nums
         if names and not e["size_names"]:
             e["size_names"] = names
+        t = (r.get("품목") or "").strip()
+        if part == "하의" and t:
+            e["t"] = t
     # 라벨마다 값 개수가 다르면 짧은 쪽에 맞춘다 — 사람도 오타를 낸다
     def _trim(e):
         n = min(len(v) for v in e["sizes"].values())
@@ -2324,7 +2329,8 @@ def load_manual() -> dict[str, dict]:
             # 하의 표만 있으면 그게 기본 표다 — size_parts 는 「기본 = 상의」일 때만 뜻이 있다
             acc[u] = low
             continue
-        acc[u]["size_parts"] = [{"part": "하의", "size_names": low["size_names"], "sizes": low["sizes"]}]
+        acc[u]["size_parts"] = [{"part": "하의", **({"t": low["t"]} if low.get("t") else {}),
+                                 "size_names": low["size_names"], "sizes": low["sizes"]}]
     return acc
 
 
