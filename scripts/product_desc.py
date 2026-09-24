@@ -400,6 +400,11 @@ def clean(text: str, acc: bool = False) -> str:
     return "\n".join(out)[:2000]
 
 
+_MINED_CARE = re.compile(r"세제|표백|건조기|다림질|드라이\s?클리닝|손세탁|물세탁|세탁|탈수|보풀|필링|이염|물빠짐|"
+                         r"주의해\s?주|주의하여|권장합니다|삼가|보관하여|보관해\s?주")
+_OCR_CAPS = re.compile(r"(?<![A-Za-z])[A-Z]{2,4}(?![A-Za-z])")
+
+
 def from_mined(rec: dict | None) -> str:
     """detail_from_ocr 이 그림에서 뽑아 둔 줄(crawl/detail/<slug>.jsonl)을 한 덩이로."""
     if not rec:
@@ -411,6 +416,13 @@ def from_mined(rec: dict | None) -> str:
     for s in (rec.get("description") or []):
         s = re.sub(r"\s+", " ", s).strip()
         if _JUNK.search(s) or _is_table(s) or _is_scale(s) or not says_clothes(s):
+            continue
+        # 그림 글의 세탁·관리 문장은 설명이 아니다 — the-coldest-moment 는 매장 글의 세탁 한 줄을 빼자 그림의
+        # 「합성세제 ASE 원단 손상을 유발할 수 있으므로 … 권장합니다」가 설명 자리로 올라왔다(2026-09-24).
+        if _MINED_CARE.search(s):
+            continue
+        # 한글 문장에 뜻 없는 대문자 토막이 둘 이상 끼면 OCR 이 글자를 뭉갠 줄이다(「ASE … SAMA ASS」)
+        if len(_OCR_CAPS.findall(s)) >= 2 and len(_HANGUL.findall(s)) > len(s) * 0.3:
             continue
         han = len(_HANGUL.findall(s))
         if han < 8 or han / max(1, len(s)) < 0.45:
@@ -444,10 +456,20 @@ def drop_lines(text: str, lines: set[str]) -> str:
     return "\n".join(ln for ln in (text or "").split("\n") if ln not in lines).strip() if lines else text
 
 
-def best(description: str, mined: dict | None = None, acc: bool = False) -> tuple[str, str]:
-    """보여 줄 설명과 그 출처. 매장 글이 먼저고, 아무 말도 안 하면 그림에서 읽은 글."""
+# 카페24 스펙 칸의 짧은 설명 — 넘버링은 설명 칸에 후기 위젯·반품 안내만 있고 진짜 설명
+# (「시곗줄을 연상시키는 체인 브레이슬릿입니다」)은 여기에만 있다(2026-09-24).
+SPEC_DESC_KEYS = ("상품간략설명", "상품요약정보", "간략설명", "상품 간략설명")
+
+
+def best(description: str, mined: dict | None = None, acc: bool = False,
+         spec: dict | None = None) -> tuple[str, str]:
+    """보여 줄 설명과 그 출처. 매장 글이 먼저, 없으면 스펙의 간략설명, 그래도 없으면 그림에서 읽은 글."""
     t = clean(description, acc)
     if t:
         return t, "shop"
+    if spec:
+        t = clean("\n".join(str(spec[k]) for k in SPEC_DESC_KEYS if spec.get(k)), acc)
+        if t:
+            return t, "shop"
     t = from_mined(mined)
     return (t, "ocr") if t else ("", "")

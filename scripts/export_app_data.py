@@ -421,13 +421,17 @@ def main() -> int:
     # (dp 는 brands.json 에 적는다. 1 이면 안 쪼갠 것이다).
     DESC_PART_BYTES = 500_000
     desc_of: dict[str, dict[str, dict]] = defaultdict(dict)
+    back_of: dict[str, tuple] = {}      # 되풀이 줄을 빼고 비면 다시 채울 재료
     for r in rows:
         d = crawl.get(r["source_url"]) or {}
         txt, src = product_desc.best(d.get("description") or "",
                                      MINED.get((r["brand_slug"], str(r["product_no"]))),
-                                     acc=r.get("category_code") in size_from_ocr.NON_APPAREL_CODES)
+                                     acc=r.get("category_code") in size_from_ocr.NON_APPAREL_CODES,
+                                     spec=d.get("spec"))
         if txt:
             desc_of[r["brand_slug"]][f'{r["brand_slug"]}-{r["product_no"]}'] = {"t": txt, "s": src}
+            back_of[f'{r["brand_slug"]}-{r["product_no"]}'] = (d, MINED.get((r["brand_slug"], str(r["product_no"]))),
+                                                              r.get("category_code") in size_from_ocr.NON_APPAREL_CODES)
     # 매장이 설명마다 되풀이하는 줄은 뺀다(product_desc.store_repeats 주석). 매장 글과 그림 글을 따로 센다 —
     # 그림 글은 벌 수가 적어(포스센스티브 13) 문턱을 5벌로 둔다.
     # 옷과 잡화를 따로 센다 — 가방에만 붙는 가죽 관리 안내(margesherwood 157벌)는 매장 전체로 세면 40%를 못 넘는다.
@@ -442,8 +446,20 @@ def main() -> int:
                 if t2 != m[k]["t"]:
                     dropped_rep += 1
                     m[k]["t"] = t2
+        # 매장 글이 안내문뿐이었던 상품은 비었다 — 스펙의 간략설명, 그다음 그림 글로 채운다
+        # (넘버링 76벌: 설명 칸은 후기 위젯·관리 안내뿐이고 「상품간략설명」에 진짜 설명이 있다).
         for k in [k for k, v in m.items() if not v["t"]]:
-            del m[k]
+            d, mk, acc = back_of[k]
+            t = product_desc.clean("\n".join(str(d.get("spec", {}).get(x)) for x in product_desc.SPEC_DESC_KEYS
+                                             if (d.get("spec") or {}).get(x)), acc)
+            if t:
+                m[k] = {"t": t, "s": "shop"}
+                continue
+            t = product_desc.from_mined(mk)
+            if t:
+                m[k] = {"t": t, "s": "ocr"}
+            else:
+                del m[k]
     print(f"설명에서 매장 되풀이 줄을 뺀 상품 {dropped_rep}")
     parts_of: dict[str, int] = {}
     desc_bytes = 0
