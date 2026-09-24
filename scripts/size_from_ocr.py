@@ -1471,8 +1471,64 @@ def parse_label_colon_rows(text: str) -> tuple[bool, list[str] | None, dict[str,
     return True, names, out
 
 
+# 「1사이즈 (단면)가슴-62CM 어깨-55CM 기장-64CM 소매장-63CM」 — 한 줄이 한 사이즈이고 줄 안에 「항목-값」이
+# 이어지는 표(포스센스티브 설명글 8벌). 사이즈 이름이 제 줄에 따로 서고 값이 다음 줄에 오기도 한다.
+# parse_label_colon_rows 는 줄마다 **같은 항목**이 되풀이되는 꼴이라 이 줄을 버리고, 그 꼴로 판정된 뒤에는
+# 다른 갈래로 넘기지 않아 이 표가 통째로 빠졌다. 줄 첫머리의 사이즈 이름, 알아보는 항목 둘 이상,
+# **모든 줄의 항목 차례가 같을 것**, 줄 둘 이상 — 이 넷이 다 맞을 때만 받는다.
+_SR_HEAD = re.compile(r"^\s*(\d{1,3}|XXS|XS|S|M|L|XL|XXL|XXXL|FREE|F)\s*(?:사이즈|size)\b\s*(?:\(\s*(?:단면|cm)\s*\))?\s*(.*)$", re.I)
+# 구분자 없이 「밑단 48cm」로 적힌 칸도 같은 줄에 섞인다(포스센스티브 버뮤다). 한글 항목만 구분자를 뺄 수 있다.
+_SR_CELL = re.compile(r"([가-힣]{1,6}\s*(?:[:\-=：]\s*)?|[A-Za-z][A-Za-z ]{1,18}?\s*[:\-=：]\s*)(\d{1,3}(?:\.\d)?)\s*cm", re.I)
+
+
+def parse_size_rows(text: str) -> tuple[list[str], dict[str, list[float]]] | None:
+    lines = [ln.strip() for ln in (text or "").splitlines()]
+    rows = []                              # (이름, [(라벨, 값)])
+    i = 0
+    while i < len(lines):
+        m = _SR_HEAD.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        rest = m.group(2)
+        cells = _SR_CELL.findall(rest)
+        if len(cells) < 2 and i + 1 < len(lines) and not _SR_HEAD.match(lines[i + 1]):
+            nxt = lines[i + 1]
+            if not _LV_BODY.search(nxt):
+                cells = _SR_CELL.findall(nxt)
+                if len(cells) >= 2:
+                    i += 1
+        i += 1
+        if len(cells) < 2 or _LV_BODY.search(rest):
+            continue
+        labs = [_lv_label(re.sub(r"[:\-=：\s]+$", "", a)) for a, _ in cells]
+        if any(x is None for x in labs) or len(set(labs)) != len(labs):
+            continue                       # 모르는 항목이나 같은 항목이 둘 — 이 꼴이 아니다
+        row = (m.group(1).upper(), list(zip(labs, (float(v) for _, v in cells))))
+        if row not in rows:                # 설명글과 상세글에 같은 표가 두 번 온다 — 똑같은 줄은 접는다
+            rows.append(row)
+    if len(rows) < 2:
+        return None
+    order = [lab for lab, _ in rows[0][1]]
+    if any([lab for lab, _ in r] != order for _, r in rows):
+        return None                        # 줄마다 항목이 다르다 — 어느 칸이 어디인지 모른다
+    names = [nm for nm, _ in rows]
+    if len(set(names)) != len(names):
+        return None                        # 같은 사이즈에 값이 둘 — 어느 쪽이 맞는지 모른다
+    digits = all(n.isdigit() for n in names)
+    seq = digits and [int(n) for n in names] == list(range(int(names[0]), int(names[0]) + len(names)))
+    std = not digits
+    cols = {lab: [r[j][1] for _, r in rows] for j, lab in enumerate(order)}
+    return (names if seq or std else None), cols
+
+
 def _from_ocr(text: str) -> tuple[list[str] | None, dict[str, list[float]]]:
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    sr = parse_size_rows(text)
+    if sr:
+        clean = clean_ocr(sr[1])
+        if len(clean) >= 2:
+            return sr[0], clean
     is_lv, lv_names, lv = parse_label_colon_rows(text)
     if is_lv:
         clean = clean_ocr(lv) if lv else {}
@@ -3079,6 +3135,23 @@ def main():
                     sl = parse_slash_table(body)
                     if sl and len(clean_ocr(sl[1])) > len(sizes):
                         sizes, names, source = clean_ocr(sl[1]), sl[0], "html"
+                # 한 줄 한 사이즈 「1사이즈 (단면)가슴-62CM 어깨-55CM …」(parse_size_rows 주석)
+                if len(sizes) < 2:
+                    sr = parse_size_rows(body)
+                    if sr and len(clean_ocr(sr[1])) > len(sizes):
+                        sizes, names, source = clean_ocr(sr[1]), sr[0], "html"
+            # HTML 표가 한 사이즈 몇 항목만 잡았는데(버뮤다: 1사이즈 밑단·총장, 패딩 셔츠: 1사이즈 네 항목) 설명글에
+            # 사이즈별 줄이 다 있으면 그쪽을 쓴다. 기존 표의 항목이 다 들어 있고 값이 1cm 안에서 맞을 때만 — 다른 표로 바꾸지 않는다.
+            elif source == "html":
+                body = "\n".join(t for t in (d.get("description") or "", d.get("detail_text") or "") if t)
+                sr = parse_size_rows(body)
+                cs = clean_ocr(sr[1]) if sr else {}
+                wide = lambda st: max((len(v) for v in st.values() if isinstance(v, list)), default=0)
+                if cs and set(sizes) <= set(cs) and (len(cs) > len(sizes) or wide(cs) > wide(sizes)) and all(
+                        isinstance(sizes[c], list) and len(sizes[c]) <= len(cs[c]) and all(
+                            isinstance(a, (int, float)) and isinstance(b, (int, float)) and abs(a - b) <= 1
+                            for a, b in zip(sizes[c], cs[c])) for c in sizes):
+                    sizes, names = cs, sr[0]
             # 브라우저가 본 표·설명글 — 서버 HTML 에 없던 것이 여기 있다
             b = brw.get(r["source_url"])
             if len(sizes) < 2 and b:

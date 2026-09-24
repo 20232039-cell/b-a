@@ -52,6 +52,10 @@ def _num(s: str) -> int:
 def _big(u: str) -> str:
     """썸네일 주소(`/thumbnails/…_1000.jpg`)를 원본(`…/image_N.jpg`)으로 — 크기가 달라도 같은 그림이 같은 주소가 되게."""
     u = (u or "").split("?")[0]
+    # 무신사 그림 창고의 상세 그림은 「//image.msscdn.net/…」처럼 스킴 없이 온다. 그대로 두면 OCR 이
+    # 내려받지 못해 포스센스티브 11벌에서 그림 96장을 못 읽었다(2026-09-24).
+    if u.startswith("//"):
+        u = "https:" + u
     return re.sub(r"/thumbnails(/uploadedFiles/.+?)_\d+(\.\w+)$", r"\1\2", u)
 
 
