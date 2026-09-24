@@ -105,7 +105,18 @@ def _mask_button_down(m: re.Match) -> str:
 
 OCR_SPLIT_DANMYEON = re.compile(r"단\s+면(?![가-힣])")
 
-LEATHER_TRIM = re.compile(r"(?:소|양|합성|인조|에코|재생|송아지|천연)?가죽\s*(?:라벨|탭|패치|파이핑|트리밍|와펜)")
+# 부자재의 가죽 — 옷의 소재가 아니다. 처음엔 「가죽 라벨·탭·패치…」만 봤는데, 혼용률 없는 옷의 가죽 표본(E 판)
+# 12벌 중 넷이 「레더 라벨」「레더 탭」「가죽 로고 포인트」「가죽 소재 포인트」였다 — 레더·leather 와 로고·포인트도 본다.
+LEATHER_TRIM = re.compile(
+    r"(?:소|양|합성|인조|에코|재생|송아지|천연)?(?:가죽|레더|leather)\s*(?:소재\s*)?"
+    r"(?:라벨|탭|패치|파이핑|트리밍|트림|와펜|로고|포인트|배색|태그|지퍼|풀러|손잡이|핸들|스트랩"
+    r"|label|tab|patch|piping|trim|logo|tag|zipper|puller|pull|handle|strap)")
+FAKE_LEATHER = re.compile(r"fake\s*leather|페이크\s*가죽|인조\s*가죽")
+
+
+def fake_to_faux(text: str) -> str:
+    """「Fake Leather」「인조 가죽」 → 사전이 아는 인조가죽 말로(길이는 그대로 — 뒤 마스킹 자리가 안 밀리게)."""
+    return FAKE_LEATHER.sub(lambda m: ("faux leather" if m.group(0)[0] in "fF" else "인조레더").ljust(len(m.group(0))), text)
 
 NECKLESS = {"Pants", "Denim", "Skirts"}
 # 품목 이름이 곧 소매를 말하는 옷 — 맨투맨·후디·자켓/코트는 사실상 전부 긴소매다.
@@ -463,6 +474,8 @@ def strip_other_products(text: str, back: int = 60) -> str:
 FIBERS = {"코튼", "폴리에스터", "나일론", "레이온", "린넨", "스판덱스", "울", "아크릴", "캐시미어",
           "텐셀", "다운", "알파카", "모헤어", "큐프라", "아세테이트", "실크", "모달",
           "가죽", "천연가죽", "소가죽", "양가죽", "송아지가죽", "염소가죽", "말가죽"}
+VEGAN_DOWN = re.compile(r"(?i)(?:비건|에코|vegan|eco|faux)\s*(?:구스|덕|goose|duck)?\s*(?:다운|down)")
+DOWN_FILL = re.compile(r"(?i)(?:goose|duck)\s*down|구스\s*다운|덕\s*다운|오리털|거위털|솜털|filled\s*with[^.\n]{0,30}down|down\s*\d{2}\s*/\s*\d{2}|\d{2}\s*/\s*\d{2}\s*\(?\s*down|필\s*파워|fill\s*power")
 REAL_LEATHER = {"가죽", "천연가죽", "소가죽", "양가죽", "송아지가죽", "염소가죽", "말가죽"}
 LEATHER_WORD = re.compile(r"가죽|레더|leather", re.I)
 
@@ -472,7 +485,7 @@ LEATHER_WORD = re.compile(r"가죽|레더|leather", re.I)
 _COMP_ONE = re.compile(r"((?:[A-Za-z가-힣]+[ \t])?[A-Za-z가-힣]+)\s*[:：/]?\s*(\d{1,3}(?:\.\d+)?)\s?%")
 _COMP_NUM_FIRST = re.compile(r"(\d{1,3}(?:\.\d+)?)\s?%\s*([A-Za-z가-힣]+)")
 # 부위가 바뀌는 말 — 이 말을 건너면 새 부위다(겉감 순서를 안감이 흐트러뜨리지 않게)
-_COMP_PART = re.compile(r"(?i)안감|배색|충전|시보리|립|포켓|lining|trim|contrast|filling|rib|pocket|shell\s*2")
+_COMP_PART = re.compile(r"(?i)안감|배색|충전|시보리|립|포켓|lining|trim|contrast|coloring|filling|rib|pocket|shell\s*2")
 
 
 def _fiber_guess(words: str) -> str | None:
@@ -515,6 +528,45 @@ def _fiber_name(product_desc, words: str) -> str | None:
     return product_desc._fiber(words) or last or g
 
 
+# 약자 혼용률 — 일류는 「원단 혼용률: C 75 P 25」「C 57 MD 38 SP5」「P 85 R 13 SP 2 Lining- P 100」로 적는다
+# (61벌 중 55, % 없이). 「혼용률」 같은 이름표 바로 뒤에서만 읽고, 첫 부위의 합이 90~110 일 때만 받는다 —
+# 아무 데서나 「C100」을 읽으면 품번이 섬유가 된다.
+_ABBR = {"C": "코튼", "CO": "코튼", "P": "폴리에스터", "PE": "폴리에스터", "PL": "폴리에스터", "R": "레이온", "RA": "레이온",
+         "MD": "모달", "MO": "모달", "SP": "스판덱스", "SD": "스판덱스", "PU": "스판덱스", "N": "나일론", "NY": "나일론",
+         "W": "울", "WO": "울", "L": "린넨", "LI": "린넨", "AC": "아크릴", "CA": "캐시미어", "CS": "캐시미어",
+         "SI": "실크", "SK": "실크", "TE": "텐셀", "LY": "텐셀"}
+_ABBR_LABEL = re.compile(r"(?i)(?:혼용률|혼용|composition|fabric)\s*[:：]?\s*")
+_ABBR_ONE = re.compile(r"\b([A-Z]{1,2})\s*-?\s*(\d{1,3})(?![\d.])")
+
+
+def _abbr_hits(text: str) -> list[tuple[int, int, str, float]]:
+    out: list[tuple[int, int, str, float]] = []
+    for lab in _ABBR_LABEL.finditer(text or ""):
+        seg_from = lab.end()
+        seg = text[seg_from:seg_from + 120]
+        first = _ABBR_ONE.match(seg)
+        if not first:
+            continue
+        got = []
+        for m in _ABBR_ONE.finditer(seg):
+            f = _ABBR.get(m.group(1))
+            if not f:
+                continue
+            got.append((seg_from + m.start(), seg_from + m.end(), f, float(m.group(2))))
+        if not got:
+            continue
+        # 첫 부위(부위 말이 나오기 전까지)의 합으로 검산한다
+        head, last = [], got[0][0]
+        for g in got:
+            if _COMP_PART.search(text[last:g[0]]):
+                break
+            head.append(g); last = g[1]
+        if 90 <= sum(g[3] for g in head) <= 110:
+            out.extend(got)
+            break
+    return out
+
+
 def blend_fibers(body: str, name: str = "") -> tuple[list[str], bool]:
     """글에 「섬유 NN%」로 적힌 섬유 전부를 부위 차례·부위 안에서 비율 큰 순서로, 그리고 그런 게 있었는지.
 
@@ -541,6 +593,8 @@ def blend_fibers(body: str, name: str = "") -> tuple[list[str], bool]:
         if f:
             pct = float(m.group(2))
             hits.append((m.start(), m.end(), f, pct if pct <= 100 else 0.0))
+    if not hits:
+        hits = _abbr_hits(text)
     if not hits:                                     # 「100% 모달 소재」 — 이름 앞 꼴이 하나도 없을 때만
         for m in _COMP_NUM_FIRST.finditer(text):
             f = product_desc._fiber(m.group(2)) or _fiber_guess(m.group(2))
@@ -592,7 +646,11 @@ def order_materials(found: set[str], body: str, name: str, subtype: str = "",
     if "데님" in found and not (DENIM_NAME.search(f"{name} {subtype}") or DENIM_FABRIC.search(body or "")):
         found.discard("데님")
     if has_blend:
-        rest = [m for m in found if m not in FIBERS]
+        # 다운은 충전재라 겉감 혼용률에 안 나온다 — 「Outshell 100% Polyamide … Filled with Goose down 90/10」.
+        # 폴리아미드를 읽게 되자 이 규칙이 다운 파카 14벌의 다운을 지웠다(E3 판). **다운에만 쓰는** 충전재 말이
+        # 있으면 남긴다 — 그냥 「충전재」로 보았더니 신슐레이트(합성) 조끼·헤어핀에도 다운이 남았다(E4 표본).
+        keep_down = "다운" in found and DOWN_FILL.search(VEGAN_DOWN.sub(" ", body or ""))
+        rest = [m for m in found if m not in FIBERS or (m == "다운" and keep_down)]
         # 데님은 면으로 짠다. 혼용률에 면이 없으면 글의 「데님」은 남의 옷 이야기다.
         if "데님" in rest and "코튼" not in fib:
             rest.remove("데님")
@@ -889,7 +947,7 @@ class Tagger:
         self._name_wins(hits, name)
         out = {ax: sorted(hits[ax]) for ax in AXES if hits.get(ax)}
         # 소재는 가나다순이 아니라 order_materials 의 차례로(위 FIBERS 주석)
-        nm_text = mask_simile(NAME_PART.sub(" ", (name or "").lower()))
+        nm_text = mask_simile(fake_to_faux(NAME_PART.sub(" ", (name or "").lower())))
         nm_hits = self._scan(self.text_rules, nm_text).get("material", set())
         if category in GARMENT_CATEGORIES and self.not_garment_material:
             nm_hits -= self.not_garment_material
@@ -906,7 +964,11 @@ class Tagger:
         text = f"{name}\n{strip_negated(strip_other_products(strip_scale_bar(strip_styling_suggestion(strip_reviews(body)))))}".lower()
         for b in self.text_blocklist:  # '시어링'→시어, '레이어드 스타일링'→레이어드 같은 오탐을 먼저 지운다
             text = text.replace(b, " " * len(b))
-        text = LEATHER_TRIM.sub(lambda m: m.group(0).replace("가죽", "  "), text)
+        text = LEATHER_TRIM.sub(lambda m: re.sub(r"가죽|레더|leather", lambda w: " " * len(w.group(0)), m.group(0)), text)
+        # 「Fake Leather」는 인조가죽이다 — 사전의 「faux leather」로 바꿔 읽힌다(nuosmiq 로퍼, E 판 표본)
+        text = fake_to_faux(text)
+        # 「비건 구스 다운」「vegan down」은 합성 충전재다 — 다운이 아니다(badblood 바라클라바, E5 표본)
+        text = VEGAN_DOWN.sub(lambda m: " " * len(m.group(0)), text)
         text = mask_stain_victims(text)
         text = mask_simile(text)
         text = OCR_SPLIT_DANMYEON.sub(lambda m: m.group(0).replace("면", " "), text)
