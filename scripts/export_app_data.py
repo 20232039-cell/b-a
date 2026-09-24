@@ -465,6 +465,8 @@ def main() -> int:
     # 옷과 잡화를 따로 센다 — 가방에만 붙는 가죽 관리 안내(margesherwood 157벌)는 매장 전체로 세면 40%를 못 넘는다.
     acc_of = {f'{r["brand_slug"]}-{r["product_no"]}': r.get("category_code") in size_from_ocr.NON_APPAREL_CODES for r in rows}
     dropped_rep = 0
+    name_only = 0
+    name_of = {f'{r["brand_slug"]}-{r["product_no"]}': r.get("name") or "" for r in rows}
     for slug, m in desc_of.items():
         for (src_kind, min_n), acc in ((k, a) for k in (("shop", 15), ("ocr", 5)) for a in (False, True)):
             keys = [k for k, v in m.items() if v["s"] == src_kind and acc_of.get(k, False) == acc]
@@ -474,6 +476,12 @@ def main() -> int:
                 if t2 != m[k]["t"]:
                     dropped_rep += 1
                     m[k]["t"] = t2
+        # 설명이 상품 이름 한 줄뿐이면 비운다 — 앱은 이름을 상세 맨 위에 크게 쓴다(앱 세션 2026-09-24).
+        # 다른 글 사이에 섞인 이름 줄은 앱이 뺀다. 비운 것은 아래에서 스펙·그림 글로 채울 수 있으면 채운다.
+        for k, v in m.items():
+            if v["s"] == "shop" and product_desc.is_name_only(v["t"], name_of.get(k, "")):
+                v["t"] = ""
+                name_only += 1
         # 매장 글이 안내문뿐이었던 상품은 비었다 — 스펙의 간략설명, 그다음 그림 글로 채운다
         # (넘버링 76벌: 설명 칸은 후기 위젯·관리 안내뿐이고 「상품간략설명」에 진짜 설명이 있다).
         for k in [k for k, v in m.items() if not v["t"]]:
@@ -488,7 +496,17 @@ def main() -> int:
                 m[k] = {"t": t, "s": "ocr"}
             else:
                 del m[k]
-    print(f"설명에서 매장 되풀이 줄을 뺀 상품 {dropped_rep}")
+    # 매장 글은 특징(f)과 안내(n)로 나눠 싣는다 — 앱은 있으면 그대로 그리고, 없으면 t 를 제 규칙으로 나눈다.
+    # 그림 글(s="ocr")은 나누지 않는다 — 앱이 통으로 보여 준다(앱 세션 2026-09-24).
+    for m in desc_of.values():
+        for v in m.values():
+            if v["s"] == "shop":
+                f, n = product_desc.split_fn(v["t"])
+                if f:
+                    v["f"] = f
+                if n:
+                    v["n"] = n
+    print(f"설명에서 매장 되풀이 줄을 뺀 상품 {dropped_rep} · 이름 한 줄뿐이라 비운 설명 {name_only}")
     parts_of: dict[str, int] = {}
     desc_bytes = 0
     for slug, m in sorted(desc_of.items()):
