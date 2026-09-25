@@ -90,6 +90,9 @@ _JUNK = re.compile(
     # 사이즈 재는 법·구매 안내 — 옷 이야기가 아니라 표 읽는 법이다
     r"기준입니다|측정\s?기준|측정\s?방법|뒷목부터|오차가|오차\s?범위|단면\s?기준|"
     r"구매해\s?주시|구매하시는|참고\s?하?시?어|참고해\s?주|"
+    # 사이즈 추천 안내의 앞머리 — 「사이즈 추천 가이드」「사이즈 추천을 원하신다면」만 남아 설명 탭에 이 두 줄만
+    # 떴다(forcesensitive 8편, 앱 세션 2026-09-25). 「정사이즈 추천」 같은 핏 이야기는 앞에 글자가 붙어 안 걸린다.
+    r"(?<![가-힣])사이즈\s?추천\s?(?:가이드|을\s?원하)|"
     r"size\s?guide|size\s?chart|size\s?info|모델\s?(정보|착용|사이즈)|model\s?(info|size|is)|"
     # 「Daria is 177cm wearing FREE size」 — 모델 이름이 앞에 와서 model 로는 안 잡힌다
     r"\b[A-Z][a-z]+\s+is\s+\d{2,3}\s?cm|\bwearing\s+(?:a\s+)?(?:size\s+)?[A-Z0-9]|"
@@ -207,20 +210,26 @@ _SPLIT_BLEND = re.compile(r"\n+|(?<=[다요죠함음])\s+|(?<=[.!?])\s+|"
 _SPLIT2_BLEND = re.compile(r"\s*,\s*|\s{2,}|\s*/\s*(?=[가-힣A-Z])")
 
 
-def _parts(text: str, for_blend: bool = False):
+def _parts(text: str, for_blend: bool = False, with_comma: bool = False):
+    """조각들. with_comma=True 면 (조각, 바로 앞 조각과 쉼표로만 갈렸는가) 를 낸다 — clean 이 두 조각을 다 살리면
+    쉼표로 도로 잇는다(아래 clean 주석)."""
     sp1, sp2 = (_SPLIT_BLEND, _SPLIT2_BLEND) if for_blend else (_SPLIT, _SPLIT2)
     for p in sp1.split(text or ""):
         p = re.sub(r"\s+", " ", (p or "")).strip(" :=|·-ㆍ*")
         if not p:
             continue
         if len(p) <= 300:
-            yield p
+            yield (p, False) if with_comma else p
             continue
         # 길다고 버리지 않는다 — 잘라서 본다(첫판은 여기서 멀쩡한 설명을 통째로 잃었다)
-        for q in sp2.split(p):
+        pos, comma = 0, False
+        for m in [*sp2.finditer(p), None]:
+            q = p[pos:m.start()] if m else p[pos:]
             q = re.sub(r"\s+", " ", q).strip(" :=|·-ㆍ*")
             if q:
-                yield q[:400]
+                yield (q[:400], comma) if with_comma else q[:400]
+            if m:
+                pos, comma = m.end(), "," in m.group()
 
 
 # ── 혼용률을 칸으로 ──────────────────────────────────────────────────────────
@@ -380,11 +389,17 @@ def clean(text: str, acc: bool = False) -> str:
     acc=True(잡화 상품)면 벨트·모자·가방·주얼리의 말도 받는다 — 옷에 켜면 「천연가죽의 자연스러운 현상으로
     불량 사유가 아닙니다」 같은 안내문이 가죽 낱말 때문에 옷 설명으로 들어왔다(전후 전수 161벌)."""
     out: list[str] = []
-    for part in _parts(text):
+    # 긴 조각은 쉼표에서도 갈라 거른다(버릴 말을 잘게 가려내려고). 그런데 **둘 다 살아남은 이웃 조각**을 줄로 넘기면
+    # 한 문장이 쉼표에서 두 특징으로 쪼개진다 — 「… 바지핏 연출 무릎 및 포켓」 / 「후면 패널에 적용된 …」
+    # (9999archive-438, 앱 세션 2026-09-25). 거르는 일은 그대로 두고, 살아남은 이웃이면 쉼표로 도로 잇는다.
+    last_whole = False           # 바로 앞 조각이 잘리지 않고 그대로 out 끝에 들어갔는가
+    for part, comma in _parts(text, with_comma=True):
+        join, last_whole = comma and last_whole, False
         if _SECTION_HEAD.match(part) or _SIZE_HEAD.match(part):
             continue
         part = _INLINE_HEAD.sub("", part)
         m = _JUNK.search(part) or _PRICE.search(part)
+        cut = bool(m)
         if m:
             # 조각 하나에 옷 이야기와 안내문이 같이 있으면 **통째로 버리지 않는다**.
             # 앞선 잣대가 그래서 한 번 졌다 — cayl 은 옷 이야기가 스무 덩이인데
@@ -432,7 +447,11 @@ def clean(text: str, acc: bool = False) -> str:
             continue
         if part in out or any(part in p for p in out):
             continue
-        out.append(part)
+        if join and out:
+            out[-1] += ", " + part
+        else:
+            out.append(part)
+        last_whole = not cut
     mat = material_of(text)
     if mat:
         pairs = {(a.upper(), b) for a, b in _FIBER_PCT.findall(mat)}
