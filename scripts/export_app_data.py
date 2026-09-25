@@ -191,7 +191,10 @@ def thin_row(r: dict, tags: dict, bi: dict, ci: dict, pref: dict) -> dict:
 KNOWN_T: set[str] = set()   # 창고 품목(subtype)에 쓰이는 말 — main 이 채운다(size_entry 주석)
 
 
-def size_entry(e: dict | None, known_t: set[str] | None = None) -> dict | None:
+TOP_CATS = {"tops", "outer"}
+
+
+def size_entry(e: dict | None, known_t: set[str] | None = None, row: dict | None = None) -> dict | None:
     """상품 하나의 사이즈를 앱 모양으로. 세트는 size_parts 로 하의 표를 따로 싣는다.
 
     part 값은 「하의」 하나뿐이다(size_from_ocr.SIZE_PARTS 주석) — 기본 size 가 상의다.
@@ -209,9 +212,15 @@ def size_entry(e: dict | None, known_t: set[str] | None = None) -> dict | None:
             print(f"   size_parts 의 품목 {p['t']!r} 는 창고 품목에 없는 말이라 뺀다")
             p = {k: v for k, v in p.items() if k != "t"}
         parts.append(p)
-    out = {k: v for k, v in e.items() if k != "size_parts"}
+    out = {k: v for k, v in e.items() if k not in ("size_parts", "t")}
     if parts:
         out["size_parts"] = parts
+        # 세트는 기본 표(상의)에도 품목을 싣는다 — 상품 품목이 하의로 들어온 세트(ronron-7966 「스커트」)는
+        # 앱이 상의 표를 어느 핏 묶음과 견줄지 모른다(앱 세션 2026-09-25). 사람이 적은 상의 품목이 먼저,
+        # 없으면 상품 품목이 상의·아우터일 때 그것(forcesensitive 셋업 「맨투맨」). 세트가 아니면 안 싣는다.
+        t = e.get("t") or ((row or {}).get("subtype") if (row or {}).get("category_code") in TOP_CATS else None)
+        if t and (known_t is None or t in known_t):
+            out["t"] = t
     return out
 
 
@@ -237,7 +246,7 @@ def full(r: dict, tags: dict, sizes: dict, crawl: dict,
         out["mat"] = mat
     out.update({
         "tags": fold_finish((tags.get(r["source_url"]) or {}).get("tags") or {}),
-        "size": size_entry(sizes.get(r["source_url"]), KNOWN_T),
+        "size": size_entry(sizes.get(r["source_url"]), KNOWN_T, r),
         "gallery": d.get("gallery") or [],
         # 설명문을 내보낸다(2026-09-20 사람 결정: 「지금 당장 메울 곳은 메워, 배송이나
         # 세탁/후기 문의 같은 찌꺼기들은 싹 지우고」). 2026-09-07 에 안 내보내기로 한 까닭이
