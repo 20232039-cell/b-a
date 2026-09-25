@@ -3204,6 +3204,25 @@ def main():
                     if (_by_url[u]["brand_slug"], json.dumps(st, ensure_ascii=False, sort_keys=True))
                     not in _st_wide}
         print(f"세로로 쌓인 사이즈가이드 표 가운데 매장 공용으로 판단해 버림 {len(_st_wide)}가지")
+    # 크리마 핏 위젯의 실측표(fetch_cremafit) — 상품마다 따로 받은 표라 매장 공용 거르기는 안 건다.
+    # 둘레는 받을 때 이미 단면으로 바꿔 적었다. 첫 줄이 「Size | 이름 …」이다(2026-09-25 roem).
+    crema: dict[str, tuple] = {}
+    for p4 in sorted((CRAWL / "cremafit").glob("*.jsonl")) if (CRAWL / "cremafit").exists() else []:
+        for d4 in iter_jsonl(p4):
+            lines4 = [[c.strip() for c in ln.split("|")] for ln in (d4.get("size_text") or "").splitlines()]
+            if len(lines4) < 3 or lines4[0][0].lower() not in ("size", "사이즈"):
+                continue
+            names4 = lines4[0][1:]
+            cols4: dict[str, list] = {}
+            for cells in lines4[1:]:
+                lab4 = canon_label(cells[0])
+                if lab4 and lab4 not in cols4 and len(cells) - 1 == len(names4):
+                    cols4[lab4] = [fix_value(lab4, v) for v in cells[1:]]
+            cols4 = {c: v for c, v in cols4.items() if any(x is not None for x in v)}
+            if len(cols4) >= 2:
+                crema[d4["source_url"]] = (names4, cols4)
+    if crema:
+        print(f"크리마 핏 실측표 {len(crema)}건")
     girth_keys = brand_girth(CRAWL)
     label_med = brand_label_median(CRAWL)
     shared = shop_wide_tables(CRAWL, rows)
@@ -3325,6 +3344,11 @@ def main():
                     s3 = clean_ocr(pr[1])
                     if len(s3) > len(sizes):
                         sizes, names, source = s3, pr[0], "sizeguide"
+            # ④ 크리마 핏 위젯 표 — 매장 표를 위젯이 따로 들고 있다(roem). 글이라 사진보다 앞선다.
+            if len(sizes) < 2 and r["source_url"] in crema:
+                s4 = clean_ocr(crema[r["source_url"]][1])
+                if len(s4) > len(sizes):
+                    sizes, names, source = s4, crema[r["source_url"]][0], "cremafit"
             if len(sizes) < 2 and ocr.get(k):
                 names2, sizes2 = from_ocr(ocr[k])
                 if len(sizes2) > len(sizes):

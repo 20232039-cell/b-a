@@ -75,11 +75,16 @@ jobs:
             python scripts/fetch_sizeguide.py --all-missing \
               --source "$SRC" --workers 4 --delay 0.2 $RT
           fi
+      # 크리마 핏 위젯이 실측표를 따로 들고 있는 매장(2026-09-25 전수: roem 184벌 · insilence).
+      # 주소 하나에 GET 한 번 — 사이즈 없는 옷만 본다. 받아 둔 상품은 건너뛴다.
+      - name: 크리마 핏 실측표 받기
+        shell: bash
+        run: python scripts/fetch_cremafit.py --brands "roem,insilence" --only-missing --delay 1
       # 이미 받아 둔 상품은 건너뛰므로(sidecar 에 있으면 skip) 매번 돌려도 새것만 받는다.
       - name: commit & push (rebase 후, 3회 재시도)
         shell: bash
         run: |
-          git add data/crawl/sizeguide/ data/crawl/pagesize/ 2>/dev/null || true
+          git add data/crawl/sizeguide/ data/crawl/pagesize/ data/crawl/cremafit/ 2>/dev/null || true
           git diff --cached --quiet && { echo "새로 받은 것 없음"; exit 0; }
           git commit -m "사이즈표 그림 (Actions)"
           for i in 1 2 3; do
