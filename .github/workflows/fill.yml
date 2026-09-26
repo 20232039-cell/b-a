@@ -13,10 +13,12 @@
 
 name: fill-gaps
 
+# 사람 지시(2026-09-26): 「끄고 필요할때만」 — 최근 판마다 스스로 채우는 양이 0~46벌이라
+# 자동 일정은 껐다. 필요할 때 workflow_dispatch 로 손으로 띄운다(scope=existing|all).
+# 다시 켜려면 아래 두 줄을 schedule: 아래에 되살린다.
+#   - cron: "10 */2 * * *"     # 두 시간마다 — 기존 브랜드
+#   - cron: "40 3,15 * * *"    # 하루 두 번 — 전부
 on:
-  schedule:
-    - cron: "10 */2 * * *"     # 두 시간마다 — 기존 브랜드
-    - cron: "40 3,15 * * *"    # 하루 두 번 — 전부
   workflow_dispatch:
     inputs:
       scope:
