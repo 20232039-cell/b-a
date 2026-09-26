@@ -404,6 +404,9 @@ CATEGORY_NAME_RULES = [
     ("jewelry", ["jewelry", "jewellery", "주얼리", "necklace", "목걸이", "bracelet", "팔찌", "earring", "귀걸이"]),
     ("accessories", ["acc", "액세서리", "악세사리", "belt", "벨트", "socks", "양말", "ring", "scarf", "머플러", "muffler", "underwear", "언더웨어", "eyewear", "sunglass", "sunglasses", "keyring", "glove", "장갑", "bag charm", "charm", "키링"]),
     ("suiting", ["suit", "수트", "정장", "setup", "셋업"]),
+    # 살림살이 칸 — 목록에서 뺀다(kids·pet 과 같이). years-ago 「라이프」 칸의 목각·돌 조각 16벌,
+    # 「향수」 2벌이 설명글의 sleeve 한 낱말로 상의가 됐다(2026-09-26).
+    ("lifestyle", ["라이프", "lifestyle", "리빙", "living", "향수", "fragrance", "perfume", "오브제", "objet"]),
 ]
 
 # 성별 — 카테고리 이름에서. 없으면 브랜드 기본값.
@@ -605,7 +608,17 @@ PLACEHOLDER_PRICE = 9_999_999
 # 매장이 룩북을 넣어 두는 칸. 「STORE」·「COLLECTION」은 진짜 상품 칸이라 넣지 않는다
 # (perenn 의 ONLINE STORE 138벌, anotheryouth 의 COLLECTION 373벌이 전부 상품이다).
 EDITORIAL_CAT = re.compile(r"^(?:projects?|journal|campaign|lookbook|look ?book|editorial|"
-                           r"magazine|press|moments|룩북|화보|캠페인|매거진)$", re.I)
+                           r"magazine|press|moments|룩북|화보|캠페인|매거진|"
+                           r"brand ?news|archive ?note|notice|blog|library|저널|브랜드 ?뉴스)$", re.I)
+# 이름이 시즌 표기와 번호뿐인 것 — 「2022fw 38」·「25fw」. 룩북 장면이지 상품이 아니다(cayl
+# 「Collection」 칸 106벌이 설명글 치수 낱말 하나로 상의가 돼 결손으로 서 있었다, 2026-09-26).
+SEASON_ONLY_NAME = re.compile(r"^\s*(?:19|20)?\d{2}\s*(?:ss|fw|s/s|f/w|aw|hs)\s*(?:\d{1,3})?\s*$", re.I)
+# 이름에 용량(「SOYO (17L)」)을 적는 것은 가방이다.
+BAG_CAPACITY = re.compile(r"\(\s*\d{1,2}(?:\.\d)?\s?L\s*\)")
+# 「Archive」 칸은 혼자서는 진짜 상품 칸이다(지난 시즌 상품을 모아 둔 매장이 많다). 룩북 칸과
+# **같이** 붙어 있을 때만 룩북 쪽으로 센다 — years-ago 「Archive · Journal」·「Archive · Archive Note」
+# 는 글이었다(「Moleskin 코튼과 Serge 코튼은 어떠한 점에서 다른가」, 2026-09-26 사람 지시로 정리).
+EDITORIAL_WEAK = re.compile(r"^(?:archive|아카이브)$", re.I)
 
 LOOKBOOK_NAME = re.compile(
     r"\beditorial\b|\bshowcase\b|\bpop-?up\b|\bpresentation\b|\bexhibition\b|\blookbook\b|룩북|"
@@ -975,9 +988,14 @@ ACC_TYPE_VOCAB = {
     # 가방
     "숄더백": ["숄더백", "shoulder bag", "숄더 백", "shoulder", "숄더", "사첼", "satchel", "새들", "saddle"],
     "토트백": ["토트백", "tote bag", "토트 백", "shopper", "쇼퍼"],
-    "크로스백": ["크로스백", "cross bag", "crossbag", "crossbody", "크로스 백", "크로스", "sling bag", "슬링백"],
+    "크로스백": ["크로스백", "cross bag", "crossbag", "crossbody", "크로스 백", "크로스", "sling bag", "슬링백",
+              "fanny pack", "hip pack", "waist pack", "wrap pack", "hipbelt", "hip belt", "힙색", "웨이스트백",
+              "sacoche", "사코슈"],
+    # 「daypack」·「roll top」 — cayl 「mari roll top / xpac」·espionage 「Utility Daypack」이
+    # 가방 낱말이 없어 설명글의 치수 낱말 하나로 상의가 됐다(2026-09-26).
     "백팩": ["백팩", "backpack", "knapsack", "냅색", "짐색", "gym sack",
-            "럭색", "럭샄", "rucksack", "ruck sack"],
+            "럭색", "럭샄", "rucksack", "ruck sack", "daypack", "day pack", "데이팩",
+            "roll top", "rolltop", "roll-top", "롤탑", "배낭"],
     "미니백": ["미니백", "mini bag", "미니 백"],
     "호보백": ["호보백", "hobo bag", "호보 백", "호보", "hobo"],
     "보스턴백": ["보스턴", "boston", "더플", "duffle", "duffel", "weekender"],
@@ -992,19 +1010,25 @@ ACC_TYPE_VOCAB = {
     "볼캡": ["볼캡", "ball cap", "baseball cap", "야구모자", "캠프캡", "camp cap", "5패널",
             "five panel", "6패널", "snapback", "스냅백", "work cap", "워크캡", "뉴스보이", "newsboy", "헌팅캡", "hunting cap",
             "cap", "캡"],
-    "비니": ["비니", "beanie", "watch cap"],
-    "버킷햇": ["버킷햇", "bucket hat", "버킷 햇", "boonie", "부니"],
-    "베레": ["베레", "beret", "페도라", "fedora", "헌팅캡", "hunting cap", "베이커보이"],
+    "비니": ["비니", "beanie", "watch cap", "beanie hat"],
+    "버킷햇": ["버킷햇", "bucket hat", "버킷 햇", "boonie", "부니", "boonie hat", "jungle hat"],
+    "베레": ["베레", "beret", "페도라", "fedora", "헌팅캡", "hunting cap", "베이커보이", "fedora hat", "beret hat"],
     # 「hood gear」는 옷이 아니라 머리에 쓰는 두건이다 — the-museum-visitor
     # 「ART WORK PRINTED HOOD GEAR」가 후드티로 잡혀 사이즈를 찾고 있었다(2026-09-05 사람 확인).
     "트루퍼햇": ["트루퍼", "trooper", "ear flap", "이어플랩", "우샨카", "ushanka",
+                "trooper hat", "ear flap hat", "earflap hat", "flap hat", "ushanka hat", "trapper hat",
                 "발라클라바", "balaclava", "baraclava", "귀마개", "ear muff", "earmuff", "이어머프",
                 "hood gear", "후드 기어", "후드기어", "hoodgear"],
     "선바이저": ["선바이저", "sun visor", "바이저"],
+    # 그냥 「hat」·「모자」 — 버킷햇·페도라처럼 이름이 붙지 않은 모자. 없어서 「knit hat」이
+    # 니트(상의)로 섰다(till-i-die, 2026-09-26).
+    # 한글 「모자」는 안 넣는다 — 「스타 로고 볼 캡 모자」처럼 갈래 이름 뒤에 덧붙이는 말이라 볼캡을 덮는다.
+    # 「trooper hat」·「boonie hat」은 각 갈래에 「… hat」 꼴을 넣어 긴 쪽이 이기게 했다.
+    "모자": ["hat"],
     # 주얼리
-    "목걸이": ["목걸이", "necklace", "네클레이스", "네크리스", "넥클리스", "네클레스",
+    "목걸이": ["목걸이", "necklace", "네클레이스", "네크리스", "넥클리스", "네클레스", "네클리스",
              "펜던트", "pendant"],
-    "팔찌": ["팔찌", "브레이슬렛", "bracelet", "뱅글", "bangle", "앵클릿", "anklet"],
+    "팔찌": ["팔찌", "브레이슬렛", "브레이슬릿", "bracelet", "뱅글", "bangle", "앵클릿", "anklet"],
     "반지": ["반지", "ring"],
     "귀걸이": ["귀걸이", "earring", "이어커프", "ear cuff"],
     "브로치": ["브로치", "brooch", "pin badge", "뱃지", "badge", "pin"],
@@ -1050,7 +1074,7 @@ ACC_TO_CATEGORY = {
     "숄더백": "bags", "토트백": "bags", "크로스백": "bags", "백팩": "bags", "미니백": "bags",
     "호보백": "bags", "보스턴백": "bags", "클러치": "bags", "파우치": "bags", "에코백": "bags",
     "지갑": "bags", "카드지갑": "bags", "가방": "bags",
-    "볼캡": "headwear", "비니": "headwear", "버킷햇": "headwear", "베레": "headwear",
+    "볼캡": "headwear", "비니": "headwear", "버킷햇": "headwear", "베레": "headwear", "모자": "headwear",
     "트루퍼햇": "headwear", "선바이저": "headwear",
     "목걸이": "jewelry", "팔찌": "jewelry", "반지": "jewelry", "귀걸이": "jewelry", "브로치": "jewelry",
     "벨트": "accessories", "양말": "accessories", "스카프": "accessories", "목도리": "accessories",
@@ -1067,7 +1091,7 @@ ACC_SUB_CODE = {
     "숄더백": "shoulder-bag", "토트백": "tote-bag", "크로스백": "cross-bag", "백팩": "backpack",
     "미니백": "mini-bag", "호보백": "hobo-bag", "보스턴백": "boston-duffle", "클러치": "clutch",
     "파우치": "pouch", "에코백": "eco-bag", "지갑": "wallet", "카드지갑": "card-holder", "가방": "bags-etc",
-    "볼캡": "ball-cap", "비니": "beanie", "버킷햇": "bucket-hat", "베레": "beret",
+    "볼캡": "ball-cap", "비니": "beanie", "버킷햇": "bucket-hat", "베레": "beret", "모자": "hat",
     "트루퍼햇": "trooper-hat", "선바이저": "sun-visor",
     "목걸이": "necklace", "팔찌": "bracelet", "반지": "ring", "귀걸이": "earring", "브로치": "brooch",
     "벨트": "belt", "양말": "socks", "스카프": "scarf-muffler", "목도리": "scarf-muffler",
@@ -1332,11 +1356,15 @@ def strip_trailing_color(name: str) -> str:
     return s
 
 
-SHOE_SIZE_OPT = re.compile(r"^\s*(2[2-9][0-9]|3[0-2][0-9])\s*(?:\(|mm|$)")
-DECLARED_BAG = {"백팩", "가방", "토트백", "숄더백", "크로스백", "파우치", "클러치", "에코백"}
+# 「40 (250)」처럼 유럽 치수를 앞에, mm 를 괄호에 적는 매장도 있다(years-ago 의 Petrosolaum 구두
+# 33벌이 이 꼴이라 상의로 섰다, 2026-09-26).
+SHOE_SIZE_OPT = re.compile(r"^\s*(?:(2[2-9][0-9]|3[0-2][0-9])\s*(?:\(|mm|$)|(?:3[5-9]|4[0-7])(?:\.5)?\s*\(\s*(?:2[2-9][0-9]|3[0-2][0-9])\s*(?:mm)?\s*\))")
+DECLARED_BAG = {"백팩", "가방", "토트백", "숄더백", "크로스백", "파우치", "클러치", "에코백", "배낭", "사코슈",
+                "닥터백", "호보백", "버킷백", "미니백", "쇼퍼백", "메신저백", "보스턴백", "핸드백", "체인백"}
 # 매장이 제품 종류를 못박는 문장 — 「…크로스백입니다」. 이름·카테고리가 쓸모없을 때의 마지막 단서다.
 DECLARED_KIND = re.compile(
-    r"(백팩|가방|토트백|숄더백|크로스백|파우치|클러치|에코백|슈즈|스니커즈|운동화|로퍼|부츠|샌들|슬리퍼|구두)"
+    r"(백팩|가방|토트백|숄더백|크로스백|파우치|클러치|에코백|배낭|사코슈|닥터백|호보백|버킷백|미니백|쇼퍼백|메신저백|"
+    r"보스턴백|핸드백|체인백|슈즈|스니커즈|운동화|로퍼|부츠|샌들|슬리퍼|구두)"
     r"(?:으로|이며|이고)?\s*(?:입니다|예요|이에요)")
 
 
@@ -1392,6 +1420,8 @@ def classify_category(name: str, category_names: list[str], description: str = "
     # 이음씨가 붙으면 안 본다.
     if declared and not re.search(r"(?:과|와|랑|하고)\s*$", (description or "")[:declared.start()][-4:]):
         return "bags" if declared.group(1) in DECLARED_BAG else "shoes"
+    if BAG_CAPACITY.search(name):
+        return "bags"
     item = match_head(name, ITEM_TYPE_VOCAB)
     if item in ITEM_TO_CATEGORY:
         return ITEM_TO_CATEGORY[item]
@@ -1419,6 +1449,10 @@ def classify_category(name: str, category_names: list[str], description: str = "
             return code
     # 마지막으로 설명문의 치수 항목. 하의 낱말을 먼저 본다 — 상의에도 「총장」은 있지만
     # 하의에 「chest」는 없다.
+    # 낱말 하나로도 정한다. 두 개로 조여 봤더니(2026-09-26) 구두·조각·가방은 빠졌지만 진짜 옷
+    # 약 200벌(캐시미어 V넥 · 미디 SK · 윈드셸 …)도 함께 「기타」로 떨어졌다 — 설명에 치수 낱말이
+    # 하나뿐인 옷이 많다. 이 폴백에 걸리는 잡화는 칸 이름·신발 치수·단정문 규칙으로 먼저 거르고,
+    # 그래도 남는 것은 manual_items.csv 에 적는다.
     low = (description or "").lower()
     for code, keys in SPEC_RULES:
         if any(k in low for k in keys):
@@ -2625,6 +2659,9 @@ def extract_size_runon(t: str) -> dict[str, list[float]]:
     return out
 
 
+_LABEL_ENUM = re.compile(r"^\s*(?:\d{1,2}|[A-Ha-h]|[①-⑩])\s*[.)．]\s*(?=[가-힣A-Za-z])")
+
+
 def extract_size_from_tables(soup) -> dict[str, list[float]]:
     """진짜 <table> 이면 칸 단위로 읽는다. 글자열로 펴면 라벨에 없는 칸이 첫 라벨로 밀려 들어간다 —
     rough-side 는 첫 칸이 「1 size 95」(95·100·105 는 한국 사이즈 번호)라 843벌이 통째로 한 칸씩
@@ -2643,7 +2680,10 @@ def extract_size_from_tables(soup) -> dict[str, list[float]]:
         if len(rows) < 2:
             continue
         for hi, head in enumerate(rows[:3]):
-            labels = [re.sub(r"[().\s]", "", c).lower() for c in head]
+            # 「1.허리 · 2.엉덩이 · 3.허벅지」처럼 그림 번호를 라벨 앞에 붙이는 매장이 있다(legacy 의
+            # edinfo 표). 번호가 앞에 있으면 _KNOWN 이 머리를 못 봐 표를 통째로 놓치고, 글자열
+            # 파서로 넘어가 번호를 값으로 읽었다(「엉덩이 3 · 허벅지 4」, 55벌 — 2026-09-26).
+            labels = [re.sub(r"[().\s]", "", _LABEL_ENUM.sub("", c)).lower() for c in head]
             known = [i for i, l in enumerate(labels) if _KNOWN.match(l)]
             if len(known) < 2:
                 continue
@@ -3917,8 +3957,22 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
                 dropped_junk += 1     # 자리표시 값 — 룩북·이벤트 페이지다
                 continue
             cats = [c.strip() for c in (d.get("category_names") or []) if c.strip()]
-            if cats and all(EDITORIAL_CAT.match(c) for c in cats):
+            if cats and all(EDITORIAL_CAT.match(c) or EDITORIAL_WEAK.match(c) for c in cats) \
+                    and any(EDITORIAL_CAT.match(c) for c in cats):
                 dropped_junk += 1     # 칸이 통째로 룩북 칸이다(amomento 「Projects」)
+                continue
+            if SEASON_ONLY_NAME.match(d["name"]):
+                dropped_junk += 1     # 시즌 표기뿐인 이름 — 룩북 장면이다
+                continue
+            # 값도 옵션도 없고, 이름에 옷·잡화 낱말이 없거나 룩북 이름인 것 — 매장 글이다.
+            # shirter 「LIBRARY」·「SHIRTER × MIZUNO (21FW)」, dunst 「Behind the Scenes」,
+            # belier 「INTERVIEW 01.」, facade-pattern 데님 가이드 「허벅지 발달형」, 인플루언서 착용
+            # 글(ronron 「엔믹스 릴리」·crump 「산다라박」) — 창고 전수로 2,038벌이었고 그 가운데
+            # 사이즈표가 있는 진짜 옷은 오타 이름(「Mechanician Jackcet」) 하나라, 크롤에 사이즈표가
+            # 있으면 남긴다(2026-09-26 사람 지시 「분류 오류 고쳐」).
+            if not int(d.get("price") or 0) and not d.get("options") and not d.get("size_table") \
+                    and (not item or LOOKBOOK_NAME.search(d["name"])):
+                dropped_junk += 1
                 continue
             if LOOKBOOK_NAME.search(d["name"]) and code == "other" and not acc:
                 dropped_junk += 1     # 룩북·에디토리얼·시즌 캠페인 — 상품이 아니다
