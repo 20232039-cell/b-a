@@ -613,6 +613,7 @@ EDITORIAL_CAT = re.compile(r"^(?:projects?|journal|campaign|lookbook|look ?book|
 # 이름이 시즌 표기와 번호뿐인 것 — 「2022fw 38」·「25fw」. 룩북 장면이지 상품이 아니다(cayl
 # 「Collection」 칸 106벌이 설명글 치수 낱말 하나로 상의가 돼 결손으로 서 있었다, 2026-09-26).
 SEASON_ONLY_NAME = re.compile(r"^\s*(?:19|20)?\d{2}\s*(?:ss|fw|s/s|f/w|aw|hs)\s*(?:\d{1,3})?\s*$", re.I)
+POST_TITLE = re.compile(r"^[^|ㅣ│]{1,60}\s[|ㅣ│]\s?\S|^[^|ㅣ│]{1,60}\S[|ㅣ│]\s")
 # 이름에 용량(「SOYO (17L)」)을 적는 것은 가방이다.
 BAG_CAPACITY = re.compile(r"\(\s*\d{1,2}(?:\.\d)?\s?L\s*\)")
 # 「Archive」 칸은 혼자서는 진짜 상품 칸이다(지난 시즌 상품을 모아 둔 매장이 많다). 룩북 칸과
@@ -2532,6 +2533,12 @@ def extract_size_table(html_text: str) -> dict[str, list[float]]:
     # (사람이 앱 화면에서 「프리사이즈」로 뜬 것을 보고 찾음, 2026-09-11).
     t = re.sub(r"[\ufeff\u200b-\u200d\u2060\u00ad]", " ", t)
     t = re.sub(r"[ \t\r\n]+", " ", t)
+    # 「총장(앞/뒤)74/76.5」 — 앞뒤 기장을 한 칸에 적는 매장(dunst · gonak · ava-molli). 그대로 두면
+    # 「/76.5」가 다음 값을 밀어 dunst 셔츠의 사이즈 이름이 「5어깨55」가 됐다. 우리 총장은 뒤 기장이다.
+    t = re.sub(r"(총장|총기장|기장)\s*[（(]\s*앞\s*/\s*뒤\s*[)）]\s*(\d{1,3}(?:\.\d)?)\s*/\s*(\d{1,3}(?:\.\d)?)",
+               r" \1 \3 ", t)
+    t = re.sub(r"(총장|총기장|기장)\s*[（(]\s*뒤\s*/\s*앞\s*[)）]\s*(\d{1,3}(?:\.\d)?)\s*/\s*(\d{1,3}(?:\.\d)?)",
+               r" \1 \2 ", t)
     # 밀리미터로 적는 매장(mischief 「SIZE(mm) S 허리 345 기장 1020」)은 10 으로 나눈다.
     mm = bool(re.search(r"(?:size|사이즈|단위)\s*[（(]?\s*mm\s*[)）]?", t, re.I))
     lo, hi = (30, 2000) if mm else (3, 200)
@@ -2722,6 +2729,10 @@ def extract_size_from_tables(soup) -> dict[str, list[float]]:
                 parts = (head[name_col] or "").strip().split() if name_col is not None else []
                 names.append(parts[-1][:20] if len(parts) >= 2 else "")
             for r in rows[hi + 1:hi + 10]:
+                # 값 줄 끝에 빈 칸이 하나 더 붙은 표가 있다(plac 「사이즈 · 총장 · … · 소매 단면」 6칸에
+                # 값 줄 7칸, 마지막은 <br> 뿐). 끝의 빈 칸은 잘라 보고 칸 수를 맞춘다(2026-09-26).
+                while len(r) > len(head) and not (r[-1] or "").strip():
+                    r = r[:-1]
                 if len(r) != len(head):
                     continue
                 if name_col is not None:
@@ -2889,6 +2900,75 @@ OPTION_SOLDOUT = re.compile(r"\s*[\[\(]?\s*(?:품절|sold\s?out|일시\s?품절|
 OPTION_SIZE_TITLE = re.compile(r"size|사이즈|사이스|치수", re.I)
 
 
+def _known_label(lab: str) -> bool:
+    """「뒷총장」·「앞밑위」처럼 앞뒤를 붙인 라벨도 받는다 — 칸 이름은 size_from_ocr 가 다시 맞춘다."""
+    return bool(_KNOWN.match(lab) or _KNOWN.match(re.sub(r"^(?:뒷|뒤|앞)", "", lab)))
+
+
+_TF_NUM = r"\d{1,3}(?:\.\d{1,2})?"
+
+
+def extract_size_text_forms(text: str) -> dict[str, list[float]]:
+    """글로 적은 사이즈표 가운데 **꼴이 딱 정해진** 두 가지만 읽는다 — 헐겁게 읽으면 틀린 값이 된다.
+
+    ① 라벨마다 한 줄, 사이즈 이름과 cm 값이 번갈아(plac):
+         총장 : 24 103.5cm 25 104cm 26 104.5cm
+         허리 : 24 32cm 25 33cm 26 34.5cm
+       글자열 파서(extract_size_table)는 이름 24·25 를 값으로 읽어 「총장 24 · 103.5 · 25 · 104」가
+       됐다. 값에만 cm 가 붙는 것을 믿고 이름과 값을 가른다. 줄마다 이름 차례가 같아야 받는다.
+    ② 머리 한 줄을 슬래시로, 사이즈마다 한 줄(far-from-what, JSON-LD 설명):
+         Size : 뒷총장 / 어깨 폭 / 가슴단면 / 팔 길이
+         Size1 : 58cm / 50cm / 63cm / 60cm
+       칸 수가 머리와 같고 전부 수일 때만 받는다.
+    (2026-09-26 — 결손을 다시 열어 보다가 찾았다. plac 74벌 · far-from-what 41벌)
+    """
+    lines = [l.strip() for l in re.split(r"[\r\n]+|\\r\\n|\\n", text or "") if l.strip()]
+    cols: dict[str, list[float]] = {}
+    names: list[str] | None = None
+    for l in lines:
+        m = re.match(rf"^([가-힣A-Za-z ]{{1,12}}?)\s*[:：]\s*((?:[A-Za-z0-9]{{1,5}}\s+{_TF_NUM}\s*cm\s*){{2,}})$", l, re.I)
+        if not m:
+            continue
+        lab = re.sub(r"[().\s]", "", m.group(1)).lower()
+        if not _known_label(lab) or lab in cols:
+            continue
+        pairs = re.findall(rf"([A-Za-z0-9]{{1,5}})\s+({_TF_NUM})\s*cm", m.group(2), re.I)
+        nm, vals = [p[0] for p in pairs], [float(p[1]) for p in pairs]
+        if names is None:
+            names = nm
+        if nm != names or not all(3 <= v <= 200 for v in vals):
+            continue
+        cols[lab] = vals
+    if len(cols) >= 2 and names:
+        cols["_names"] = names
+        return cols
+    for i, l in enumerate(lines):
+        m = re.match(r"^(?:size|사이즈)\s*(?:\(cm\))?\s*[:：]\s*(.+/.+)$", l, re.I)
+        if not m:
+            continue
+        labs = [re.sub(r"[().\s]", "", x).lower() for x in m.group(1).split("/")]
+        if sum(_known_label(x) for x in labs) < 2:
+            continue
+        cols, names = {}, []
+        for l2 in lines[i + 1:i + 10]:
+            m2 = re.match(r"^([A-Za-z0-9 ]{1,12}?)\s*[:：]\s*(.+)$", l2)
+            if not m2:
+                break
+            vals = [x.strip() for x in m2.group(2).split("/")]
+            nums = [re.fullmatch(rf"({_TF_NUM})\s*(?:cm)?", v, re.I) for v in vals]
+            if len(vals) != len(labs) or not all(nums):
+                break
+            nm = re.sub(r"(?i)\bsize\s*|\s*size\b", "", m2.group(1)).strip() or m2.group(1).strip()
+            names.append(nm[:20])
+            for lab, n in zip(labs, nums):
+                if _known_label(lab) and 3 <= float(n.group(1)) <= 200:
+                    cols.setdefault(lab, []).append(float(n.group(1)))
+        if len(cols) >= 2 and names and all(len(v) == len(names) for v in cols.values()):
+            cols["_names"] = names
+            return cols
+    return {}
+
+
 def extract_size_any(html_text: str) -> dict[str, list[float]]:
     """표를 뽑는 두 길을 parse_detail 과 똑같은 차례로 태운다 — <table> 먼저, 글자열은 그 다음.
 
@@ -2898,6 +2978,8 @@ def extract_size_any(html_text: str) -> dict[str, list[float]]:
     """
     soup = BeautifulSoup(html_text, "lxml")
     t = extract_size_from_tables(soup)
+    if len(t) < 2:
+        t = extract_size_text_forms(soup.get_text("\n") + "\n" + (parse_json_ld_product(html_text).get("description") or ""))
     if len(t) < 2:
         t = extract_size_table(str(soup))
     return t
@@ -3176,6 +3258,8 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
     detail_text = body_text[:4000]
     # 표가 진짜 <table> 이면 칸 단위가 정확하다. 글자열 파서는 그 다음이다.
     size_table = extract_size_from_tables(soup)
+    if len(size_table) < 2:
+        size_table = extract_size_text_forms(soup.get_text("\n") + "\n" + (ld.get("description") or ""))
     if len(size_table) < 2:
         size_table = extract_size_table(str(soup))   # 환산표를 걷어낸 문서에서 — 위 decompose 참고
 
@@ -3970,8 +4054,10 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
             # 글(ronron 「엔믹스 릴리」·crump 「산다라박」) — 창고 전수로 2,038벌이었고 그 가운데
             # 사이즈표가 있는 진짜 옷은 오타 이름(「Mechanician Jackcet」) 하나라, 크롤에 사이즈표가
             # 있으면 남긴다(2026-09-26 사람 지시 「분류 오류 고쳐」).
+            # 「누구 | 무엇」 제목(noirer 「차은우 - TVN 여신강림 14회 | 오버핏 후드 더플 코트」 연예인 착용
+            # 글 24벌, mischief 「… | PHOTO RECAP」)은 옷 낱말이 있어도 글이다 — 값·옵션이 없을 때만.
             if not int(d.get("price") or 0) and not d.get("options") and not d.get("size_table") \
-                    and (not item or LOOKBOOK_NAME.search(d["name"])):
+                    and (not item or LOOKBOOK_NAME.search(d["name"]) or POST_TITLE.search(d["name"])):
                 dropped_junk += 1
                 continue
             if LOOKBOOK_NAME.search(d["name"]) and code == "other" and not acc:
