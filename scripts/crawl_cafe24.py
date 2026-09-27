@@ -1752,6 +1752,21 @@ APPAREL_CODES = {"tops", "bottoms", "outer", "dress", "skirt", "suiting"}
 NAME_M_PAREN = re.compile(r"(?<![A-Za-z0-9])[\(\[]\s*m\s*[\)\]]", re.I)
 
 
+def cate_gender(category_names: list[str]) -> str | None:
+    """매장의 칸 이름이 말하는 성별. 남녀 칸에 둘 다 들었거나 유니섹스 칸이면 UNISEX, 아무 말도 없으면 None.
+
+    classify_gender 의 칸 층이 이것을 쓴다. 치수 조합 규칙(size_set_gender)은 이 값을 정답지로 삼는다.
+    """
+    joined = unspace_cate(" ".join(category_names)).lower()
+    if any(cate_says_women_solo(x) for x in category_names):
+        joined += " women"
+    hit = [g for g, keys in GENDER_RULES
+           if any(re.search(rf"\b{k}\b", joined) for k in keys)]
+    if "UNISEX" in hit or ("WOMENSWEAR" in hit and "MENSWEAR" in hit):
+        return "UNISEX"
+    return hit[0] if hit else None
+
+
 def classify_gender(category_names: list[str], brand_default: str, name: str = "",
                     item_type: str = "", top_len: float | None = None,
                     shoulder: float | None = None, category_code: str = "",
@@ -1791,11 +1806,7 @@ def classify_gender(category_names: list[str], brand_default: str, name: str = "
     # 칸은 매장이 상품을 어디 **진열**했나이고, 설명은 무엇을 **만들었나**이다.
     if description and DESC_UNISEX.search(description):
         return "UNISEX"
-    joined = unspace_cate(" ".join(category_names)).lower()
-    if any(cate_says_women_solo(x) for x in category_names):
-        joined += " women"
-    hit = [g for g, keys in GENDER_RULES
-           if any(re.search(rf"\b{k}\b", joined) for k in keys)]
+    cg = cate_gender(category_names)
     # 매장이 남성 칸과 여성 칸에 **둘 다** 넣어 둔 상품이 있다. 그건 매장이 「둘 다 입는
     # 옷」이라고 말한 것이지 둘 중 하나가 아니다. 지금까지는 GENDER_RULES 차례에 따라
     # 여성이 먼저 걸려서 전부 여성복이 됐다 — 1,659벌(전체의 1.2%)이 그렇게 들어갔다.
@@ -1812,11 +1823,9 @@ def classify_gender(category_names: list[str], brand_default: str, name: str = "
     # 지금은 규칙 차례상 여성이 먼저 걸려 그 말을 덮는다 — 195벌이 그렇게 들어갔다(실측):
     #     open-yy  I LOVE YY BOX TEE   ['WOMENS','UNISEX','ESSENTIAL','RESTOCK']  → 여성
     #     ulkin    100벌 전부                                                      → 여성
-    # 남녀 칸에 둘 다 든 것을 유니섹스로 보는 것과 같은 까닭이다.
-    if "UNISEX" in hit or ("WOMENSWEAR" in hit and "MENSWEAR" in hit):
-        return "UNISEX"
-    if hit:
-        return hit[0]
+    # 남녀 칸에 둘 다 든 것을 유니섹스로 보는 것과 같은 까닭이다. (가르는 일은 cate_gender 가 한다)
+    if cg:
+        return cg
     # 매장이 아무 말도 안 했으면 품목이 말한다. 짐작이 아니라 센 값이다 — 매장이 제 손으로
     # 성별 칸에 넣어 둔 22,714벌에서 품목별로 어느 칸에 들어갔는지 셌다(2026-09-18):
     #
@@ -3878,9 +3887,95 @@ def length_is_placeholder(rows: list[dict]) -> bool:
         1 for d in rows if top_length(d.get("size_table")) is not None) >= 20
 
 
+# ─── 치수 조합으로 성별 가리기 — 매장 안에서만 배운다 ─────────────────────────────
+#
+# 「남녀 둘 다 파는」 브랜드 옷 18,147벌이 아무 층도 말하지 않아 브랜드 값(유니섹스)을 그대로 받는다.
+# 같은 브랜드에서 매장이 성별 칸에 넣어 둔 옷을 세면 남성 7,725 · 여성 7,479 · 유니섹스 849벌이라
+# 대부분 한쪽 옷이다(2026-09-27 전수). 남은 단서 가운데 **구매 옵션의 치수 조합**이 매장 안에서는 선다:
+#
+#     tonywack 하의가 「28·30·32·34」면 늘 남성 칸, 「S·M」이면 늘 여성 칸 … 처럼
+#
+# 잣대는 매장이 성별 칸에 넣어 둔 옷(이름·설명이 아무 말도 안 한 것만)이다. 같은 상품의 색 형제가
+# 양쪽에 갈리지 않게 상품 묶음(브랜드 + 이름 앞 네 낱말)으로 반을 갈라 한쪽에서 배우고 다른 쪽에서 쟀다:
+#
+#     매장 × 갈래 × 치수 조합   맞힘 99.63% · 99.77% (5,651벌 · 4,829벌 중 틀림 21 · 11)
+#     매장 공통 치수 조합       맞힘 93.8 ~ 99.7% — 매장을 반으로 갈라 재면 흔들린다. **안 쓴다**
+#
+# 공통 규칙이 무너지는 까닭: 「M·L·XL」이 한 매장에서는 늘 남성, 다른 매장에서는 여성이다.
+# 조건 — 한 칸(매장 × 갈래 × 치수 조합)에 정답지 10벌 이상 · 서로 다른 상품 5묶음 이상 · 한쪽 99% 이상.
+# 매장이 남녀 칸에 둘 다 넣은 공용 옷도 반례로 센다(공용이 1%만 넘어도 그 칸은 규칙이 안 된다).
+# 브랜드 값을 그대로 받은 옷에만 쓰고, 다른 층이 이미 말한 옷은 건드리지 않는다.
+#
+# 모르는 것 하나: 규칙을 쓰는 옷은 매장이 성별 칸에 **아예 안 넣은** 옷이다. 그런 옷에 공용이
+# 더 몰려 있다면 실제 맞힘은 위 숫자보다 낮다 — 지금 자료로는 못 잰다. 그래서 바뀐 옷 2,185벌에서
+# 매장별로 고르게 40벌을 뽑아 사진으로 봤다(2026-09-27): 착용 컷으로 가를 수 있던 26벌은 전부 규칙과
+# 같은 쪽이었고, 어긋난 옷은 0벌. 나머지 14벌은 착용 컷이 없거나 애매했다. 26벌에 0벌이면 잘못이
+# 11%를 넘지 않는다는 정도만 말해 준다 — 99%를 보인 것은 위의 가른 시험이다.
+_SIZE_TOKEN = re.compile(
+    r"^(?:XXS|XS|S|M|L|XL|XXL|XXXL|2XL|3XL|FREE|F|OS|ONE ?SIZE|SMALL|MEDIUM|LARGE|X-?LARGE|"
+    r"[0-6]|2[2-9]|3[0-9]|40|44|55|66|77|88|8[05]|9[05]|10[05]|11[05])$", re.I)
+_SIZE_NORM = {"SMALL": "S", "MEDIUM": "M", "LARGE": "L", "X-LARGE": "XL", "XLARGE": "XL", "2XL": "XXL",
+              "3XL": "XXXL", "F": "FREE", "OS": "FREE", "ONE SIZE": "FREE", "ONESIZE": "FREE"}
+SIZE_SET_MIN_ROWS = 10
+SIZE_SET_MIN_FAMILIES = 5
+SIZE_SET_MIN_SHARE = 0.99
+
+
+def size_signature(options) -> tuple[str, ...] | None:
+    """구매 옵션에서 치수만 뽑아 정렬한 묶음. 색 이름·안내 문구는 버린다. 치수가 없으면 None."""
+    toks = set()
+    for o in options or ():
+        t = re.sub(r"\s*\(.*?\)|\[.*?\]", "", str(o)).strip().upper()
+        t = re.sub(r"^SIZE\s*", "", t)
+        if _SIZE_TOKEN.match(t):
+            toks.add(_SIZE_NORM.get(t, t))
+    return tuple(sorted(toks, key=lambda z: (len(z), z))) or None
+
+
+def _size_family(slug: str, name: str) -> str:
+    n = re.sub(r"[\(\[].*?[\)\]]", "", name.lower())
+    return slug + "|" + " ".join(re.sub(r"[^a-z가-힣]+", " ", n).split()[:4])
+
+
+def size_set_gender(rows: list[dict], meta: dict[tuple[str, str], tuple[bool, str | None]]) -> int:
+    """브랜드 값을 그대로 받은 옷을 그 매장의 치수 조합 규칙으로 가른다. 바꾼 벌 수를 돌려준다."""
+    def key(r):
+        if r["category_code"] not in APPAREL_CODES:
+            return None
+        sig = size_signature([o for o in (r.get("options") or "").split(" | ") if o])
+        return (r["brand_slug"], r["category_code"], sig) if sig else None
+    count: dict = collections.defaultdict(collections.Counter)
+    fams: dict = collections.defaultdict(set)
+    for r in rows:
+        m = meta.get((r["brand_slug"], str(r["product_no"])))
+        k = key(r)
+        if not m or not m[1] or not k:
+            continue
+        count[k][m[1]] += 1
+        fams[k].add(_size_family(r["brand_slug"], r["name"]))
+    rules = {}
+    for k, c in count.items():
+        g, n = c.most_common(1)[0]
+        total = sum(c.values())
+        if (g != "UNISEX" and total >= SIZE_SET_MIN_ROWS and len(fams[k]) >= SIZE_SET_MIN_FAMILIES
+                and n / total >= SIZE_SET_MIN_SHARE):
+            rules[k] = g
+    changed = 0
+    for r in rows:
+        m = meta.get((r["brand_slug"], str(r["product_no"])))
+        if not m or not m[0]:
+            continue
+        g = rules.get(key(r))
+        if g and r["gender_target"] != g:
+            r["gender_target"] = g
+            changed += 1
+    return changed
+
+
 def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
     import product_desc
     rows = []
+    gender_meta: dict[tuple[str, str], tuple[bool, str | None]] = {}
     per_brand: dict[str, int] = {}
     seen_images: set[str] = set()
     dropped_dupe = 0
@@ -4075,17 +4170,24 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
                      else CATEGORY_LABEL.get(code, ""))
             # categories_seed.csv 의 depth-2 코드 — 앱이 「가방 > 숄더백」으로 훑을 자리다
             sub_code = ACC_SUB_CODE.get(acc, "") if acc else ""
+            g_args = (d["name"], item,
+                      None if len_bad else top_length(d.get("size_table")),
+                      shoulder_width(d.get("size_table")), code,
+                      waist_span(d.get("size_table")),
+                      d.get("description") or "")
+            cats = d.get("category_names", [])
+            # 치수 조합 규칙(size_set_gender)이 쓸 두 가지: 이 옷이 브랜드 값을 그대로 받았나(「?」가 그대로
+            # 나오면 어느 층도 말하지 않은 것), 그리고 매장 칸이 정답지로 쓸 만한가(이름·설명이 말이 없을 때만).
+            gender_meta[(slug, str(d["product_no"]))] = (
+                classify_gender(cats, "?", *g_args) == "?",
+                cate_gender(cats) if classify_gender([], "?", d["name"], "", None, None, "", None,
+                                                     d.get("description") or "") == "?" else None)
             rows.append({
                 "brand_slug": slug,
                 "category_code": code,
                 "item_type": item,
                 "name": d["name"],
-                "gender_target": classify_gender(d.get("category_names", []), brand_gender.get(slug, "UNISEX"),
-                                                 d["name"], item,
-                                                 None if len_bad else top_length(d.get("size_table")),
-                                                 shoulder_width(d.get("size_table")), code,
-                                                 waist_span(d.get("size_table")),
-                                                 d.get("description") or ""),
+                "gender_target": classify_gender(cats, brand_gender.get(slug, "UNISEX"), *g_args),
                 "price": d["price"],
                 "representative_color": pick_color(d["name"], d.get("description", ""), d.get("spec"),
                                                    d.get("options")),
@@ -4124,6 +4226,9 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
               for r in rows}
     dropped_kidline = drop_kids_line(rows)
     dropped_rerun = fold_reruns(rows, gal_of, tbl_of, url_of, opt_of)
+    n_size = size_set_gender(rows, gender_meta)
+    if n_size:
+        print(f"치수 조합(매장 안에서 배운 것)으로 성별 {n_size}벌을 정했다", file=sys.stderr)
     fill_season_gaps(rows)
     # 번호 보간으로도 안 채워진 것은 사진 날짜로 한 번 더 — 브랜드마다 먼저 맞혀 보고서만.
     n_img = season_from_image_date(rows)
