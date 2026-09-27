@@ -15,6 +15,9 @@ SHOPIFY: dict[str, str] = {
     "recto": "https://checkout.recto.co",
     "hyein-seo": "https://hyeinseo.com",
     "post-archive-faction": "https://postarchivefaction.com",
+    # 2026-09-27 사람이 성별을 판정한 새 매장 — products.json 이 열리는 것을 확인했다(96 · 250벌+)
+    "eudon-choi": "https://www.eudonchoi.com",
+    "goen-j": "https://kr.goenj.com",
 }
 
 # slug → 식스샵 가게 주소. `<주소>/sitemap.xml` 에 상품 주소가 다 있다(crawl_sixshop 주석).
@@ -23,6 +26,10 @@ SIXSHOP: dict[str, str] = {
     "forcesensitive": "https://forcesensitive.kr",
     "gonak": "https://www.gonak.co.kr",
     "ir-ryu": "https://www.ilryu.kr",
+    # 2026-09-27 사람이 성별을 판정한 새 매장 — sitemap.xml 의 상품 주소 133 · 382 · 2,356줄을 확인했다
+    "finoacinque": "https://www.finoacinque.co.kr",
+    "merely-made": "https://www.merelymade.com",
+    "polyteru": "https://www.polyteru-store.com",
 }
 
 NOT_CAFE24: set[str] = set(SHOPIFY) | set(SIXSHOP)
@@ -60,4 +67,6 @@ SHOPIFY_PAGES: set[str] = {"recto", "post-archive-faction"}
 # 100벌 중 87벌이 옵션에 품절 표시가 없어 판매중으로 나간다(is_soldout 주석). 품절 판정을 사람이 정할 때까지 묶는다.
 # 기준(kijun)은 공식몰을 닫았다(2026-09-27 사람: 「기준은 아예 공식몰을 종료했네.. 목록에서 뺄게」 · 「앱에서도 빼고」).
 # 그때 752벌 중 판매중 22벌. 걷은 자료는 두고 앱에만 안 내보낸다 — 다시 열면 여기서 지운다.
-APP_HOLD: set[str] = {"numbering", "kijun"}
+# 2026-09-27 사람이 성별 판정 페이지에서 「목록에서 뺀다」를 누른 매장 가운데 이미 걷혀 있던 곳 —
+# crump 780 · jeanbach 31 · maison-marais 1 · tripleroot 1벌. 걷은 자료는 두고 앱에만 안 내보낸다.
+APP_HOLD: set[str] = {"numbering", "kijun", "crump", "jeanbach", "maison-marais", "tripleroot"}
