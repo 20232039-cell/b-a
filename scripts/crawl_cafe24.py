@@ -2112,7 +2112,8 @@ def _is_menu_label(text: str) -> bool:
     return len(text) <= 12 and not re.search(r"\d", text)
 
 
-def load_categories(http: PoliteSession, shop: Shop, soup: BeautifulSoup, html_text: str = "") -> None:
+def load_categories(http: PoliteSession, shop: Shop, soup: BeautifulSoup, html_text: str = "",
+                    _from_list: bool = False) -> None:
     votes: dict[int, set[str]] = {}
     for a in soup.select('a[href*="cate_no="]'):
         href = a.get("href", "")
@@ -2193,6 +2194,15 @@ def load_categories(http: PoliteSession, shop: Shop, soup: BeautifulSoup, html_t
                 no, nm = c.get("cate_no"), (c.get("name") or "").strip()
                 if isinstance(no, int) and nm and len(nm) <= 40 and not is_shop_name(shop, nm):
                     shop.categories.setdefault(no, nm)
+    # 그 JSON 도 빈 매장이 있다 — freckle 은 홈 메뉴가 자바스크립트이고 SubCategory 가 null 이며, 상품 번호가
+    # 6천 번대라 번호 훑기(800까지)도 닿지 않아 0벌이었다(2026-09-27). 그런데 칸 없이 연 목록 페이지
+    # (/product/list.html)는 메뉴를 서버 HTML 로 그려 준다 — 칸 24·25·26·30·32·56·69 가 거기 있었다.
+    # 홈에서 아무것도 못 주웠을 때만, 한 번만 그 페이지를 홈 대신 읽는다.
+    if not shop.categories and not _from_list:
+        u = f"{shop.base}/product/list.html"
+        r = http.get(u, retries=1) if shop.allowed(u) else None
+        if r is not None and r.status_code == 200:
+            load_categories(http, shop, BeautifulSoup(r.text, "lxml"), r.text, _from_list=True)
 
 
 # 임직원·사내·관계자 전용 칸은 손님이 살 수 있는 상품이 아니다. 목록에서 아예 뺀다(사람 결정 2026-09-04).
@@ -3911,10 +3921,10 @@ def length_is_placeholder(rows: list[dict]) -> bool:
 # 매장별로 고르게 40벌을 뽑아 사진으로 봤다(2026-09-27): 착용 컷으로 가를 수 있던 26벌은 전부 규칙과
 # 같은 쪽이었고, 어긋난 옷은 0벌. 나머지 14벌은 착용 컷이 없거나 애매했다. 26벌에 0벌이면 잘못이
 # 11%를 넘지 않는다는 정도만 말해 준다 — 99%를 보인 것은 위의 가른 시험이다.
-_SIZE_TOKEN = re.compile(
+_SIZESET_TOKEN = re.compile(
     r"^(?:XXS|XS|S|M|L|XL|XXL|XXXL|2XL|3XL|FREE|F|OS|ONE ?SIZE|SMALL|MEDIUM|LARGE|X-?LARGE|"
     r"[0-6]|2[2-9]|3[0-9]|40|44|55|66|77|88|8[05]|9[05]|10[05]|11[05])$", re.I)
-_SIZE_NORM = {"SMALL": "S", "MEDIUM": "M", "LARGE": "L", "X-LARGE": "XL", "XLARGE": "XL", "2XL": "XXL",
+_SIZESET_NORM = {"SMALL": "S", "MEDIUM": "M", "LARGE": "L", "X-LARGE": "XL", "XLARGE": "XL", "2XL": "XXL",
               "3XL": "XXXL", "F": "FREE", "OS": "FREE", "ONE SIZE": "FREE", "ONESIZE": "FREE"}
 SIZE_SET_MIN_ROWS = 10
 SIZE_SET_MIN_FAMILIES = 5
@@ -3927,8 +3937,8 @@ def size_signature(options) -> tuple[str, ...] | None:
     for o in options or ():
         t = re.sub(r"\s*\(.*?\)|\[.*?\]", "", str(o)).strip().upper()
         t = re.sub(r"^SIZE\s*", "", t)
-        if _SIZE_TOKEN.match(t):
-            toks.add(_SIZE_NORM.get(t, t))
+        if _SIZESET_TOKEN.match(t):
+            toks.add(_SIZESET_NORM.get(t, t))
     return tuple(sorted(toks, key=lambda z: (len(z), z))) or None
 
 
