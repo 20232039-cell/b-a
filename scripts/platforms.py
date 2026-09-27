@@ -32,7 +32,23 @@ SIXSHOP: dict[str, str] = {
     "polyteru": "https://www.polyteru-store.com",
 }
 
-NOT_CAFE24: set[str] = set(SHOPIFY) | set(SIXSHOP)
+# slug → 가게 주소. 틀이 매장마다 달라(고도몰 · 위사몰 · 메이크샵 · Cargo · 직접 만든 사이트) 매장별 해석기
+# (scripts/stores/<slug>.py)가 페이지를 읽고, 걷고 합치는 일은 crawl_pages 가 한다(그 머리말).
+# 2026-09-27 사람이 성별을 판정한 매장 가운데 앞의 셋 어디에도 안 드는 여덟 곳 — 해석기마다 머리말에
+# 목록을 얻는 길과 한계를 적어 두었다. 카키스·인세인개러지는 편집숍이라 자체 상품만 걷는다.
+# 림팍은 가게를 아직 안 열었다(LAUNCHING SOON) — 0벌로 돌다가 상점이 켜지면 판을 멈추고 알린다.
+PAGES: dict[str, str] = {
+    "concepts1one": "https://www.concepts1one.co.kr",     # 위사몰 — 사이트맵 · 복제 상품은 원본 번호로 접는다
+    "insane-garage": "https://www.insanegarage.shop",     # 고도몰5 편집숍 — ALL ITEM 목록
+    "ader-error": "https://adererror.com",                # 자체 — 사이트맵 /kr/shop
+    "khakis": "https://khakis2020.com",                   # 헤드리스 Shopify 편집숍 — products.json + Storefront
+    "doucan": "https://doucan.net",                       # 자체(Spring) — SHOP 칸 목록 ajax
+    "minju-kim": "https://www.minjukim.co",               # 자체(dcore) — View all 쪽 넘김
+    "carlyn": "https://www.carlynmall.com",               # 메이크샵 — 목록 JSON
+    "limpark": "https://limparkofficial.com",             # Cargo — 상점 준비 중
+}
+
+NOT_CAFE24: set[str] = set(SHOPIFY) | set(SIXSHOP) | set(PAGES)
 
 
 def crawl_other(http, slug: str, log=print) -> dict:
@@ -43,6 +59,9 @@ def crawl_other(http, slug: str, log=print) -> dict:
     if slug in SIXSHOP:
         import crawl_sixshop
         return crawl_sixshop.crawl_one(http, slug, log)
+    if slug in PAGES:
+        import crawl_pages
+        return crawl_pages.crawl_one(http, slug, log)
     raise KeyError(slug)
 
 # 상품 페이지의 meta description 을 상품 설명으로 쓰는 매장. 렉토는 body_html 이 실측표뿐이고 진짜 설명이
@@ -69,8 +88,8 @@ SHOPIFY_PAGES: set[str] = {"recto", "post-archive-faction"}
 # 그때 752벌 중 판매중 22벌. 걷은 자료는 두고 앱에만 안 내보낸다 — 다시 열면 여기서 지운다.
 # 2026-09-27 사람이 성별 판정 페이지에서 「목록에서 뺀다」를 누른 매장 가운데 이미 걷혀 있던 곳 —
 # crump 780 · jeanbach 31 · maison-marais 1 · tripleroot 1벌. 걷은 자료는 두고 앱에만 안 내보낸다.
-# 2026-09-27 밤 처음 걷는 매장 13곳 — 그날 사람이 성별을 판정했고 「상품 수집 함 하자」고 했다. 식스샵 셋 때처럼
+# 2026-09-27 밤 처음 걷는 매장 13곳과 PAGES 여덟 곳 — 그날 사람이 성별을 판정했고 「상품 수집 함 하자」고 했다. 식스샵 셋 때처럼
 # 사람이 값·설명·실측을 보기 전까지 앱에 안 내보낸다. 게시 판이 수집보다 먼저 돌든 나중에 돌든 앱이 같게.
 NEW_HOLD: set[str] = {"alyss", "antome", "arend", "areuban", "egnarts", "freckle", "generalidea", "le",
-                      "eudon-choi", "goen-j", "finoacinque", "merely-made", "polyteru"}
+                      "eudon-choi", "goen-j", "finoacinque", "merely-made", "polyteru"} | set(PAGES)
 APP_HOLD: set[str] = {"numbering", "kijun", "crump", "jeanbach", "maison-marais", "tripleroot"} | NEW_HOLD
