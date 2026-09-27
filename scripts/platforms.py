@@ -69,4 +69,8 @@ SHOPIFY_PAGES: set[str] = {"recto", "post-archive-faction"}
 # 그때 752벌 중 판매중 22벌. 걷은 자료는 두고 앱에만 안 내보낸다 — 다시 열면 여기서 지운다.
 # 2026-09-27 사람이 성별 판정 페이지에서 「목록에서 뺀다」를 누른 매장 가운데 이미 걷혀 있던 곳 —
 # crump 780 · jeanbach 31 · maison-marais 1 · tripleroot 1벌. 걷은 자료는 두고 앱에만 안 내보낸다.
-APP_HOLD: set[str] = {"numbering", "kijun", "crump", "jeanbach", "maison-marais", "tripleroot"}
+# 2026-09-27 밤 처음 걷는 매장 13곳 — 그날 사람이 성별을 판정했고 「상품 수집 함 하자」고 했다. 식스샵 셋 때처럼
+# 사람이 값·설명·실측을 보기 전까지 앱에 안 내보낸다. 게시 판이 수집보다 먼저 돌든 나중에 돌든 앱이 같게.
+NEW_HOLD: set[str] = {"alyss", "antome", "arend", "areuban", "egnarts", "freckle", "generalidea", "le",
+                      "eudon-choi", "goen-j", "finoacinque", "merely-made", "polyteru"}
+APP_HOLD: set[str] = {"numbering", "kijun", "crump", "jeanbach", "maison-marais", "tripleroot"} | NEW_HOLD
