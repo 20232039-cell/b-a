@@ -105,6 +105,9 @@ def front_back(text: str) -> str:
     return "\n".join(out)
 
 
+_PERSONAL = re.compile(r"개인\s*결제|\(\s*code\s*:|\bvvip\s+personal\b", re.I)
+
+
 def parse_page(html_text: str, url: str, slug: str, now: str) -> dict | None:
     s = BeautifulSoup(html_text, "lxml")
     m = re.search(r'data-shopProductNo="(\d+)"', html_text)
@@ -112,6 +115,10 @@ def parse_page(html_text: str, url: str, slug: str, now: str) -> dict | None:
     if not m or name_el is None:
         return None
     name = name_el.get_text(" ", strip=True)
+    if _PERSONAL.search(name):
+        # 개인결제창 — 옷이 아니라 손님 한 사람 몫의 결제 페이지다. 폴리테루는 사이트맵 2,322줄 중
+        # 2,144줄이 이것이었다(「(CODE:VVIP PERSONAL 최*민님)」, 2026-09-27). 실패가 아니라 건너뜀.
+        return {"product_no": int(m.group(1)), "_skip": "개인결제창"}
     # 할인이 없으면 .productPriceSpan 하나, 있으면 할인가 .productDiscountPriceSpan 과 정가
     # .productPriceWithDiscountSpan 둘이 온다(.productPriceSpan 은 없다 — 포스센스티브에서 확인).
     sale = s.select_one(".productDiscountPriceSpan")
@@ -143,12 +150,25 @@ def parse_page(html_text: str, url: str, slug: str, now: str) -> dict | None:
         u = _big(im.get("src") or im.get("data-src") or "")
         if u and u not in imgs:
             imgs.append(u)
+    # 썸네일 배치(type_thumbnails)는 사진을 <img> 가 아니라 imgSrc 속성을 단 div 배경으로 둔다 — 피노아친퀘
+    # 133벌이 사진 1장(og:image)뿐이었다(2026-09-27). 차례(data-shopProductSequence)대로 받는다.
+    if not imgs:
+        seq = sorted(s.select(".shopProductImgMain[imgSrc]"), key=lambda e: int(e.get("data-shopproductsequence") or 0))
+        for el in seq:
+            u = el.get("imgsrc") or ""
+            u = _big(("https://contents.sixshop.com" + u) if u.startswith("/uploadedFiles/") else u)
+            if u and u not in imgs:
+                imgs.append(u)
     if not imgs:
         og = s.select_one('meta[property="og:image"]')
         if og and og.get("content"):
             imgs = [_big(og["content"])]
     desc_el = s.select_one("#productDescriptionDetailPage")
     text = _desc_text(desc_el)
+    if not text:
+        # 상세 칸이 빈 매장은 상품 소개를 JSON-LD description 에만 둔다(피노아친퀘 133벌 전부, 2026-09-27)
+        ld = cc.parse_json_ld_product(html_text) or {}
+        text = re.sub(r"\s*˙\s*", "\n", html.unescape(ld.get("description") or "")).strip()
     detail_imgs = []
     if desc_el is not None:
         for im in desc_el.find_all("img"):
@@ -210,10 +230,13 @@ def crawl_one(http: cc.PoliteSession, slug: str, log=print) -> dict:
         if d is None:
             rep["failed"] += 1
             continue
+        if d.get("_skip"):
+            rep["skipped"] = rep.get("skipped", 0) + 1
+            continue
         got.append(d)
     rep["listed"] = len(got)
     # 페이지를 절반 넘게 못 읽었으면 판을 버린다 — 못 연 상품을 「목록에 없음」으로 세면 멀쩡한 옷이 내려간다
-    if urls and rep["failed"] > len(urls) / 2:
+    if urls and rep["failed"] > (len(urls) - rep.get("skipped", 0)) / 2:
         rep["guard"] = f"상품 페이지 {rep['failed']}/{len(urls)} 실패 — 상태 변경 보류"
         log(f"[{slug}] 가드레일: {rep['guard']}")
         return rep
