@@ -105,7 +105,29 @@ def front_back(text: str) -> str:
     return "\n".join(out)
 
 
+_SIZE_ROW = re.compile(r"\bSIZE\s*([A-Z0-9]{1,4})\s*[:：]\s*(.*?)(?=\bSIZE\s*[A-Z0-9]{1,4}\s*[:：]|$)", re.I | re.S)
+_PAIR = re.compile(r"([A-Za-z가-힣][A-Za-z가-힣 .]*?)\s*[-:：]\s*(\d+(?:[.,]\d+)?)")
+
+
+def size_rows(text: str) -> str:
+    """「SIZE 1: SHOULDER - 63 / CHEST - 125 … SIZE 2: …」 한 줄을 행렬 글로 — from_ocr 가 읽는 꼴이다.
+
+    메리메이드는 실측을 JSON-LD 설명에만 두고 그 글은 줄바꿈이 없다. 사이즈 둘 이상이 **같은 부위**를
+    같은 차례로 말할 때만 바꾼다 — 부위가 엇갈리면 짐작이 되니 그대로 둔다. 「64,5」는 소수점이다.
+    """
+    rows = []
+    for name, body in _SIZE_ROW.findall(text or ""):
+        pairs = [(k.strip().lower(), v.replace(",", ".")) for k, v in _PAIR.findall(body)]
+        if len(pairs) >= 2:
+            rows.append((name, pairs))
+    if len(rows) < 2 or len({tuple(k for k, _ in p) for _, p in rows}) != 1:
+        return text
+    head = "Size " + " ".join(k.replace(" ", "") for k, _ in rows[0][1])
+    return text + "\n" + head + "\n" + "\n".join(n + " " + " ".join(v for _, v in p) for n, p in rows)
+
+
 _PERSONAL = re.compile(r"개인\s*결제|\(\s*code\s*:|\bvvip\s+personal\b", re.I)
+_NOTICE_FIRST = re.compile(r"\s*[\[【<(]?\s*(?:배송\s*안내|교환\s*(?:및|/|&)?\s*반품|반품\s*안내|shipping|delivery)", re.I)
 
 
 def parse_page(html_text: str, url: str, slug: str, now: str) -> dict | None:
@@ -165,10 +187,24 @@ def parse_page(html_text: str, url: str, slug: str, now: str) -> dict | None:
             imgs = [_big(og["content"])]
     desc_el = s.select_one("#productDescriptionDetailPage")
     text = _desc_text(desc_el)
-    if not text:
-        # 상세 칸이 빈 매장은 상품 소개를 JSON-LD description 에만 둔다(피노아친퀘 133벌 전부, 2026-09-27)
+    if not text or _NOTICE_FIRST.match(text):
+        # 상세 칸이 빈 매장은 상품 소개를 JSON-LD description 에만 둔다(피노아친퀘 133벌 전부, 2026-09-27).
+        # 상세 칸이 **배송·교환 공지로 시작하는** 매장도 같다 — 메리메이드는 그 칸이 공지뿐이고 소개·소재·
+        # 모델·실측(「SIZE 1: SHOULDER - 63 / CHEST - 125 …」)이 JSON-LD 에만 있었다(코덱스 검증 004, 2026-09-28).
+        # 공지는 뒤에 그대로 둔다 — 앱 설명을 만들 때 product_desc 가 걷는다.
         ld = cc.parse_json_ld_product(html_text) or {}
-        text = re.sub(r"\s*˙\s*", "\n", html.unescape(ld.get("description") or "")).strip()
+        raw = ld.get("description") or ""
+        if not raw:
+            # 매장 글의 인치 표기(「(57"-58")」)가 따옴표를 안 가려 JSON-LD 가 통째로 안 읽힌다(메리메이드).
+            # 설명 칸만 다음 칸 이름(sku·brand·offers) 앞까지 글자로 떠 온다.
+            mr = re.search(r'"@type"\s*:\s*"Product".*?"description"\s*:\s*"(.*?)"\s*,\s*"(?:sku|brand|offers|image)"',
+                           html_text, re.S)
+            raw = mr.group(1).replace('\\"', '"') if mr else ""
+        ld_text = re.sub(r"\s*˙\s*", "\n", html.unescape(raw)).strip()
+        if not text:
+            text = ld_text
+        elif len(ld_text) >= 30:
+            text = ld_text + "\n" + text
     detail_imgs = []
     if desc_el is not None:
         for im in desc_el.find_all("img"):
@@ -178,7 +214,7 @@ def parse_page(html_text: str, url: str, slug: str, now: str) -> dict | None:
     mw = re.search(r'data-productSoldOut="(\w+)"', html_text)
     whole = mw.group(1) if mw else ""
     import size_from_ocr
-    names, cols = size_from_ocr.from_ocr(front_back(text)) if text else (None, {})
+    names, cols = size_from_ocr.from_ocr(front_back(size_rows(text))) if text else (None, {})
     d = {
         "product_no": int(m.group(1)),
         "name": name,

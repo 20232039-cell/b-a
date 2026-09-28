@@ -707,6 +707,11 @@ YEARISH = re.compile(r"\b(?:19|20)\d\d\b|(?<![0-9])\d\d(?![0-9])")
 # 매체·매장 안내 — 「OSOI HONG KONG STORE」·「2023 MSCHF ONLY | PORTRAIT VIDEO」.
 # 품목 낱말이 없을 때만 본다(가게 이름이 든 진짜 상품을 지키려고). 정상 상품 0벌.
 MEDIA_PAGE = re.compile(r"\bvideo\b|\bfilm\b|\bshowroom\b|\bstore\b|\bpop-?up\b|스토어|쇼룸", re.I)
+# 오프라인 지점 안내 — 제너럴아이디어가 「신세계백화점, 광주점」 같은 지점 페이지 17쪽을 값 없이 /product/ 에
+# 올려 품절 상품으로 들어왔다(코덱스 검증 004, 2026-09-28). 품목 낱말 관문보다 **먼저** 본다 — 「백화점」의
+# 「백」이 가방으로 읽혀 관문을 통과했다. 전 매장 이름에 대 보니 그 17쪽만 걸렸다.
+STORE_BRANCH = re.compile(r"(?:백화점|아울렛|아웃렛|면세점|스타필드|아이파크몰|\bLF\s*스퀘어|SF\s*빌리지|더현대|타임스퀘어|몰)"
+                          r"\s*,?\s*[가-힣A-Za-z ]{1,12}점\s*$", re.I)
 
 
 
@@ -776,6 +781,11 @@ def is_soldout(d: dict) -> bool:
     """이 상품을 지금 살 수 있나 — 매장의 딱지와 우리가 받아 둔 옵션을 같이 본다."""
     if not d.get("soldout"):
         return False
+    # 값을 내려놓은 상품은 살 수 없다 — parse 단계가 「값만 내려놓은 진짜 품절」로 판정해 단 딱지다.
+    # 아래의 「옵션에 품절 표시가 없으면 판다」가 이것까지 판매중으로 돌려, 프레클 203벌을 포함해
+    # 295벌이 값 없는 판매중으로 나갔다(2026-09-28 코덱스 검증 004 — 페이지는 SOLD OUT · 0원).
+    if d.get("price_missing"):
+        return True
     opts = [o for o in (d.get("options") or []) if str(o).strip()]
     if not opts:
         return True
@@ -906,6 +916,8 @@ def not_a_product(name: str, shop_titles: set[str] = frozenset()) -> str | None:
     for why, rx, after_head in NOT_PRODUCT:
         if rx.search(tail if after_head else n):
             return why
+    if STORE_BRANCH.search(n):
+        return "매장안내"
     # 아래 셋은 품목 낱말이 없을 때만 본다 — 그게 있으면 옷이다. the-museum-visitor 의
     # 「THE MUSEUM VISTIOR COLLECTION 2023-2024 CORDUROY ECO BAG」은 진짜 가방이다.
     if match_head(n, ITEM_TYPE_VOCAB) or match_acc(n):
@@ -2909,6 +2921,8 @@ def _strip_tags(s: str) -> str:
 #   low-classic 「- [필수] SELECT SIZE -」 768 · open-yy 「- [필수] SIZE 선택 -」 727 ·
 #   andersson-bell 「- [필수] Choose your size -」 664 · thebarnnet 「옵션 선택」 470 ·
 #   kamien 「OPTION」 57
+# 선택창의 **제목 줄**이 옵션으로 섞여 오는 매장 — 제목 낱말 하나뿐인 값만 뺀다(코덱스 검증 004, 2026-09-28).
+OPTION_HEADER = re.compile(r"^\s*(?:colou?rs?|sizes?|색상?|컬러|사이즈|options?|옵션)\s*$", re.I)
 OPTION_PROMPT = re.compile(
     r"^\s*[-–*\[\(]*\s*(?:\[?필수\]?|옵션\s*선택|옵션을?\s*선택|선택\s*하세요|사이즈\s*선택|"
     r"색상\s*선택|choose\b|select\b|please\b|option\s*$|-{2,}|={2,}|\.{2,})", re.I)
@@ -3213,7 +3227,12 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
 
     def _clean_text(el) -> str:
         el = BeautifulSoup(str(el), "lxml")
-        for t in el.select("table, script, style, select, button, .xans-product-detailinfo, .xans-product-action"):
+        # 주문 상자(#totalProducts · #totalPrice · .guideArea)와 상품명·품번·값 머리(.headingArea 의 칸들)도 뺀다 —
+        # 설명 그릇 .detailArea 에 같이 들어 있어, 알리스 설명이 「이름 품번 품번 이름 87000 87000 … TOTAL (QUANTITY)
+        # 0 (0개)」로 시작했다(코덱스 검증 004, 2026-09-28). .headingArea 의 요약(.bottom)은 남긴다.
+        for t in el.select("table, script, style, select, button, .xans-product-detailinfo, .xans-product-action, "
+                           "#totalProducts, #totalPrice, .totalPrice, .guideArea, .productOption, .ec-base-help, "
+                           ".headingArea > .headingMobile, .headingArea > .headingPC, .headingArea > .right"):
             t.decompose()
         return re.sub(r"\s+", " ", el.get_text(" ", strip=True))
 
@@ -3322,6 +3341,8 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
             continue
         if OPTION_PROMPT.match(v):
             continue          # 「- [필수] SELECT SIZE -」 같은 안내 문구는 사이즈가 아니다
+        if OPTION_HEADER.match(v):
+            continue          # 선택창 제목 줄 — 제너럴아이디어 4,067벌이 「COLOR · BLUE · SIZE · S …」였다
         m = OPTION_SOLDOUT.search(v)
         if m:
             v = v[:m.start()].strip()
@@ -3345,7 +3366,7 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
             vals = []
             for li in ul.select("li[option_value]"):
                 lab = (li.get("title") or li.get_text(" ", strip=True) or "").strip()
-                if not lab or len(lab) >= 60 or OPTION_PROMPT.match(lab):
+                if not lab or len(lab) >= 60 or OPTION_PROMPT.match(lab) or OPTION_HEADER.match(lab):
                     continue
                 vals.append((lab, "ec-product-disabled" in (li.get("class") or [])))
             if vals:
