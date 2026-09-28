@@ -109,21 +109,51 @@ _SIZE_ROW = re.compile(r"\bSIZE\s*([A-Z0-9]{1,4})\s*[:：]\s*(.*?)(?=\bSIZE\s*[A
 _PAIR = re.compile(r"([A-Za-z가-힣][A-Za-z가-힣 .]*?)\s*[-:：]\s*(\d+(?:[.,]\d+)?)")
 
 
-def size_rows(text: str) -> str:
-    """「SIZE 1: SHOULDER - 63 / CHEST - 125 … SIZE 2: …」 한 줄을 행렬 글로 — from_ocr 가 읽는 꼴이다.
+# 「SIZE 1: WAIST - 79 / HIP - 112 / HEM - 68 / OUTER SEAM - 53 SIZE 2: …」(메리메이드 JSON-LD)를 **칸 이름째로**
+# 읽는다. 예전 size_rows 는 머리줄을 영문 그대로 행렬 글로 넘겼는데, from_ocr 가 모르는 이름(OUTER SEAM)이나
+# 범위 밖 값(둘레 112)을 빼면서 뒤 칸이 앞으로 당겨졌다 — WADI SHORTS 의 허리 79 가 총장으로, 밑단 68 이
+# 엉덩이로 앉았다(코덱스 검증 008 을 고치다 전후 대조에서 잡았다, 2026-09-28). 칸마다 이름을 맞추고, 모르는
+# 이름은 **모든 줄에서 같이** 뺀다. 둘레 칸은 값이 단면 범위를 넘을 때만 반으로 나누고(그럴 때만 둘레가
+# 확실하다), 반으로 나눠도 범위 안이라 둘레인지 단면인지 모르면 비운다(틀린 값보다 빈 값).
+# CB · CENTER BACK 은 뒷목 가운데에서 잰 기장이다 — 우리 총장이 뒤 기장이다.
+_EN_LABEL = {"outer seam": "총장", "outseam": "총장", "os": "총장", "total length": "총장", "length": "총장",
+             "cb": "총장", "center back": "총장", "centre back": "총장", "shoulders": "어깨",
+             "bust": "가슴", "hips": "엉덩이", "front rise": "밑위", "sleeve length": "소매길이"}
+# 「CB - 88/93」처럼 한 칸에 값이 둘 — 앞뒤인지 두 길이인지 모른다. 그 칸만 통째로 뺀다.
+_DUAL = re.compile(r"[A-Za-z][A-Za-z .]*?\s*[-:：]\s*\d+(?:[.,]\d+)?\s*/\s*\d+(?:[.,]\d+)?")
+_GIRTHABLE = {"가슴", "허리", "엉덩이", "밑단", "허벅지"}
 
-    메리메이드는 실측을 JSON-LD 설명에만 두고 그 글은 줄바꿈이 없다. 사이즈 둘 이상이 **같은 부위**를
-    같은 차례로 말할 때만 바꾼다 — 부위가 엇갈리면 짐작이 되니 그대로 둔다. 「64,5」는 소수점이다.
-    """
+
+def size_dict(text: str) -> tuple[list[str] | None, dict[str, list[float]]]:
+    import size_from_ocr
     rows = []
     for name, body in _SIZE_ROW.findall(text or ""):
-        pairs = [(k.strip().lower(), v.replace(",", ".")) for k, v in _PAIR.findall(body)]
+        body = _DUAL.sub(" ", body)
+        pairs = [(re.sub(r"\s+", " ", k.strip().lower()), float(v.replace(",", "."))) for k, v in _PAIR.findall(body)]
         if len(pairs) >= 2:
             rows.append((name, pairs))
     if len(rows) < 2 or len({tuple(k for k, _ in p) for _, p in rows}) != 1:
-        return text
-    head = "Size " + " ".join(k.replace(" ", "") for k, _ in rows[0][1])
-    return text + "\n" + head + "\n" + "\n".join(n + " " + " ".join(v for _, v in p) for n, p in rows)
+        return None, {}
+    cols: dict[str, list[float]] = {}
+    for j, (k, _) in enumerate(rows[0][1]):
+        lab = _EN_LABEL.get(k) or size_from_ocr.canon_label(k)
+        vals = [p[j][1] for _, p in rows]
+        # 어깨 칸이 없는 옷(래글런·드롭 숄더)의 SLEEVE 는 뒷목 가운데에서 잰다 — 「CHEST - 127 / SLEEVE - 91 /
+        # CB - 71」. 소매길이로 두면 91 이 소매 길이로 선다. 70 을 넘으면 화장으로 옮긴다.
+        if lab == "소매길이" and not any((_EN_LABEL.get(x) or size_from_ocr.canon_label(x)) == "어깨"
+                                          for x, _ in rows[0][1]) and min(vals) >= 70:
+            lab = "화장"
+        if not lab or lab in cols or lab not in size_from_ocr.RANGES:
+            continue
+        lo, hi = size_from_ocr.RANGES[lab]
+        if lab in _GIRTHABLE:
+            if any(v > hi for v in vals):
+                vals = [v / 2 for v in vals]
+            elif all(v / 2 >= lo for v in vals):
+                continue
+        if all(lo <= v <= hi for v in vals):
+            cols[lab] = [round(v, 1) for v in vals]
+    return ([n for n, _ in rows] if len(cols) >= 2 else None), (cols if len(cols) >= 2 else {})
 
 
 _PERSONAL = re.compile(r"개인\s*결제|\(\s*code\s*:|\bvvip\s+personal\b", re.I)
@@ -187,24 +217,27 @@ def parse_page(html_text: str, url: str, slug: str, now: str) -> dict | None:
             imgs = [_big(og["content"])]
     desc_el = s.select_one("#productDescriptionDetailPage")
     text = _desc_text(desc_el)
-    if not text or _NOTICE_FIRST.match(text):
-        # 상세 칸이 빈 매장은 상품 소개를 JSON-LD description 에만 둔다(피노아친퀘 133벌 전부, 2026-09-27).
-        # 상세 칸이 **배송·교환 공지로 시작하는** 매장도 같다 — 메리메이드는 그 칸이 공지뿐이고 소개·소재·
-        # 모델·실측(「SIZE 1: SHOULDER - 63 / CHEST - 125 …」)이 JSON-LD 에만 있었다(코덱스 검증 004, 2026-09-28).
-        # 공지는 뒤에 그대로 둔다 — 앱 설명을 만들 때 product_desc 가 걷는다.
-        ld = cc.parse_json_ld_product(html_text) or {}
-        raw = ld.get("description") or ""
-        if not raw:
-            # 매장 글의 인치 표기(「(57"-58")」)가 따옴표를 안 가려 JSON-LD 가 통째로 안 읽힌다(메리메이드).
-            # 설명 칸만 다음 칸 이름(sku·brand·offers) 앞까지 글자로 떠 온다.
-            mr = re.search(r'"@type"\s*:\s*"Product".*?"description"\s*:\s*"(.*?)"\s*,\s*"(?:sku|brand|offers|image)"',
-                           html_text, re.S)
-            raw = mr.group(1).replace('\\"', '"') if mr else ""
-        ld_text = re.sub(r"\s*˙\s*", "\n", html.unescape(raw)).strip()
-        if not text:
-            text = ld_text
-        elif len(ld_text) >= 30:
-            text = ld_text + "\n" + text
+    # 상세 칸이 빈 매장은 상품 소개를 JSON-LD description 에만 둔다(피노아친퀘 133벌 전부, 2026-09-27).
+    # 상세 칸이 **배송·교환 공지로 시작하는** 매장도 같다 — 메리메이드는 그 칸이 공지뿐이고 소개·소재·
+    # 모델·실측(「SIZE 1: SHOULDER - 63 / CHEST - 125 …」)이 JSON-LD 에만 있었다(코덱스 검증 004, 2026-09-28).
+    # 상세 칸에 **상품 이름 한 줄**만 있거나 소개만 있고 실측이 없는 벌도 있다 — 앞의 조건에 안 걸려
+    # JSON-LD 를 아예 안 봤고, 메리메이드 「WADI WIDE SHORTS」의 SIZING 과 「FLOWER JACQUARD LACE LONG
+    # SHIRTS」의 소개·소재·실측이 통째로 빠졌다(코덱스 검증 008). 그래서 JSON-LD 는 늘 읽어 두고,
+    # 설명은 상세 칸이 짧을 때 앞에 붙이고, 실측은 상세 칸에서 못 읽으면 JSON-LD 에서 읽는다.
+    # 공지는 뒤에 그대로 둔다 — 앱 설명을 만들 때 product_desc 가 걷는다.
+    ld = cc.parse_json_ld_product(html_text) or {}
+    raw = ld.get("description") or ""
+    if not raw:
+        # 매장 글의 인치 표기(「(57"-58")」)가 따옴표를 안 가려 JSON-LD 가 통째로 안 읽힌다(메리메이드).
+        # 설명 칸만 다음 칸 이름(sku·brand·offers) 앞까지 글자로 떠 온다.
+        mr = re.search(r'"@type"\s*:\s*"Product".*?"description"\s*:\s*"(.*?)"\s*,\s*"(?:sku|brand|offers|image)"',
+                       html_text, re.S)
+        raw = mr.group(1).replace('\\"', '"') if mr else ""
+    ld_text = re.sub(r"\s*˙\s*", "\n", html.unescape(raw)).strip()
+    if not text:
+        text = ld_text
+    elif (_NOTICE_FIRST.match(text) or len(text) < 120) and len(ld_text) >= 30 and ld_text not in text:
+        text = ld_text + "\n" + text
     detail_imgs = []
     if desc_el is not None:
         for im in desc_el.find_all("img"):
@@ -214,7 +247,11 @@ def parse_page(html_text: str, url: str, slug: str, now: str) -> dict | None:
     mw = re.search(r'data-productSoldOut="(\w+)"', html_text)
     whole = mw.group(1) if mw else ""
     import size_from_ocr
-    names, cols = size_from_ocr.from_ocr(front_back(size_rows(text))) if text else (None, {})
+    names, cols = size_dict(text)
+    if not cols and ld_text and ld_text not in text:
+        names, cols = size_dict(ld_text)
+    if not cols and text:
+        names, cols = size_from_ocr.from_ocr(front_back(text))
     d = {
         "product_no": int(m.group(1)),
         "name": name,

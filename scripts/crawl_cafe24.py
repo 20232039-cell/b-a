@@ -786,10 +786,16 @@ def is_soldout(d: dict) -> bool:
     # 295벌이 값 없는 판매중으로 나갔다(2026-09-28 코덱스 검증 004 — 페이지는 SOLD OUT · 0원).
     if d.get("price_missing"):
         return True
-    opts = [o for o in (d.get("options") or []) if str(o).strip()]
+    # 예전에 받아 둔 옵션은 값 꼬리·딱지가 붙은 채다 — 여기서 다시 갈라 읽는다(split_option).
+    opts, dead = [], set(d.get("soldout_options") or [])
+    for o in d.get("options") or []:
+        lab, marked = split_option(o)
+        if lab:
+            opts.append(lab)
+            if marked:
+                dead.add(lab)
     if not opts:
         return True
-    dead = set(d.get("soldout_options") or [])
     live = [o for o in opts if o not in dead]
     if not live:
         return True
@@ -2436,7 +2442,11 @@ def _fix_url(u: str, base: str) -> str:
 # 영문 하의 라벨 「LEGOPENING」·「OUT SEAM」·「BOTTOM HEM」은 여기 없어서 표에서 그 줄이 통째로 빠졌다 —
 # 밑단·총장이 없는 바지 표가 6개 매장 538벌(2026-09-11, 사람이 앱 화면에서 발견). 정식 라벨로의 대응은
 # data/size_labels.json 이 맡는다(leg opening→밑단, out seam→총장).
-SIZE_LABELS = (r"(총\s*장|총\s*길이|총\s*기장|기장|어깨\s*너비|어깨\s*단면|어깨|가슴\s*단면|가슴|소매\s*길이|소매|화장|암홀|허리\s*단면|허리|밑위|팔\s*기장|팔\s*통|"
+# 「소매기장」은 「소매」에 걸리고 뒤에 숫자가 없어 버려진 다음 「기장 62.5」로 다시 읽혔다 — 기장은 총장으로
+# 맞춰지므로 소매 길이가 총장 자리에 앉았다(전수 4,700여 벌 · 제너럴아이디어 무드인사이드 포에토 …,
+# 코덱스 검증 008 이 제너럴아이디어에서 짚었다 2026-09-28). 「소매통」은 일부러 안 넣는다 — 둘레로 적는 매장
+# (오스트카카 「사이즈는 둘레 기준」 소매통 61)을 가려 낼 길이 없어, 넣으면 틀린 값이 들어온다.
+SIZE_LABELS = (r"(총\s*장|총\s*길이|총\s*기장|(?<![매팔])(?<!매\s)(?<!팔\s)기장|어깨\s*너비|어깨\s*단면|어깨|가슴\s*단면|가슴|소매\s*길이|소매\s*기장|소매|화장|암홀|허리\s*단면|허리|밑위|팔\s*기장|팔\s*통|"
                r"허벅지\s*단면|허벅지|밑단\s*단면|밑단|엉덩이\s*단면|엉덩이|힙|sleeve\s*length|total\s*length|shoulder\s*width|chest\s*width|"
                r"leg\s*opening|out\s*seam|bottom\s*hem|bottom\s*width|hem\s*width|"
                r"front\s*rise|back\s*rise|팔\s*길이|"
@@ -2929,7 +2939,20 @@ OPTION_PROMPT = re.compile(
 
 # 「S [품절]」처럼 재고 딱지가 이름에 붙어 온다. 이름에서 떼고 어느 사이즈가 품절인지는
 # 따로 적어 둔다 — 앱에 「S [품절]」이 사이즈 이름으로 서면 안 된다(1,879벌).
-OPTION_SOLDOUT = re.compile(r"\s*[\[\(]?\s*(?:품절|sold\s?out|일시\s?품절|재입고\s?예정)\s*[\]\)]?\s*$", re.I)
+OPTION_SOLDOUT = re.compile(r"\s*[\[\(]?\s*(?:품절|sold\s?out|out\s?of\s?stock|일시\s?품절|재입고\s?예정)\s*[\]\)]?\s*$", re.I)
+# 추가금이 붙는 옵션은 카페24 가 이름 끝에 값을 적어 보낸다 — 「M [품절]  (+1₩)」 · 「블랙 / L (-10,800원)」.
+# 품절 딱지가 **값 앞에** 있어서 끝에 닻을 내린 OPTION_SOLDOUT 이 못 보고, 앱에는 「M [품절] (+1₩)」이
+# 사이즈 이름으로 섰다(코덱스 검증 008, 2026-09-28 — 22곳 80벌 · 딱지를 못 봐 판매중으로 나간 118벌). 값 꼬리를 먼저 떼고 딱지를 본다.
+OPTION_PRICE = re.compile(r"\s*\(\s*[+\-]\s*[\d,.]+\s*(?:원|₩|won|krw)?\s*\)\s*$", re.I)
+
+
+def split_option(v: str) -> tuple[str, bool]:
+    """옵션 글자 → (이름, 품절 딱지가 붙었나). 값 꼬리와 품절 딱지를 뗀다."""
+    v = OPTION_PRICE.sub("", str(v)).strip()
+    m = OPTION_SOLDOUT.search(v)
+    if m:
+        return v[:m.start()].strip(), True
+    return v, False
 OPTION_SIZE_TITLE = re.compile(r"size|사이즈|사이스|치수", re.I)
 
 
@@ -3343,14 +3366,12 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
             continue          # 「- [필수] SELECT SIZE -」 같은 안내 문구는 사이즈가 아니다
         if OPTION_HEADER.match(v):
             continue          # 선택창 제목 줄 — 제너럴아이디어 4,067벌이 「COLOR · BLUE · SIZE · S …」였다
-        m = OPTION_SOLDOUT.search(v)
-        if m:
-            v = v[:m.start()].strip()
-            if not v:
-                continue
+        v, dead = split_option(v)
+        if not v:
+            continue
+        if dead:
             soldout_options.append(v)
-        if v:
-            options.append(v)
+        options.append(v)
 
     # cafe24 새 스킨은 사이즈를 드롭다운이 아니라 단추 목록으로 놓는다:
     #   <ul option_title="SIZE" option_style="button"><li option_value="XS" title="XS">…
@@ -3378,12 +3399,10 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
         groups.sort(key=lambda g: 0 if OPTION_SIZE_TITLE.search(g[0]) else 1)
         for _title, vals in groups:
             for lab, dead in vals:
-                m = OPTION_SOLDOUT.search(lab)
-                if m:
-                    lab = lab[:m.start()].strip()
+                lab, marked = split_option(lab)
                 if not lab or lab in options:
                     continue
-                if dead or m:
+                if dead or marked:
                     soldout_options.append(lab)
                 options.append(lab)
 
@@ -4237,7 +4256,7 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
                 "product_no": d["product_no"],
                 "category_path": " | ".join(d.get("category_names", [])),
                 "gallery_count": len(d.get("gallery", [])),
-                "options": " | ".join(d.get("options", [])),
+                "options": " | ".join(dict.fromkeys(l for l in (split_option(o)[0] for o in d.get("options", [])) if l)),
                 "delisted": "1" if d.get("delisted") else "",
                 "last_seen": d.get("last_seen", ""),
                 # 「보여 줄 설명이 없다」 — 글자 수가 아니라 **옷 이야기가 있나**로 센다.
