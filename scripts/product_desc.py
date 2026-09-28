@@ -373,7 +373,7 @@ def material_of(text: str) -> str:
 # 매장 화면의 구간 이름표 — 어떤 소비자에게도 정보가 아니다(전수 2,006편).
 _SECTION_HEAD = re.compile(
     r"^\s*(?:feature|features|detail|details|description|info|information|fabric|"
-    r"material|composition|상품\s?설명|제품\s?설명|패브릭\s?정보|소재\s?정보|디테일)"
+    r"material|composition|상품\s?설명|제품\s?설명|패브릭\s?정보|소재\s?정보|제품\s?소재|디테일)"
     r"\s*[:：]?\s*$", re.I)
 # 치수표가 글로 흘러든 첫 줄(전수 275편). 사이즈표가 바로 위에 있는데 또 적힌다.
 _SIZE_HEAD = re.compile(r"^\s*(?:총장|기장|어깨|가슴|허리|엉덩이|밑단|소매|허벅지|밑위)\s*\d")
