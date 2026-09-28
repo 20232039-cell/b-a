@@ -91,5 +91,8 @@ SHOPIFY_PAGES: set[str] = {"recto", "post-archive-faction"}
 # 2026-09-27 밤 처음 걷는 매장 13곳과 PAGES 여덟 곳 — 그날 사람이 성별을 판정했고 「상품 수집 함 하자」고 했다. 식스샵 셋 때처럼
 # 사람이 값·설명·실측을 보기 전까지 앱에 안 내보낸다. 게시 판이 수집보다 먼저 돌든 나중에 돌든 앱이 같게.
 NEW_HOLD: set[str] = {"alyss", "antome", "arend", "areuban", "egnarts", "freckle", "generalidea", "le",
-                      "eudon-choi", "goen-j", "finoacinque", "merely-made", "polyteru"} | set(PAGES)
+                      "eudon-choi", "goen-j", "finoacinque", "merely-made", "polyteru", "anglan"} | set(PAGES)
+# anglan 은 해외 IP 를 막는 카페24 매장이라 사람 PC(국내)에서 걷어 왔다(2026-09-28, 코덱스 중계 005 · 638벌).
+# CI(해외)에서는 주간 갱신이 목록을 못 받아 가드레일이 상태를 안 바꾼다 — 품절·값이 굳는다. 국내 러너(작업 #11)가 서기 전까지.
+# 같은 날 PC 에서 연 eenk · label-archive · my-joyful-decisions · preoccupy · taille · paco-sply 는 imweb 이라 0벌이다.
 APP_HOLD: set[str] = {"numbering", "kijun", "crump", "jeanbach", "maison-marais", "tripleroot"} | NEW_HOLD
