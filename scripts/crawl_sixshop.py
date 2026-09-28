@@ -158,6 +158,7 @@ def size_dict(text: str) -> tuple[list[str] | None, dict[str, list[float]]]:
 
 _PERSONAL = re.compile(r"개인\s*결제|\(\s*code\s*:|\bvvip\s+personal\b", re.I)
 _NOTICE_FIRST = re.compile(r"\s*[\[【<(]?\s*(?:배송\s*안내|교환\s*(?:및|/|&)?\s*반품|반품\s*안내|shipping|delivery)", re.I)
+_NOTICE_ANY = re.compile(r"배송\s*안내|교환\s*(?:및|/|&)?\s*반품|반품\s*안내|shipping\s+information|exchange\s+and\s+return", re.I)
 
 
 def parse_page(html_text: str, url: str, slug: str, now: str) -> dict | None:
@@ -236,7 +237,10 @@ def parse_page(html_text: str, url: str, slug: str, now: str) -> dict | None:
     ld_text = re.sub(r"\s*˙\s*", "\n", html.unescape(raw)).strip()
     if not text:
         text = ld_text
-    elif (_NOTICE_FIRST.match(text) or len(text) < 120) and len(ld_text) >= 30 and ld_text not in text:
+    elif (_NOTICE_FIRST.match(text) or len(_NOTICE_ANY.split(text, 1)[0].strip()) < 120) \
+            and len(ld_text) >= 30 and ld_text not in text:
+        # 길이는 **공지 앞까지만** 잰다 — 메리메이드 영문 상세 칸은 「상품 이름 · PRODUCT DETAILS · Shipping
+        # information …」이라 전체는 길어도 소개가 없다(코덱스 011 표본을 만들다 잡음, 2026-09-28).
         text = ld_text + "\n" + text
     detail_imgs = []
     if desc_el is not None:
