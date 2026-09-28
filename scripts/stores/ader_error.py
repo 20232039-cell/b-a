@@ -22,7 +22,10 @@ import crawl_cafe24 as cc
 import crawl_shopify as cs
 
 BASE = "https://adererror.com"
-PAGE_DELAY = 3.0          # robots.txt 에 Crawl-delay 가 없다 — 규약 기본값
+# robots.txt 에 Crawl-delay 가 없다. 처음엔 규약 기본값 3초였는데 2,534쪽이라 한 판이 2시간 7분 —
+# 주간 판의 묶음 제한(그때 110분)에 혼자 걸려 그 묶음이 통째로 취소됐다(2026-09-28). 카페24 수집기의
+# 매장당 1초와 같은 결로 1.5초에 둔다(약 1시간).
+PAGE_DELAY = 1.5
 
 
 def list_urls(http, log) -> list[str] | None:

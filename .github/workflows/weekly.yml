@@ -88,7 +88,10 @@ jobs:
     defaults:
       run:
         working-directory: work
-    timeout-minutes: 110
+    # 110분은 매장이 68곳이던 때(2026-09-10) 값이다. 약 210곳을 20묶음에 나누니 묶음마다 10곳 안팎이 되고,
+    # 상품 페이지를 한 쪽씩 여는 매장(식스샵·crawl_pages)이 늘어 2026-09-28 판에서 묶음 넷이 110분에 걸려
+    # 취소됐다(묶음 8 은 카페24 만인데도). 러너 한 대 상한 6시간보다 한참 아래인 170분으로 올린다.
+    timeout-minutes: 170
     strategy:
       fail-fast: false
       max-parallel: 20
