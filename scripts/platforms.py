@@ -46,6 +46,14 @@ PAGES: dict[str, str] = {
     "minju-kim": "https://www.minjukim.co",               # 자체(dcore) — View all 쪽 넘김
     "carlyn": "https://www.carlynmall.com",               # 메이크샵 — 목록 JSON
     "limpark": "https://limparkofficial.com",             # Cargo — 상점 준비 중
+    # 2026-09-28 relay 005 — 「카페24로 보임」이던 다섯 곳이 국내에서 열어 보니 imweb 이었다(stores/_imweb.py).
+    # 사람 PC 의 Claude 세션이 해석기를 짜서 걷어 왔다. 매장이 해외 IP 를 막아 CI 에서는 사이트맵부터 못 받는다 —
+    # list_urls 가 None 이라 가드레일이 상태를 안 바꾼다(값·재고가 굳는다). 국내 러너(작업 #11)가 서기 전까지.
+    "eenk": "https://eenk.co.kr",
+    "label-archive": "https://label-archive.com",
+    "my-joyful-decisions": "https://www.myjoyfuldecisions.com",
+    "preoccupy": "https://www.preoccupy-center.com",
+    "taille": "https://taille.kr",
 }
 
 NOT_CAFE24: set[str] = set(SHOPIFY) | set(SIXSHOP) | set(PAGES)
@@ -94,5 +102,5 @@ NEW_HOLD: set[str] = {"alyss", "antome", "arend", "areuban", "egnarts", "freckle
                       "eudon-choi", "goen-j", "finoacinque", "merely-made", "polyteru", "anglan"} | set(PAGES)
 # anglan 은 해외 IP 를 막는 카페24 매장이라 사람 PC(국내)에서 걷어 왔다(2026-09-28, 코덱스 중계 005 · 638벌).
 # CI(해외)에서는 주간 갱신이 목록을 못 받아 가드레일이 상태를 안 바꾼다 — 품절·값이 굳는다. 국내 러너(작업 #11)가 서기 전까지.
-# 같은 날 PC 에서 연 eenk · label-archive · my-joyful-decisions · preoccupy · taille · paco-sply 는 imweb 이라 0벌이다.
+# 같은 날 PC 에서 연 나머지 다섯 곳은 imweb 이었고 PAGES 에 올렸다(paco-sply 도 imweb — 아직 안 걷음).
 APP_HOLD: set[str] = {"numbering", "kijun", "crump", "jeanbach", "maison-marais", "tripleroot"} | NEW_HOLD
