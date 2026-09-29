@@ -38,9 +38,10 @@ import tempfile
 import threading
 import traceback
 import time
+import unicodedata
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
-from urllib.parse import unquote_to_bytes, urlparse
+from urllib.parse import unquote, unquote_to_bytes, urlparse
 
 import requests
 from PIL import Image
@@ -75,17 +76,77 @@ def jsonl_line(obj) -> str:
     return json.dumps(obj, ensure_ascii=False).translate(_LINE_SEPS)
 
 
-def skip_image(url: str) -> bool:
-    name = re.sub(r"\?.*$", "", url).rsplit("/", 1)[-1]
-    if SKIP_NAME.search(name):
-        return True
+# 파일 이름에 **% 를 떼어 낸 퍼센트 인코딩**이 그대로 남은 매장이 있다. 카페24 편집기가
+# 한글 이름을 「%EC%83%81%EC%84%B8」로 올린 뒤 어디선가 % 가 빠져 「EC8381EC84B8」만 남는다
+# (easy-no-easy 「copy-…-EC8381EC84B801.jpg」 = 「상세01」, 49벌 · doffjason 「28529notice」 =
+# 「(5)notice」 · bourie 는 자모로 풀어 쓴 NFD 한글 「E18480E185B5…」). 이름을 그대로 보면
+# 「상세」「사이즈」 힌트가 하나도 안 걸려서 뒤에서부터 읽는 순서에 밀려 예산 밖으로 나갔다
+# (2026-09-29). 한글 한 자는 UTF-8 세 바이트(E?·[89AB]?·[89AB]?)라 그 꼴이 **두 자 넘게
+# 이어진 것**만 푼다 — 해시 이름(499373417c5e…)이 우연히 한 자로 풀리는 일을 막으려는 것이다.
+# 풀려도 한글 낱말이 안 되면 아무 힌트에도 안 걸리므로 틀리게 풀어서 잃을 것은 없다.
+_HEX_UTF8 = re.compile(r"(?:E[0-9A-F][89AB][0-9A-F][89AB][0-9A-F]){2,}", re.I)
+
+
+def decoded_name(url: str) -> str:
+    """주소 끝의 파일 이름 — %XX 와 % 가 빠진 16진 UTF-8 을 풀고 NFC 로 모은다."""
+    name = re.sub(r"[?#].*$", "", url).rsplit("/", 1)[-1]
+    try:
+        name = unquote(name)
+    except Exception:
+        pass
+
+    def _hex(m):
+        try:
+            return bytes.fromhex(m.group(0)).decode("utf-8")
+        except ValueError:
+            return m.group(0)
+    return unicodedata.normalize("NFC", _HEX_UTF8.sub(_hex, name))
+
+
+# 「사이즈」 말이 이름에 있으면 안내문 낱말(notice…)보다 먼저 본다. doffjason 은 실측표를
+# 「(5)size-notice.jpg」라는 이름으로 싣는데, SKIP_NAME 을 먼저 보던 시절에는 「notice」에
+# 걸려 표가 든 그림을 스스로 버렸다(2026-09-29, 93장). 「guide」는 여기 넣지 않는다 —
+# mardi-mercredi 의 「SHOES_RETURN_GUIDE.jpg」(89벌)가 풀려 반품 안내를 읽게 된다.
+# 「oversize」도 사이즈 말이 아니다.
+_SIZE_FIRST = re.compile(r"(?<!over)size|chart|measure|사이즈|실측|치수", re.I)
+# 상품의 **맨 끝 그림**이 「notice」「공지」라는 이름만으로 버려지면 안 된다. doffjason 은 상세
+# 그림 차례가 intro → fitting → info → detail → YKK → **notice** 이고, 그 마지막 「(5)notice
+# .jpg」「(5)notice-nocard.jpg」 안에 실측표가 있다(2026-09-29 확인, 59벌이 사이즈 없이 남았다).
+# 사이즈 표는 상세 맨 끝에 오는 일이 많다(_cap 주석). 다만 이 예외는 「notice·공지」처럼 뜻이
+# 넓은 낱말에만 준다 — 「배송 안내」「RefundExchange」「교환환불규정」처럼 주제가 박힌 이름은
+# 끝에 있어도 정말 그 안내다(bmuette 35벌 · kiimuir 17벌 · siyazu 가 그랬다).
+_GENERIC_NOTICE = re.compile(r"notice|공지", re.I)
+_SPECIFIC_SKIP = re.compile(r"shipping|delivery|issue|exchange|refund|return|banner|event|coupon"
+                            r"|배송|교환|반품|환불", re.I)
+
+
+def skip_image(url: str, last: bool = False) -> bool:
+    """이름만 보고 안 읽을 그림인가.
+
+    last: 이 그림이 상품의 맨 끝 그림이고 **다른 상품과 거의 안 겹치는가**(candidates 가 정한다).
+    그런 그림은 「notice·공지」라는 이름만으로는 버리지 않는다(_GENERIC_NOTICE 주석).
+    """
+    # 글로 박힌 그림(data:)은 이름이 없다 — base64 조각에서 낱말을 찾으면 우연히 걸린다.
+    if url.startswith("data:"):
+        return False
+    name = decoded_name(url)
     stem = re.sub(r"\.[a-z0-9]{2,4}$", "", name, flags=re.I)
+    if _SIZE_FIRST.search(stem):
+        return False
+    if SKIP_NAME.search(name):
+        if last and _GENERIC_NOTICE.search(name) and not _SPECIFIC_SKIP.search(name):
+            return False
+        return True
     if _SIZE_WORD.search(stem):
         return False
     return len(stem) <= 24 and bool(_ASSET_WORD.search(stem))
+
+
 MAX_IMAGES = 5
 # 고른 그림에서 이만큼도 안 나오면 그림을 더 본다(글자 수).
 LOW_YIELD = 80
+# 사이즈를 노리는 판(want_size)에서 표를 못 얻었을 때 읽을 수 있는 장수 상한(process_brand 주석).
+SIZE_READ_MAX = 12
 SHORT_TEXT = 80
 
 _last: dict[str, float] = {}
@@ -161,6 +222,29 @@ def polite_get(url: str, delay: float, cdn_delay: float | None = None) -> bytes 
         if data is not None:
             return data
     return None
+
+
+# MIN_BYTES(20KB) 는 아이콘·구분선을 거르려는 것인데, **작게 압축된 표**까지 함께 버렸다.
+#   o-oi 26ss 「SIZE GUIDE」 PNG   1000x482 · 16~20KB (80벌 가운데 25벌이 문턱 아래)
+#   plac 상세에 글로 박힌 표(data:)  859x157 · 14.9KB (12203) · 477x214 · 12.4KB (13953)
+# 흰 바탕에 검은 글자 몇 줄은 PNG 로 아주 작게 눌린다 — 바이트 수는 「글이 적다」가 아니다
+# (2026-09-29). 그래서 문턱 아래라도 **생김새가 표 같은 것**은 살린다: 가로 600 넘고 세로
+# 200 넘는 그림. 아이콘은 가로가, 구분선은 세로가 모자라 여전히 걸러진다.
+# data: 그림은 매장이 상세컷을 HTML 에 직접 넣은 것이라 아이콘일 까닭이 적다 — 크기로 버리지
+# 않되, 지연 로딩 자리표(1x1 gif 따위)만은 거른다.
+SMALL_TABLE_W, SMALL_TABLE_H = 600, 200
+
+
+def too_small(url: str, data: bytes) -> bool:
+    if len(data) >= MIN_BYTES:
+        return False
+    try:
+        w, h = Image.open(io.BytesIO(data)).size
+    except Exception:
+        return True
+    if url.startswith("data:"):
+        return w < 200 or h < 50
+    return not (w >= SMALL_TABLE_W and h >= SMALL_TABLE_H)
 
 
 MAX_W = 1200
@@ -579,6 +663,34 @@ def ocr_slice(im, top, bot, scale=2, psm="6") -> str:
             return ""
 
 
+def _blank_row(im, y0: int, want: int, lo: int, hi: int, span: int = 24) -> int | None:
+    """y0+want 에서 가장 가까운 「빈 줄」(한 줄이 거의 한 색인 줄)을 [y0+lo, y0+hi] 에서 찾는다.
+
+    흰 줄만 빈 줄로 치지 않고 **한 색으로 고른 줄**을 본다 — 검정 바탕 표의 줄 사이도, 가로
+    괘선 위도 자르기 좋은 자리다. 세로 괘선이 지나는 표 안의 줄은 고르지 않으니 칸 한가운데를
+    자르는 일이 없다. 찾으면 그 빈 줄 무리의 한가운데를 돌려준다 — 글자에 딱 붙여 자르면
+    tesseract 가 줄 끝 획을 흘린다. 못 찾으면 None.
+    """
+    W = im.width
+    x0, x1 = W // 100, W - W // 100          # 테두리 선이 한 줄을 통째로 「고르지 않게」 만들지 않게
+    top, bot = y0 + lo, min(im.height - 1, y0 + hi)
+
+    def blank(y):
+        mn, mx = im.crop((x0, y, x1, y + 1)).getextrema()
+        return mx - mn <= span
+
+    for d in range(0, hi - lo + 1):
+        for y in (y0 + want + d, y0 + want - d):
+            if top <= y <= bot and blank(y):
+                a = b = y
+                while a - 1 >= top and blank(a - 1):
+                    a -= 1
+                while b + 1 <= bot and blank(b + 1):
+                    b += 1
+                return (a + b) // 2
+    return None
+
+
 def ocr_tall(im) -> str:
     """세로로 긴 상세 띠 — 성기게 훑고, 표가 있을 만한 곳만 촘촘히 다시 읽는다.
 
@@ -588,20 +700,46 @@ def ocr_tall(im) -> str:
     깨지고, 같은 자리를 300px 조각 2배로 다시 읽으면 `총장 가슴 어깨 소매 / 1 46 37`
     까지 정확히 나온다. 그래서 두 단계로 나눈다 — 성긴 훑기는 싸고, 정밀 판독은
     걸린 띠에만 쓴다.
+
+    **자르는 자리는 빈 줄이다(2026-09-29).** 예전엔 300px 마다 기계적으로 자르고 40px 씩
+    겹쳤다. 표의 한 줄이 경계에 걸리면 위 조각에 윗절반, 아래 조각에 아랫절반이 가거나,
+    겹친 40px 안에 든 줄이 두 번 나와 값 줄이 하나 더 생겼다 — 파서는 그것을 사이즈 한 칸으로
+    센다. outstanding 5025·5026·5035·5112, mardi-mercredi 15387, doffjason 813·814·818·824·
+    362·363·945·660 이 그렇게 표를 잃거나 칸이 어긋났다. 그래서 300px 언저리(200~400px)의
+    빈 줄에서 자르고, 겹치지 않는다. 빈 줄이 없는 곳(사진 위 글자·바탕 무늬)만 예전처럼
+    300px 에서 자르고 40px 겹친다 — 거기서는 잘린 줄을 되살리는 겹침이 아직 낫다.
+    1500px 성긴 띠의 경계도 같은 까닭으로 빈 줄에 맞춘다.
     """
     COARSE, FINE, OVER = 1500, 300, 40
     out = []
-    for top in range(0, im.height, COARSE):
-        bot = min(im.height, top + COARSE)
+    top = 0
+    while top < im.height:
+        if im.height - top <= COARSE + 200:
+            bot = im.height
+        else:
+            bot = _blank_row(im, top, COARSE, COARSE - 200, COARSE + 200) or (top + COARSE)
         rough = ocr_slice(im, top, bot, scale=1)
         if not SIZE_HINT.search(rough):
             out.append(rough)
+            top = bot
             continue
         # 표가 있을 만한 띠 — 촘촘히 다시
         fine = []
-        for y in range(top, bot, FINE - OVER):
-            fine.append(ocr_slice(im, y, min(bot, y + FINE), scale=2))
+        y = top
+        while y < bot:
+            if bot - y <= FINE + 100:
+                fine.append(ocr_slice(im, y, bot, scale=2))
+                break
+            cut = _blank_row(im, y, FINE, FINE - 100, FINE + 100)
+            if cut is not None:
+                fine.append(ocr_slice(im, y, cut, scale=2))
+                y = cut
+            else:
+                e = min(bot, y + FINE)
+                fine.append(ocr_slice(im, y, e, scale=2))
+                y = e - OVER if e < bot else e
         out.append("\n".join(fine))
+        top = bot
     return "\n".join(out)
 
 
@@ -894,8 +1032,45 @@ def load_categories() -> dict[tuple[str, int], str]:
         return {(r["brand_slug"], int(r["product_no"])): r["category"] for r in csv.DictReader(f)}
 
 
-# 파일 이름이 말해 주는 것 — 이런 그림은 순서와 무관하게 먼저 읽는다
-HINT_NAME = re.compile(r"size|detail|info|spec|measure|fabric|\uc0ac\uc774\uc988|\uc2e4\uce21", re.I)
+# 파일 이름이 말해 주는 것 — 이런 그림은 순서와 무관하게 먼저 읽는다.
+# 「상세」를 더한다(2026-09-29): easy-no-easy 는 표가 든 그림 이름이 「상세01」「블랙-상세-04」
+# 인데(% 빠진 16진이라 decoded_name 으로 풀어야 보인다) 힌트가 안 걸려 착장컷에 밀렸다(49벌).
+HINT_NAME = re.compile(r"size|detail|info|spec|measure|fabric|\uc0ac\uc774\uc988|\uc2e4\uce21|\uc0c1\uc138", re.I)
+
+
+def hint_image(url: str) -> bool:
+    """이름(또는 경로)에 사이즈·상세 힌트가 있나. 글로 박힌 그림(data:)은 이름이 없다."""
+    if url.startswith("data:"):
+        return False
+    return bool(HINT_NAME.search(url) or HINT_NAME.search(decoded_name(url)))
+
+
+# 맨 끝 그림 예외(skip_image 의 last)를 받을 수 있는 쓰임 상한. doffjason 의 「notice」는
+# 상품마다 따로 올린 그림(copy-<시각>-…)이라 한두 벌에서만 쓰인다. 매장 공용 문턱(shared:
+# 열 벌 이상 **그리고** 전체의 20%)만 믿으면 큰 매장의 공용 안내가 그 아래로 빠져나온다 —
+# siyazu 「교환환불규정.jpg」는 한 장이 355벌에 붙어 있는데 문턱이 356 이라 공용이 아니었고,
+# 그 예외만으로 1,898벌이 안내문을 읽게 될 뻔했다(2026-09-29 전수). 색만 다른 형제가 한 그림을
+# 나눠 쓰는 것은 몇 벌이 고작이므로, 열 벌 넘게 쓰이는 끝 그림은 이름대로 둔다.
+LAST_EXEMPT_MAX_USE = 10
+
+
+def candidates(d: dict, shared: set, use=None) -> list[str]:
+    """읽을 수 있는 그림 — 매장 공용 그림과 이름으로 거른 그림을 뺀 것. 차례는 원래 그대로.
+
+    판독·되읽기 판단·일정 세기(plan) 세 자리가 같은 잣대를 쓰도록 한 곳에 둔다."""
+    imgs = images_of(d)
+    last = imgs[-1] if imgs else None
+    return [u for u in imgs
+            if u not in shared
+            and not skip_image(u, last=(u == last and (use is None or use[u] < LAST_EXEMPT_MAX_USE)))]
+
+
+def read_order(cand: list[str], extra_urls: set) -> list[str]:
+    """읽는 차례 — 눌러서 얻은 그림 → 이름 힌트가 붙은 그림 → 나머지는 뒤에서부터."""
+    first = [u for u in cand if u in extra_urls]
+    hinted = [u for u in cand if u not in first and hint_image(u)]
+    rest = [u for u in cand if u not in first and u not in hinted]
+    return first + hinted + rest[::-1]
 
 
 def images_of(d: dict) -> list[str]:
@@ -1126,8 +1301,7 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
             if select in ("no-size", "ocr", "gaps", "bad-size", "thin-table") or (select == "all" and d.get("source_url") in ocr_sized):
                 done.discard(no)
                 continue
-            avail = len([u for u in images_of(d)
-                         if u not in shared and not skip_image(u)])
+            avail = len(candidates(d, shared, use))
             if read_n.get(no, 0) < min(max_images, avail):
                 done.discard(no)
 
@@ -1186,17 +1360,19 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
             continue
         todo.append(d)
     todo = todo[k::n]
-    if plan_only:
-        imgs = sum(min(max_images, len([u for u in images_of(d)
-                                        if u not in shared and not skip_image(u)]))
-                   for d in todo)
-        return {"brand": slug, "products": len(todo), "images": imgs, "with_text": 0}
     # 표를 얻으면 남은 그림을 안 읽고 멈추는 갈래. 사이즈**만** 노리는 판에서만 켠다.
     # gaps 는 사이즈·소재·색·디테일 가운데 빈 것을 채우러 가는 판인데 여기 끼어 있었다 —
     # 소재를 채우러 가 놓고 사이즈 표를 보는 순간 멈춰, 뒤에 오는 소재·케어 글을 못 읽었다.
     # 상세 그림은 대개 「착장 → 표 → 소재·세탁」 차례라 그 뒤가 통째로 날아간다
     # (사람 지적 2026-09-13: 「OCR 돌릴거면 안에 디테일이나 소재 같은것도 같이 수집해」).
     want_size = select in ("no-size", "ocr", "bad-size", "capped", "thin-table")
+    # 사이즈를 노리는 판에서 표를 아직 못 얻었으면 상한을 넘어 SIZE_READ_MAX 장까지 더 읽는다.
+    size_budget = max(max_images, SIZE_READ_MAX) if want_size else max_images
+    if plan_only:
+        # 일정은 상한까지 다 읽는다고 보고 센다 — 사이즈 판의 대상은 표가 없는 옷이라
+        # 대개 끝까지 읽는다. 적게 세면 조각 하나가 러너 시간을 넘긴다.
+        imgs = sum(min(size_budget, len(candidates(d, shared, use))) for d in todo)
+        return {"brand": slug, "products": len(todo), "images": imgs, "with_text": 0}
     log(f"[{slug}] OCR 대상 {len(todo)} (이미 {len(done)}, 조각 {k + 1}/{n})")
     n_img = n_txt = 0
     counters = {"img": 0, "txt": 0, "done": 0, "early": 0}
@@ -1207,8 +1383,7 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
             # 소재·디테일·사이즈표는 상세 이미지의 「뒤쪽」에 오는 경우가 많다(사람 지적 2026-09-04).
             # 앞에서 자르면 착용컷만 읽고 정작 필요한 표를 놓친다. 그래서 뒤에서부터 고르되,
             # 파일 이름에 size/detail/info 가 든 그림은 어디에 있든 먼저 읽는다.
-            cand = [u for u in images_of(d)
-                    if u not in shared and not skip_image(u)]
+            cand = candidates(d, shared, use)
             # 「눌러서 얻은 그림」이 맨 앞이다 — 사이즈가이드 창·SIZE CHART 칸처럼 **사람이
             # 확인한 자리**에서 받아 온 주소라, 파일 이름 힌트보다 확실하다. 이것을 따로
             # 앞세우지 않으면 아래의 `rest[::-1]`(뒤에서부터 읽기)이 그림을 **맨 뒤로**
@@ -1216,20 +1391,17 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
             # (2026-09-18 실측: cayl 은 사이즈표 그림이 붙은 865벌 가운데 178벌만 그 그림을
             # 읽었고, 나머지 687벌은 판을 두 번 돌려도 그대로였다. 그 상품들은 갤러리가
             # 11~12장이라 뒤에서부터 열 장을 읽으면 앞의 사이즈표에 닿지 못한다).
-            first = [u for u in cand if u in extra_urls]
-            hinted = [u for u in cand if u not in first and HINT_NAME.search(u)]
-            rest = [u for u in cand if u not in first and u not in hinted]
             # 힌트가 붙은 그림을 먼저, 나머지는 뒤에서부터. 상한에 닿았는데 글자가 거의 안
             # 나왔으면 상한을 두 배까지 늘려 더 본다 — 뒤 여덟 장이 전부 착용컷이고 표는
             # 앞쪽에 있는 매장이 있다(espionage 는 그림 23장 중 뒤 8장만 읽고 42자를 건졌다,
             # 2026-09-06). 잘 나오는 상품에는 아무 값도 더 안 든다.
-            order = first + hinted + rest[::-1]
+            order = read_order(cand, extra_urls)
             budget, read = max_images, 0
             for url in order:
                 if read >= budget:
                     break
                 data = polite_get(url, delay, cdn_delay)
-                if not data or len(data) < MIN_BYTES:
+                if not data or too_small(url, data):
                     continue
                 with wlock:
                     counters["img"] += 1
@@ -1248,6 +1420,16 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
                     budget = max_images * 2
                     with wlock:
                         counters["more"] = counters.get("more", 0) + 1
+                # 사이즈를 노리는 판인데 상한까지 읽고도 표가 없으면(있었으면 위에서 멈췄다)
+                # SIZE_READ_MAX 장까지 더 읽는다. 글자는 넉넉히 나와 LOW_YIELD 연장에는 안 걸리는데
+                # 표가 그보다 앞에 있는 매장이 있다 — o-oi 는 「SIZE GUIDE」 그림(3.jpg)이 상세
+                # 13~16장 가운데 **뒤에서 여섯째**라, 뒤에서부터 다섯 장을 읽으면 딱 한 장 차이로
+                # 못 닿았다(80벌 중 74벌이 뒤에서 여섯째 이후, 가장 먼 것은 열두째. 2026-09-29).
+                # 표를 얻는 순간 멈추므로 되는 상품에는 값이 안 든다.
+                if want_size and read >= budget and budget < size_budget:
+                    budget = size_budget
+                    with wlock:
+                        counters["deep"] = counters.get("deep", 0) + 1
             ocr_text = _cap(texts)
             # 상한에 걸려 잘린 기록만 그림별 글을 함께 남긴다 — 그래야 나중에 상한을
             # 올리거나 자르는 자리를 바꿀 때 그림을 다시 내려받지 않아도 된다.
