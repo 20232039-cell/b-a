@@ -917,7 +917,8 @@ def images_of(d: dict) -> list[str]:
     상세 그림이 있으면 지금처럼 그것만 읽는다 — 갤러리는 대개 착장컷이라 글이 없고,
     괜히 예산만 먹는다. 없을 때만 대신 본다.
     """
-    return list(d.get("detail_images") or []) or list(d.get("gallery") or [])
+    # 갤러리 13장째부터(gallery_tail)도 같이 본다 — 뒤에서부터 읽으므로 맨 끝의 실측표가 먼저 읽힌다(알리스).
+    return list(d.get("detail_images") or []) or (list(d.get("gallery") or []) + list(d.get("gallery_tail") or []))
 
 
 def process_brand(slug: str, only_short: bool, max_images: int, delay: float, log,

@@ -294,11 +294,16 @@ def parse_paren_slash(text: str) -> tuple[list[str], dict[str, list[float]]] | N
         # 밴딩 허리는 「34~44」처럼 범위로 적는다(9999archive) — 칸 하나로 받아
         # fix_value 가 가운뎃값을 쓰게 한다. 숫자만 긁으면 34 와 44 가 두 칸이 된다.
         num = r"\d{1,4}(?:[.,]\d{1,2})?"
-        cell = rf"{num}(?:\s*[~\-–]\s*{num})?\s*(?:cm)?"
+        # 범위는 「34~44」 · 「34-44」(붙여 쓴 줄표)만 — 띄운 「 - 」는 줄 머리 글머리표다(egnarts 「- S(95) : …」).
+        # 「30.5cm, 33cm, 35.5cm」처럼 쉼표로 늘어놓은 칸(조절 허리)은 받되 값은 비운다 — 가운뎃값은 틀린 값이다.
+        one = rf"{num}\s*(?:cm)?(?:\s*[~–]\s*{num}|-{num})?\s*(?:cm)?"
+        cell = rf"{one}(?:\s*,\s*{one})*"
         # 보이지 않는 글자(\ufeff·\u200b)가 여러 개 붙기도 한다 — 하나만 허용했더니
         # badblood 「… 밑단) \ufeff\ufeff S | 61 cm / …」를 놓쳤다(2026-09-05).
-        row_rx = re.compile(rf"[\ufeff\u200b\s]*({SIZE_NAME})\s*[l|I:\-–]?\s*"
-                            rf"((?:{cell}\s*/\s*){{{n - 1}}}{cell})", re.I)
+        # 줄 머리의 글머리표(「- 」)와 이름 뒤 괄호(「S(95)」 · 「1 (24"~34")」)도 받는다 — egnarts 는 이 꼴이라 첫 줄만
+        # 읽히거나 칸이 밀렸다(조사 2026-09-29). 괄호 안은 한국 사이즈라 이름으로 쓰지 않는다.
+        row_rx = re.compile(rf"[\ufeff\u200b\s]*(?:[-–•·]\s*)?({SIZE_NAME})(?:\s*\([^)]{{1,30}}\))?\s*[l|I:\-–]?\s*"
+                            rf"((?:{cell}\s*/\s*){{{n - 1}}}{cell})(?![\d.,])", re.I)
         names, cols = [], {c: [] for c in known}
         pos = m.end()
         while len(names) < 8:
@@ -312,7 +317,7 @@ def parse_paren_slash(text: str) -> tuple[list[str], dict[str, list[float]]] | N
             names.append(r.group(1).upper())
             for c, raw in zip(labels, nums):
                 if c:
-                    v = fix_value(c, raw)
+                    v = None if re.search(r"\d\s*(?:cm)?\s*,\s*\d", raw) else fix_value(c, raw)
                     cols[c].append(v)
             pos = r.end()
         cols = {c: v for c, v in cols.items() if any(x is not None for x in v)}
@@ -337,6 +342,63 @@ def _label_value_pairs(s: str) -> list[tuple[str, str, int]]:
             return []
         out.append((lab, mv.group(1), m.start()))
     return out
+
+
+# 사이즈가이드 창의 「구역 · 이름 줄 · 라벨 줄」 표 — 프레클 창이 이 꼴이다(조사 2026-09-29):
+#     SIZE            ← 구역 낱말(SIZE · TOP · PANTS · SKIRT …)
+#     F               ← 사이즈 이름 줄(F · FREE · S M · 1 2)
+#     가슴 67         ← 라벨 한 줄에 값(값이 다음 줄로 내려가기도 한다 — 「가슴\n54」)
+#     어깨 71.5
+#     INFO …          ← 여기서 멈춘다. 뒤의 「MODEL SIZE top 55 …」는 모델 몸 치수다.
+# 창고에 받아 둔 383줄 가운데 한 줄도 안 읽혔다(parse_pair_rows · grid · stack 이 다 거절).
+# 「허리(최소)」 「총장(앞)」 「(속치마)」처럼 단서가 붙은 줄은 짐작하지 않고 뺀다. 첫 구역만 쓴다.
+_SS_SECTION = re.compile(r"^(?:SIZE|TOP|TEE|BOTTOM|PANTS|SKIRT|JACKET|DRESS|VEST|CARDIGAN|OUTER|SET)$", re.I)
+_SS_NAMES = re.compile(r"^((?:XXS|XS|S|M|L|XL|XXL|F|FREE|OS|\d{1,3})(?:\s+(?:XXS|XS|S|M|L|XL|XXL|F|FREE|OS|\d{1,3}))*)$", re.I)
+_SS_NUM = r"\d{1,3}(?:\.\d)?"
+_SS_STOP = re.compile(r"^(?:INFO|소재|MODEL|사이즈\s|두께감|top\s|bottom\s|height)", re.I)
+
+
+def parse_section_stack(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] | None:
+    text = "\n".join(lines)
+    if "의류\n신발" in text:
+        text = text.split("의류\n신발")[-1]
+    ls = [x.replace("\ufeff", "").strip() for x in text.splitlines()]
+    ls = [x for x in ls if x]
+    j: list[str] = []
+    for x in ls:
+        if j and re.fullmatch(rf"{_SS_NUM}(?:\s+{_SS_NUM})*", x) and re.fullmatch(r"[가-힣]{1,6}", j[-1]):
+            j[-1] += " " + x
+        else:
+            j.append(x)
+    k: list[str] = []
+    for x in j:
+        m = re.fullmatch(r"(SIZE|TOP|PANTS|SKIRT|JACKET|TEE|BOTTOM)\s+(.+)", x, re.I)
+        if m and _SS_NAMES.fullmatch(m.group(2)):
+            k += [m.group(1), m.group(2)]
+        else:
+            k.append(x)
+    names: list[str] | None = None
+    cols: dict[str, list[float]] = {}
+    i = 0
+    while i < len(k):
+        x = k[i]
+        if _SS_STOP.match(x):
+            break
+        if _SS_SECTION.fullmatch(x) and i + 1 < len(k) and _SS_NAMES.fullmatch(k[i + 1]):
+            if names is not None:
+                break                      # 둘째 구역(TOP 뒤 PANTS)은 쓰지 않는다
+            names = k[i + 1].upper().split()
+            i += 2
+            continue
+        if names is not None:
+            m = re.fullmatch(rf"([가-힣]{{1,6}})\s*((?:{_SS_NUM}\s*){{1,6}})", x)
+            if m:
+                lab = canon_label(m.group(1))
+                vals = [float(v) for v in m.group(2).split()]
+                if lab and len(vals) == len(names) and lab not in cols:
+                    cols[lab] = vals
+        i += 1
+    return (names, cols) if names and len(cols) >= 2 else None
 
 
 def parse_pair_rows(lines: list[str]) -> tuple[list[str] | None, dict[str, list[float]]] | None:
@@ -1464,7 +1526,23 @@ def drop_inches(st: dict[str, list]) -> dict[str, list]:
     return out
 
 
+_FULLWIDTH = {c: c - 0xFEE0 for c in range(0xFF10, 0xFF5B) if chr(c - 0xFEE0).isalnum()}
+
+
 def from_ocr(text: str) -> tuple[list[str] | None, dict[str, list[float]]]:
+    # 전각 영숫자(「Ｌ」 · 「１」)를 반각으로 바꾼 글도 읽어 **값이 더 많이 나온 쪽**을 쓴다 — 알리스 표의 「Ｌ」 한 글자
+    # 때문에 L · XL 줄이 통째로 빠졌다(조사 2026-09-29). tesseract 가 전각을 자주 내서 바꾸기만 하면 1,003벌이 늘고
+    # 55벌이 줄었다(전후 대조) — 둘 다 읽어 고른다. NFKC 는 한글 자모 · ㎝ · ① 까지 바꿔 쓰지 않는다.
+    text = text or ""
+    half = text.translate(_FULLWIDTH)
+    if half == text:
+        return _from_ocr_one(text)
+    a, b = _from_ocr_one(text), _from_ocr_one(half)
+    filled = lambda r: sum(1 for vs in r[1].values() for v in (vs or []) if v is not None)
+    return b if filled(b) >= filled(a) else a
+
+
+def _from_ocr_one(text: str) -> tuple[list[str] | None, dict[str, list[float]]]:
     names, cols = _from_ocr(text)
     if not cols:
         # 하나도 못 얻었을 때만 — 머리줄의 칸 번호 표식을 떼고 한 번 더(strip_header_markers 주석)
@@ -3290,6 +3368,14 @@ def main():
             # 사이즈별 줄이 다 있으면 그쪽을 쓴다. 기존 표의 항목이 다 들어 있고 값이 1cm 안에서 맞을 때만 — 다른 표로 바꾸지 않는다.
             elif source == "html":
                 body = "\n".join(t for t in (d.get("description") or "", d.get("detail_text") or "") if t)
+                # 이름 없는 HTML 표가 칸마다 값 **하나**뿐인데, 설명글의 「괄호 머리 + 슬래시」 표가 사이즈 둘 이상을
+                # 칸 수 이상으로 읽으면 그쪽이 맞다 — egnarts 는 크롤러가 첫 줄만 잡거나(허리 36.5 하나) 칸이 밀렸다
+                # (총장 자리에 밑위 32.5). 조사 2026-09-29.
+                if not names and all(isinstance(v, list) and len(v) == 1 for v in sizes.values()):
+                    par = parse_paren_slash(body)
+                    cp = clean_ocr(par[1]) if par else {}
+                    if par and len(par[0]) >= 2 and len(cp) >= len(sizes):
+                        sizes, names = cp, par[0]
                 sr = parse_size_rows(body)
                 cs = clean_ocr(sr[1]) if sr else {}
                 wide = lambda st: max((len(v) for v in st.values() if isinstance(v, list)), default=0)
@@ -3342,6 +3428,8 @@ def main():
                 # 칸마다 줄이 바뀐 표(legacy · lmood). 매장 공용 표는 위에서 이미 걸렀다.
                 if not pr:
                     pr = sg_stack.get(r["source_url"])
+                if not pr:
+                    pr = parse_section_stack(sgl)
                 if pr:
                     s3 = clean_ocr(pr[1])
                     if len(s3) > len(sizes):

@@ -1034,7 +1034,9 @@ ACC_TYPE_VOCAB = {
     "베레": ["베레", "beret", "페도라", "fedora", "헌팅캡", "hunting cap", "베이커보이", "fedora hat", "beret hat"],
     # 「hood gear」는 옷이 아니라 머리에 쓰는 두건이다 — the-museum-visitor
     # 「ART WORK PRINTED HOOD GEAR」가 후드티로 잡혀 사이즈를 찾고 있었다(2026-09-05 사람 확인).
-    "트루퍼햇": ["트루퍼", "trooper", "ear flap", "이어플랩", "우샨카", "ushanka",
+    # 맨 「트루퍼 · trooper」는 안 넣는다 — khakis 「Trooper Pant」 5벌이 모자가 되어 실측이 빠졌다(조사 2026-09-29).
+    # 모자 트루퍼는 이름에 「hat · 햇 · cap」이 붙는다(전 상품 60벌 확인).
+    "트루퍼햇": ["트루퍼햇", "트루퍼 햇", "ear flap", "이어플랩", "우샨카", "ushanka",
                 "trooper hat", "ear flap hat", "earflap hat", "flap hat", "ushanka hat", "trapper hat",
                 "발라클라바", "balaclava", "baraclava", "귀마개", "ear muff", "earmuff", "이어머프",
                 "hood gear", "후드 기어", "후드기어", "hoodgear"],
@@ -3414,6 +3416,9 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
         "soldout": soldout,
         "image_url": image,
         "gallery": gallery[:12],
+        # 13장째부터는 앱 갤러리에 안 싣고 OCR 만 읽는다 — 상세 설명을 「추가 이미지」로 통째 올리는 매장은
+        # 실측표가 맨 끝 한두 장이다. 12장에서 잘라 알리스 164벌의 실측표가 한 장도 안 남았다(조사 2026-09-29).
+        **({"gallery_tail": gallery[12:40]} if len(gallery) > 12 else {}),
         "source_url": source_url,
         "description": description,
         "description_source": description_source,
