@@ -106,6 +106,191 @@ _BAD_LINES: Counter = Counter()
 _COL_DROP: dict[tuple[str, str], list[int]] = {}
 
 
+# ── 매장 틀(template)로 읽기 — 머리줄만 깨진 OCR 표 ──────────────────────────────────────────────
+# beyond-closet 은 표를 늘 같은 꼴로 싣는다:
+#     사이즈 A어깨 B가슴 C소매 D총장      ← OCR 이 「사이즈 AO BAS CAM DSS」로 깬다
+#     MEDIUM
+#     (95-100) 52 61 61.5 67               ← 값 줄은 멀쩡하다
+# 머리줄이 깨지면 from_ocr 은 라벨을 하나도 못 찾는다. 같은 매장에서 머리줄이 멀쩡히 읽힌 표들이 칸 차례를
+# 알려 주니 그것을 빌린다(조사 2026-09-29 · inv_G P1). **매장마다 켤지 스스로 정한다**: 이미 OCR 로 실측이 선
+# 상품에서 틀로 다시 읽어 90% 이상 맞는 매장만(맞춰 본 것 10벌 이상). 창고 전체에 켜면 1,700벌 중 192벌이 어긋났다.
+_TPL_NAME = re.compile(r"(?i)^(?:XX-?LARGE|X-?LARGE|LARGE|MEDIUM|SMALL|XXS|XS|XXL|XL|S|M|L|FREE|ONE ?SIZE)\b")
+_TPL_ORDER = {"XXS": 0, "XS": 1, "SMALL": 2, "S": 2, "MEDIUM": 3, "M": 3, "LARGE": 4, "L": 4, "X-LARGE": 5, "XLARGE": 5,
+              "XL": 5, "XX-LARGE": 6, "XXLARGE": 6, "XXL": 6, "FREE": 9, "ONESIZE": 9}
+_TPL_NUM = re.compile(r"(?<![\d.])\d{1,3}(?:[.:]\d)?(?![\d.])")
+_TPL_BOTTOM = {"Pants", "Skirts", "Denim"}
+_TPL_MIN_SEEN, _TPL_MIN_SHARE, _TPL_MIN_CHECK, _TPL_MIN_AGREE = 5, 0.7, 10, 0.9
+
+
+def _tpl_labels(line: str) -> list[str]:
+    toks = join_multiword(line).split()
+    out: list[str] = []
+    i = 0
+    while i < len(toks):
+        tok = re.sub(r"^[A-Eㅅㄷㅁ0-9@©&«^.·:\-]+", "", toks[i])
+        lab = canon_label(tok) if tok else None
+        if i + 1 < len(toks):                     # 「어깨 넓이」 「소매 길이」처럼 띄어 쓴 두 낱말
+            lab2 = canon_label(tok + toks[i + 1])
+            if lab2 and (lab is None or lab2 != lab):
+                lab, i = lab2, i + 1
+        if lab and lab not in out:
+            out.append(lab)
+        i += 1
+    return out
+
+
+def _tpl_blocks(text: str):
+    lines = [ln.strip() for ln in text.splitlines()]
+    for i, ln in enumerate(lines):
+        if "사이즈" in ln and len(ln) < 80 and not ln.startswith("*") and "착용" not in ln and "오차" not in ln:
+            body = []
+            for l2 in lines[i + 1:i + 14]:
+                if l2.startswith(("*", "“", "세탁")) or "오차" in l2 or "세탁" in l2:
+                    break
+                body.append(l2)
+            yield ln, body
+
+
+def _tpl_rows(body: list[str]) -> list[tuple[str, list[str]]]:
+    out, pend = [], None
+    for ln in body:
+        ln = re.sub(r"\(\s*\d{2,3}\s*[-~]\s*\d{2,3}\s*\)", " ", ln)      # 「(95-100)」 국내 호칭
+        ln = re.sub(r"^[^A-Za-z0-9(]+", "", ln).strip()
+        m = _TPL_NAME.match(ln)
+        nm = m.group(0).upper() if m else None
+        nums = _TPL_NUM.findall(ln[m.end():] if m else ln)
+        if nm and len(nums) < 2:
+            pend = nm                              # 이름이 제 줄에 따로 선다
+            continue
+        if len(nums) >= 3 and (nm or pend):
+            out.append((nm or pend, [x.replace(":", ".") for x in nums]))
+            pend = None
+    return out
+
+
+def _tpl_learn(texts_by_group: dict[str, list[str]]) -> dict:
+    cnt: dict = defaultdict(Counter)
+    for g, texts in texts_by_group.items():
+        for t in texts:
+            for head, body in _tpl_blocks(t):
+                labs = _tpl_labels(head)
+                rs = _tpl_rows(body)
+                if len(labs) >= 3 and rs and all(len(v) == len(labs) for _, v in rs):
+                    cnt[(g, len(labs))][tuple(labs)] += 1
+    out = {}
+    for key, c in cnt.items():
+        tpl, seen = c.most_common(1)[0]
+        out[key] = (list(tpl), seen, seen / sum(c.values()))
+    return out
+
+
+def _tpl_read(text: str, group: str, templates: dict):
+    for head, body in _tpl_blocks(text):
+        rs = _tpl_rows(body)
+        if not rs:
+            continue
+        n = Counter(len(v) for _, v in rs).most_common(1)[0][0]
+        rs = [(nm, v) for nm, v in rs if len(v) == n]
+        tpl = templates.get((group, n))
+        if not tpl or tpl[1] < _TPL_MIN_SEEN or tpl[2] < _TPL_MIN_SHARE:
+            continue
+        labs = tpl[0]
+        it = iter(labs)
+        if not all(any(x == y for y in it) for x in _tpl_labels(head)):   # 읽히는 라벨은 틀과 차례가 맞아야
+            continue
+        names: list[str] = []
+        cols: dict[str, list] = {lab: [] for lab in labs}
+        for nm, v in rs:
+            vals = [fix_value(lab, raw) for lab, raw in zip(labs, v)]
+            # 범위를 벗어난 칸이 하나라도 있으면 OCR 이 수를 흘리거나 지어낸 줄이다 — 칸을 밀지 않고 줄을 버린다
+            if nm in names or any(x is None for x in vals):
+                continue
+            names.append(nm)
+            for lab, x in zip(labs, vals):
+                cols[lab].append(x)
+        if not names:
+            continue
+        rk = [_TPL_ORDER.get(nm.replace(" ", "")) for nm in names]
+        if None in rk or rk != sorted(rk) or len(set(rk)) != len(rk):
+            continue
+        if any(any(b < a - 0.5 for a, b in zip(v, v[1:])) for v in cols.values()):
+            continue
+        cols = clean_ocr(cols)
+        if len(cols) >= 2:
+            return names, cols
+    return None
+
+
+_TPL_ALIAS = {"SMALL": "S", "MEDIUM": "M", "LARGE": "L", "X-LARGE": "XL", "XLARGE": "XL", "XX-LARGE": "XXL", "XXLARGE": "XXL"}
+
+
+def _tpl_agree(got: tuple, ent: dict) -> bool | None:
+    """틀로 읽은 값이 이미 선 실측과 맞나 — 사이즈 이름으로 짝지어 겹치는 라벨이 1cm 안이면 맞다.
+    틀 읽기는 어긋난 줄을 버리므로 자리로 짝지으면 안 된다. 이름이 없으면 사이즈 수가 같을 때만 자리로.
+    겹치는 라벨이 둘 미만이면 None(맞춰 볼 거리가 없다) — 이미 선 값이 「총장 [49, 56, 63, 70]」처럼 한 줄을
+    눕혀 읽은 쓰레기인 경우가 이것이라 어긋남으로 세면 틀을 못 켠다(beyond-closet 4벌)."""
+    names, cols = got
+    cur, cn = ent.get("sizes") or {}, [str(x).upper() for x in (ent.get("size_names") or [])]
+    same = set(cols) & set(cur)
+    if len(same) < 2:
+        return None
+    for c in same:
+        for i, nm in enumerate(names):
+            nm = _TPL_ALIAS.get(nm, nm)
+            if cn:
+                j = cn.index(nm) if nm in cn else None
+            else:
+                j = i if len(cur[c]) == len(names) else None
+            if j is None or j >= len(cur[c]):
+                continue
+            a, b = cols[c][i], cur[c][j]
+            if isinstance(a, (int, float)) and isinstance(b, (int, float)) and abs(a - b) > 1:
+                return False
+    return True
+
+
+def template_pass(rows: dict, ocr: dict, out: dict) -> Counter:
+    """실측이 안 선 옷을 매장 틀로 읽어 채운다. 매장별로 켤지는 이미 선 OCR 실측과 맞춰 보고 정한다."""
+    group = lambda r: "bottom" if r.get("category") in _TPL_BOTTOM else "top"
+    by_brand: dict = defaultdict(list)
+    for k, r in rows.items():
+        if ocr.get(k) and r.get("category") in GARMENT_LABELS:
+            by_brand[k[0]].append((k, r))
+    added: Counter = Counter()
+    for brand, items in by_brand.items():
+        tg: dict = defaultdict(list)
+        for k, r in items:
+            tg[group(r)].append(ocr[k])
+        tpls = _tpl_learn(tg)
+        if not tpls:
+            continue
+        agree = checked = 0
+        todo = []
+        for k, r in items:
+            got = _tpl_read(ocr[k], group(r), tpls)
+            if not got:
+                continue
+            ent = out.get(r["source_url"])
+            if ent is None:
+                todo.append((r, got))
+            elif ent.get("source") == "ocr":
+                ok = _tpl_agree(got, ent)
+                if ok is not None:
+                    checked += 1
+                    agree += ok
+                # OCR 이 라벨 하나만 건진 것(대개 한 줄을 눕혀 읽은 것)은 틀로 읽은 표가 더 낫다
+                elif len(ent.get("sizes") or {}) <= 1 < len(got[1]):
+                    todo.append((r, got))
+        if checked < _TPL_MIN_CHECK or agree / checked < _TPL_MIN_AGREE:
+            continue
+        for r, (names, cols) in todo:
+            out[r["source_url"]] = {"brand_slug": brand, "source": "ocr", "template": True,
+                                    "size_names": names, "sizes": blank_lone_jump(sleeve_to_hwajang(cols))}
+            added[brand] += 1
+    return added
+
+
+
 def iter_jsonl(p):
     """줄 하나가 깨졌다고 판 전체를 버리지 않는다 — 그 줄만 건너뛰고 몇 줄인지 남긴다.
 
@@ -478,9 +663,10 @@ def halve_girth_lines(text: str) -> str:
 
     def val(c: str, k: str) -> float:
         # OCR 이 소수점을 흘린 세 자리(「허리둘레 77.5 826 87.6」의 826 = 82.6). 접은 뒤엔 소수라 fix_value 가
-        # 되살리지 못하므로 여기서 먼저 — 반으로 접어도 상한을 넘는 세 자리 정수만.
+        # 되살리지 못하므로 여기서 먼저 — 반으로 접어도 상한의 세 배를 넘는 세 자리 정수만. 상한을 조금 넘는 정도로
+        # 되살리면 플레어 치마의 「밑단둘레 124」가 12.4 → 6.2 가 됐다(코덱스 012 · ostkaka 1953 · 2386).
         v = float(k)
-        return v / 10 if "." not in k and len(k) == 3 and v / 2 > RANGES.get(c, (3, 200))[1] else v
+        return v / 10 if "." not in k and len(k) == 3 and v / 2 > 3 * RANGES.get(c, (3, 200))[1] else v
     # 한 글의 다른 둘레 줄이 문턱을 넘었으면 그 글의 「둘레」 글자는 믿는다 — 바지 「밑단둘레 40」은 윗옷 기준
     # 문턱(60) 아래지만 같은 표의 「허리둘레 65 · 힙둘레 104」가 둘레임을 보여 준다.
     proven = any(val(canon(m.group(1)), k) >= GIRTH_MIN[canon(m.group(1))]
@@ -511,20 +697,27 @@ _NS_NM = r"(?:XXS|XS|S|M|L|XL|XXL|2XL|3XL|FREE|F|OS|ONE\s?SIZE|\d{1,3})"
 _NS_HEAD = re.compile(rf"(?:SIZE|사이즈)\s*[\(（]\s*CM\s*[\)）]\s*[\ufeff\u200b\s]*({_NS_NM}(?:\s*/\s*{_NS_NM})*)(?=[\s\ufeff])", re.I)
 _NS_V = r"\d{1,3}(?:\.\d{1,2})?"
 _NS_NOTE = re.compile(r"사이즈는\s*(둘레|단면)\s*기준")
+_NS_SLEEVE_GIRTH = {"소매통": 28, "소매단": 22}
 
 
 def _ns_cols(cols: dict[str, tuple[str, list[str]]], basis: str | None) -> dict[str, list[float]]:
-    # 「둘레 기준」은 상용구라 혼자서는 믿지 않는다 — 가슴 53 인 재킷에도 붙어 있다. 값이 둘레 문턱을 넘을 때만 접는다.
-    # 「단면 기준」이면 아무것도 접지 않는다.
+    # 「둘레 기준」은 상용구라 혼자서는 믿지 않는다 — 가슴 53 인 재킷에도 붙어 있다. 둘레 문턱을 넘는 값이 한 칸이라도
+    # 있을 때만(proven) 그 말을 믿고 문턱 아래 칸도 접는다(「허리 69 / 73 · 엉덩이 98 / 102 · 밑단 44 / 46 … 사이즈는
+    # 둘레 기준」 — 코덱스 012 · ostkaka 2059). 「단면 기준」이면 아무것도 접지 않는다.
+    # 라벨에 「둘레」가 붙은 칸은 부르는 쪽(halve_girth_lines)이 이미 접었으니 건드리지 않는다.
     girthy = lambda c: c in GIRTH_MIN and c != "어깨"
+    proven = basis == "둘레" and any(girthy(c) and "둘레" not in lab and float(x) >= GIRTH_MIN[c]
+                                    for c, (lab, vals) in cols.items() for x in vals)
     out: dict[str, list[float]] = {}
     for c, (lab, vals) in cols.items():
         fv: list[float | None] = []
         for x in vals:
             v = float(x)
-            # 「둘레」 글자가 붙은 줄은 부르는 쪽(halve_girth_lines)이 이미 접었다 — 여기서는 라벨에 둘레가 없는데
-            # 값이 둘레 문턱을 넘는 줄만(「가슴 106 / 111」 + 「사이즈는 둘레 기준」). 문턱 아래를 접으면 두 번 접힌다.
-            if basis != "단면" and girthy(c) and v >= GIRTH_MIN[c] and "둘레" not in lab:
+            # 소매통 · 소매부리도 이 매장은 둘레로 잰다(「소매통 35 / 36.4」 — 단면이면 재킷 팔통이 35 일 수 없다).
+            # 단면으로는 나오기 어려운 값(_NS_SLEEVE_GIRTH 이상)만 접는다.
+            if basis != "단면" and "둘레" not in lab and (
+                    (girthy(c) and (v >= GIRTH_MIN[c] or proven))
+                    or (c in _NS_SLEEVE_GIRTH and (v >= _NS_SLEEVE_GIRTH[c] or proven))):
                 lo, hi = RANGES.get(c, (3, 200))
                 y = round(v / 2, 1)
                 fv.append(y if lo <= y <= hi else None)
@@ -1758,6 +1951,7 @@ def drop_inches(st: dict[str, list]) -> dict[str, list]:
     return out
 
 
+_INCH_BODY = re.compile(r"(?i)\b(?:waist|hips?|chest|bust|허리|힙|엉덩이|가슴)\s*[:：]?\s*\d{2}(?:[.,]\d)?\s*(?:inch(?:es)?|in\b|인치)")
 _FULLWIDTH = {c: c - 0xFEE0 for c in range(0xFF10, 0xFF5B) if chr(c - 0xFEE0).isalnum()}
 
 
@@ -1765,7 +1959,10 @@ def from_ocr(text: str) -> tuple[list[str] | None, dict[str, list[float]]]:
     # 전각 영숫자(「Ｌ」 · 「１」)를 반각으로 바꾼 글도 읽어 **값이 더 많이 나온 쪽**을 쓴다 — 알리스 표의 「Ｌ」 한 글자
     # 때문에 L · XL 줄이 통째로 빠졌다(조사 2026-09-29). tesseract 가 전각을 자주 내서 바꾸기만 하면 1,003벌이 늘고
     # 55벌이 줄었다(전후 대조) — 둘 다 읽어 고른다. NFKC 는 한글 자모 · ㎝ · ① 까지 바꿔 쓰지 않는다.
-    text = text or ""
+    # 인치로 적은 몸 치수(「Waist 25.5inch」 「HIP 34.4 inch」)는 모델 정보다 — 옷 치수로 읽혀 허리 · 엉덩이 한 칸짜리
+    # 가짜 실측이 373벌 섰다(beyond-closet 223 · till-i-die 122 …, 조사 2026-09-29). 읽기 전에 지운다. 옷 표가 인치여도
+    # cm 로 읽으면 틀린 값이라 잃을 것이 없다.
+    text = _INCH_BODY.sub(" ", text or "")
     half = text.translate(_FULLWIDTH)
     if half == text:
         return _from_ocr_one(text)
@@ -1783,7 +1980,28 @@ def _from_ocr_one(text: str) -> tuple[list[str] | None, dict[str, list[float]]]:
             n2, c2 = _from_ocr(stripped)
             if c2:
                 names, cols = n2, c2
+    if cols and not names:
+        names = names_line(text, column_count(cols))
     return names, drop_model_body(text, cols)
+
+
+# 사이즈 이름만 늘어선 줄 — 「XS S M (cm)」 「SIZE | S M L」. 값은 읽었는데 이름을 잃은 표에 붙인다(bmuette, 코덱스 012).
+# 글자 이름만 받는다 — 숫자 이름(「1 2 3」)은 값 줄과 구별이 안 된다. 칸 수가 맞는 서로 다른 이름 줄이 둘 이상이면 안 붙인다.
+_NL_TOK = r"(?:XXS|XS|S|M|L|XL|XXL|XXXL|2XL|3XL|FREE|OS)"
+_NL_ROW = re.compile(rf"^\s*(?:size\s*[|:]?\s*)?({_NL_TOK}(?:\s+{_NL_TOK})+)\s*(?:\(\s*(?:cm|00|inch)\s*\))?\s*$", re.I)
+
+
+def names_line(text: str, n: int) -> list[str] | None:
+    if n < 2:
+        return None
+    found = set()
+    for ln in (text or "").splitlines():
+        m = _NL_ROW.match(ln.strip())
+        if m:
+            toks = tuple(t.upper() for t in m.group(1).split())
+            if len(toks) == n and len(set(toks)) == n:
+                found.add(toks)
+    return list(next(iter(found))) if len(found) == 1 else None
 
 
 # 「LENGTH : 66CM LENGTH : 68CM LENGTH : 71CM」 — 항목 이름이 칸마다 되풀이되는 표(포스센스티브 28벌).
@@ -1908,6 +2126,51 @@ def parse_size_rows(text: str) -> tuple[list[str], dict[str, list[float]]] | Non
     return (names if seq or std else None), cols
 
 
+# 「SIZE(cm)」 머리 아래 한 줄에 한 사이즈 — 이름이 맨 앞, 뒤로 「라벨 값」이 늘어선다(ava-molli, 코덱스 012):
+#     SIZE(cm)
+#     S 총장(좌/우) 70/77 허리둘레 74 힙둘레 101 밑단둘레 113 AWE 18 안감길이 57
+#     M 총장(좌/우) 70/78 허리둘레 74 …
+#     MODEL SIZE(cm)        ← 여기서 멈춘다(모델 몸 치수)
+# parse_size_rows 는 「S 사이즈」처럼 이름 뒤 낱말과 값 뒤 「cm」를 요구해서 이 꼴을 못 읽었다. 머리줄을 요구해 좁힌다.
+# 「70/77」처럼 한 칸에 값이 둘인 라벨(좌/우)과 모르는 라벨(OCR 이 깬 AWE)은 뺀다. 줄마다 공통인 라벨만 쓴다.
+_NF_HEAD = re.compile(r"^\s*(?:SIZE|사이즈)\s*[\(（]\s*cm\s*[\)）]\s*$", re.I)
+_NF_ROW = re.compile(r"^\s*(XXS|XS|S|M|L|XL|XXL|2XL|3XL|FREE|F|STANDARD|LONG|SHORT|REGULAR|\d{1,3})\s+(.+)$", re.I)
+# 라벨 뒤 괄호(「총장(3)」 도식 번호 · 「(좌/우)」)는 닫는 괄호가 깨져도(「가슴(0 53」) 건너뛴다. 값 뒤 「/」는 칸
+# 나눔이라 받되(「51/ 어깨」 — o-oi), 「70/77」처럼 수가 이어지면 한 칸에 값이 둘이라 뺀다.
+_NF_PAIR = re.compile(r"([가-힣A-Za-z]{1,8})(?:\s*\([^)\s]{0,10}\)?)?\s*[:：]?\s*(\d{1,3}(?:\.\d{1,2})?)(?![\d.]|\s*/\s*\d)")
+
+
+def parse_name_first_rows(text: str) -> tuple[list[str], dict[str, list[float]]] | None:
+    lines = [ln.strip() for ln in (text or "").splitlines()]
+    best = None
+    for i, ln in enumerate(lines):
+        if not _NF_HEAD.match(ln):
+            continue
+        rows: list[tuple[str, dict[str, str]]] = []
+        for nxt in lines[i + 1:i + 12]:
+            if not nxt:
+                continue
+            m = _NF_ROW.match(nxt)
+            if not m or re.search(r"(?i)model|모델", nxt):
+                break
+            cells: dict[str, str] = {}
+            for lab, v in _NF_PAIR.findall(m.group(2)):
+                c = canon_label(lab)
+                if c and c not in cells:
+                    cells[c] = v
+            if len(cells) < 2:
+                break
+            rows.append((m.group(1).upper(), cells))
+        if len(rows) < 2 or len({nm for nm, _ in rows}) != len(rows):
+            continue
+        common = [c for c in rows[0][1] if all(c in r for _, r in rows)]
+        cols = {c: [fix_value(c, r[c]) for _, r in rows] for c in common}
+        cols = {c: v for c, v in cols.items() if any(x is not None for x in v)}
+        if len(cols) >= 2 and (best is None or len(cols) > len(best[1])):
+            best = ([nm for nm, _ in rows], cols)
+    return best
+
+
 def _from_ocr(text: str) -> tuple[list[str] | None, dict[str, list[float]]]:
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     sr = parse_size_rows(text)
@@ -1915,6 +2178,11 @@ def _from_ocr(text: str) -> tuple[list[str] | None, dict[str, list[float]]]:
         clean = clean_ocr(sr[1])
         if len(clean) >= 2:
             return sr[0], clean
+    nf = parse_name_first_rows(text)
+    if nf:
+        clean = clean_ocr(nf[1])
+        if len(clean) >= 2:
+            return nf[0], clean
     is_lv, lv_names, lv = parse_label_colon_rows(text)
     if is_lv:
         clean = clean_ocr(lv) if lv else {}
@@ -1964,8 +2232,12 @@ def _from_ocr(text: str) -> tuple[list[str] | None, dict[str, list[float]]]:
 
 _MODEL_H = re.compile(r"(?:height|키)\s*\D{0,3}(\d{3})\s*cm", re.I)
 _MODEL_PART = re.compile(r"\b(bust|waist|hip|가슴|허리|엉덩이)\s*\D{0,3}(\d{2,3}(?:\.\d)?)\s*cm", re.I)
-_MODEL_KO = {"bust": "가슴", "waist": "허리", "hip": "엉덩이",
+_MODEL_KO = {"bust": "가슴", "waist": "허리", "hip": "엉덩이", "hips": "엉덩이",
              "가슴": "가슴", "허리": "허리", "엉덩이": "엉덩이"}
+# 「cm」 없이 적은 모델 줄 — 「Height 175 Bust 80 Waist 63 Hips 90 Model fitting size : …」(ava-molli, 코덱스 012).
+# 영어 몸 낱말(bust · hips)과 키가 한 줄에 함께 있을 때만 쓴다.
+_MODEL_H_BARE = re.compile(r"\bheight\s*[:\-]?\s*1[5-9]\d\b", re.I)
+_MODEL_PART_BARE = re.compile(r"\b(bust|waist|hips?)\s*[:\-]?\s*(\d{2,3}(?:\.\d)?)\b", re.I)
 
 
 def drop_model_body(text: str, st: dict[str, list]) -> dict[str, list]:
@@ -1986,9 +2258,12 @@ def drop_model_body(text: str, st: dict[str, list]) -> dict[str, list]:
     """
     body: dict[str, set] = {}
     for ln in (text or "").splitlines():
-        if not _MODEL_H.search(ln):
+        if _MODEL_H.search(ln):
+            ps = _MODEL_PART.findall(ln)
+        elif _MODEL_H_BARE.search(ln):
+            ps = _MODEL_PART_BARE.findall(ln)
+        else:
             continue
-        ps = _MODEL_PART.findall(ln)
         if len(ps) >= 2:
             for w, v in ps:
                 body.setdefault(_MODEL_KO[w.lower()], set()).add(float(v))
@@ -3613,6 +3888,14 @@ def main():
                 # 이름 없는 HTML 표가 칸마다 값 **하나**뿐인데, 설명글의 「괄호 머리 + 슬래시」 표가 사이즈 둘 이상을
                 # 칸 수 이상으로 읽으면 그쪽이 맞다 — egnarts 는 크롤러가 첫 줄만 잡거나(허리 36.5 하나) 칸이 밀렸다
                 # (총장 자리에 밑위 32.5). 조사 2026-09-29.
+                # 크롤러 표가 있어도 설명글의 「SIZE(CM) S / M · 라벨 값 / 값」 표(parse_names_slash_rows)가 그 라벨을
+                # 다 덮고 사이즈 수도 같으면 그쪽이 맞다 — 매장이 적은 「사이즈는 둘레 기준」을 그 해석기만 읽는다.
+                # 크롤러 표로 읽었더니 둘레 허리 69 가 무리 밖 값으로 빠졌다(코덱스 012 · ostkaka 2059).
+                ns = parse_names_slash_rows(body)
+                ncs = clean_ocr(ns[1]) if ns else {}
+                wide0 = max((len(v) for v in sizes.values() if isinstance(v, list)), default=0)
+                if ncs and set(sizes) <= set(ncs) and len(ns[0]) == wide0:
+                    sizes, names = ncs, ns[0]
                 if not names and all(isinstance(v, list) and len(v) == 1 for v in sizes.values()):
                     par = parse_paren_slash(body)
                     cp = clean_ocr(par[1]) if par else {}
@@ -3740,6 +4023,11 @@ def main():
                     out[r["source_url"]]["ranges"] = rg
             src[source] += 1
             (per_brand_html if source in ("html", "browser") else per_brand_ocr)[k[0]] += 1
+    # 머리줄만 깨진 OCR 표를 매장 틀로 읽는다(template_pass 주석) — 사람 값 · 형제 물려주기보다 앞.
+    tpl_added = template_pass(rows, ocr, out)
+    if tpl_added:
+        print(f"매장 틀로 읽은 OCR 표 {sum(tpl_added.values())}벌: {dict(tpl_added.most_common(10))}")
+        src["ocr"] += sum(tpl_added.values())
     # 사람이 직접 옮겨 적은 값. 기계가 못 읽는 자리(사이즈가이드 탭 그림 등)를 사람이 메운
     # 것이라 무엇보다 앞선다. 형제 물려주기보다 먼저 넣어야 같은 옷의 다른 색도 함께 산다.
     for u, ent in load_manual().items():

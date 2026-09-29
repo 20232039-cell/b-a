@@ -3425,7 +3425,9 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
         "detail_text": detail_text,
         "size_table": size_table,
         "spec": spec,
-        "detail_images": detail_images[:40],
+        # 40장에서 자르면 상세가 60장 넘는 매장의 실측표(끝 쪽 50번째 언저리)가 통째로 빠진다 — gongdreen 22벌 중 18벌
+        # (조사 2026-09-29 · 창고 1,102벌이 40장에 닿았다). OCR 은 뒤에서부터 읽으니 끝 장이 남아야 한다.
+        "detail_images": detail_images[:80],
         "options": options[:30],
         "soldout_options": soldout_options[:30],
     }
