@@ -151,6 +151,54 @@ def _size_text(text: str) -> str:
     return " / ".join(f"{a} {v}" for a, v in zip(labs, vals))
 
 
+def _direct(text: str) -> dict:
+    """행렬 해석기가 두 칸 미만이라 버리는 옷을 직접 읽는다(사람 결정 2026-09-29 「다 받아」).
+
+    고무 허리 치마·바지 41벌이 「F | Shoulder - / Bust - / Waist 33-47 / Sleeve - / Length 97」 꼴이다 — 값이 있는
+    칸은 총장 하나뿐이고 허리는 늘어나는 폭이다. 총장은 값으로, 허리 폭은 「_ranges」에 [작은값, 큰값]으로 둔다.
+    가운뎃값을 만들지 않는다. 치수 이름 줄이 여럿이면 줄마다 한 사이즈다.
+    """
+    import size_from_ocr
+    rows = []
+    for ln in text.splitlines():
+        m = _ROW.match(ln.strip())
+        if not m:
+            continue
+        got, rng = {}, {}
+        for seg in m.group("body").split("/"):
+            mp = _PAIR.match(seg)
+            if not mp or not mp.group(2) or mp.group(2) == "-":
+                continue
+            c = size_from_ocr.canon_label(mp.group(1).strip())
+            if not c:
+                continue
+            v = mp.group(2).replace(" ", "")
+            mr = re.fullmatch(r"([\d.]+)[~\-]([\d.]+)", v)
+            if mr:
+                if c == "허리":
+                    a, b = float(mr.group(1)), float(mr.group(2))
+                    if a < b:
+                        rng[c] = [a, b]
+                continue                       # 총장 폭(앞뒤 길이가 다른 옷)은 짐작이라 뺀다
+            fv = size_from_ocr.fix_value(c, v)
+            if fv is not None:
+                got[c] = fv
+        if got or rng:
+            rows.append((m.group("nm") or "", got, rng))
+    if not rows or (len(rows) > 1 and not all(r[0] for r in rows)):
+        return {}
+    labs = sorted({c for _, g, _ in rows for c in g})
+    if not labs or any(set(g) != set(labs) for _, g, _ in rows):
+        return {}
+    out: dict = {c: [g[c] for _, g, _ in rows] for c in labs}
+    rl = sorted({c for _, _, r in rows for c in r})
+    if rl and all(set(r) == set(rl) for _, _, r in rows):
+        out["_ranges"] = {c: [r[c] for _, _, r in rows] for c in rl}
+    if all(r[0] for r in rows):
+        out["_names"] = [r[0].upper() for r in rows]
+    return out
+
+
 def parse_page(html_text, url, slug, now, http=None) -> dict | None:
     s = BeautifulSoup(html_text, "lxml")
     pno = _val(s, "#prod_no")
@@ -231,6 +279,8 @@ def parse_page(html_text, url, slug, now, http=None) -> dict | None:
     size_table = cc.extract_size_any(str(ed)) if ed is not None and ed.find("table") else {}
     if len(size_table) < 2:
         size_table = crawl_pages.size_table_from_text(_size_text(text) or text)
+    if len([k for k in size_table if not k.startswith("_")]) < 2:
+        size_table = _direct(text) or size_table
 
     d = {
         "product_no": int(pno),

@@ -358,6 +358,67 @@ _SS_NUM = r"\d{1,3}(?:\.\d)?"
 _SS_STOP = re.compile(r"^(?:INFO|소재|MODEL|사이즈\s|두께감|top\s|bottom\s|height)", re.I)
 
 
+# ── 모자 실측 (사람 결정 2026-09-29 「모자 칸도 받는다」) ──────────────────────────────
+# 옷 칸(총장·가슴 …)만 있어서 모자는 매장이 치수를 적어도 버렸다(NO_SIZE_AXIS_CODES). 모자 4,945벌 가운데
+# 1,397벌(54곳)은 받아 둔 글에 이미 「머리둘레 57 · 깊이 9 · 챙길이 6」이 있었다 — 다시 걷지 않고 글에서 읽는다.
+# 머리둘레는 **둘레 그대로** 둔다(머리에 맞는지를 보는 값이라 단면으로 접지 않는다). 모자 칸은 모자에만 쓴다.
+# 조절형 「47-61」 · 「54~62」은 가운뎃값을 만들지 않고 ranges 칸에 [작은값, 큰값]으로 둔다(사람 결정 「다 받아」).
+HEAD_LABELS = {
+    "머리둘레": r"머리\s?둘레|헤드\s?둘레|head\s*circumference|circumference|head\s*size|head|둘레",
+    "깊이": r"깊이|depth|crown|높이|height",
+    "챙길이": r"챙\s?길이|챙|visor|brim|bill",
+}
+HEAD_RANGES = {"머리둘레": (44, 70), "깊이": (4, 40), "챙길이": (2, 15)}
+_HEAD_NUM = r"\d{1,2}(?:\.\d)?"
+_HEAD_RX = re.compile(
+    r"(?<![가-힣A-Za-z])(" + "|".join(f"(?:{v})" for v in HEAD_LABELS.values()) + r")"
+    r"\s*(?:\((?:cm|CM)\))?\s*[:：\-]?\s*"
+    rf"({_HEAD_NUM}(?:\s*(?:cm|CM))?(?:\s*[~\-–]\s*{_HEAD_NUM})?(?:\s*(?:cm|CM))?(?:\s*/\s*{_HEAD_NUM}(?:\s*(?:cm|CM))?){{0,3}})"
+    r"(?![\d.])", re.I)
+
+
+def _head_canon(lab: str) -> str | None:
+    for c, rx in HEAD_LABELS.items():
+        if re.fullmatch(rf"(?:{rx})", lab.strip(), re.I):
+            return c
+    return None
+
+
+def parse_head(text: str) -> tuple[dict[str, list[float]], dict[str, list[list[float]]]] | None:
+    """모자 글에서 (칸 → 사이즈별 값, 칸 → 사이즈별 [작은값, 큰값]). 칸 둘 이상일 때만 — 글 속 「둘레」 한 마디를 표로 읽지 않게."""
+    sizes: dict[str, list[float]] = {}
+    ranges: dict[str, list[list[float]]] = {}
+    for m in _HEAD_RX.finditer(text or ""):
+        c = _head_canon(m.group(1))
+        if not c or c in sizes or c in ranges:
+            continue                      # 글이 두 번 실리는 매장이 많다 — 첫 번만
+        lo, hi = HEAD_RANGES[c]
+        vals, rngs = [], []
+        for cell in re.split(r"\s*/\s*", re.sub(r"(?i)\s*cm", "", m.group(2))):
+            mr = re.fullmatch(rf"({_HEAD_NUM})\s*[~\-–]\s*({_HEAD_NUM})", cell.strip())
+            if mr:
+                a, b = float(mr.group(1)), float(mr.group(2))
+                if lo <= a < b <= hi:
+                    rngs.append([a, b])
+            else:
+                try:
+                    v = float(cell)
+                except ValueError:
+                    continue
+                if lo <= v <= hi:
+                    vals.append(v)
+        if vals and not rngs:
+            sizes[c] = vals
+        elif rngs and not vals:
+            ranges[c] = rngs
+    if len(sizes) + len(ranges) < 2:
+        return None
+    n = {len(v) for v in list(sizes.values()) + list(ranges.values())}
+    if len(n) != 1:
+        return None                       # 칸마다 사이즈 수가 다르면 어느 값이 어느 사이즈인지 모른다
+    return sizes, ranges
+
+
 def parse_section_stack(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] | None:
     text = "\n".join(lines)
     if "의류\n신발" in text:
@@ -3316,6 +3377,7 @@ def main():
     out: dict[str, dict] = {}
     src = Counter()
     per_brand_html, per_brand_ocr, per_brand_tot = Counter(), Counter(), Counter()
+    head_todo: dict[str, tuple[str, str, str]] = {}
     for p in sorted(CRAWL.glob("*.jsonl")):
         if p.name.startswith("_"):
             continue
@@ -3325,6 +3387,8 @@ def main():
             if not r:
                 continue
             per_brand_tot[k[0]] += 1
+            if r.get("category_code") == "headwear":
+                head_todo[r["source_url"]] = (k[0], "\n".join(t for t in (d.get("description") or "", d.get("detail_text") or "") if t), r.get("options") or "")
             st = d.get("size_table")
             # 창고에 이미 담긴 표 가운데 「같은 표가 두 번 찍혀 칸이 배로 늘어난 것」을 여기서 접는다 —
             # 다시 수확하지 않고도 고쳐진다(2026-09-12, 한 매장 668벌).
@@ -3332,6 +3396,8 @@ def main():
                 import crawl_cafe24 as _cc2
                 st = _cc2.collapse_repeated_columns(dict(st))
             sizes, names, source = {}, None, None
+            # 늘어나는 허리 같은 폭 값(「_ranges」 — doucan 해석기) · 앱이 [작은값, 큰값]으로 그린다(사람 결정 2026-09-29).
+            st_ranges = st.pop("_ranges", None) if isinstance(st, dict) else None
             if isinstance(st, dict) and st and (k[0], json.dumps(st, sort_keys=True, ensure_ascii=False)) not in shared:
                 # 공용 표 판정은 저장된 그대로의 표로 한다(위 줄). 걷어 내는 것은 그 뒤다.
                 st = clean_html_table(st, "\n".join(t for t in (d.get("description") or "", d.get("detail_text") or "") if t))
@@ -3492,6 +3558,10 @@ def main():
                 names = names[:n] if len(names) >= n else None
             sizes = blank_lone_jump(sleeve_to_hwajang(sizes))
             out[r["source_url"]] = {"brand_slug": k[0], "source": source, "size_names": names, "sizes": sizes}
+            if source == "html" and isinstance(st_ranges, dict):
+                rg = {c: v for c, v in st_ranges.items() if c not in sizes and isinstance(v, list) and len(v) == n}
+                if rg:
+                    out[r["source_url"]]["ranges"] = rg
             src[source] += 1
             (per_brand_html if source in ("html", "browser") else per_brand_ocr)[k[0]] += 1
     # 사람이 직접 옮겨 적은 값. 기계가 못 읽는 자리(사이즈가이드 탭 그림 등)를 사람이 메운
@@ -3559,6 +3629,23 @@ def main():
         print("읽다 만 사이즈 이름: " + " · ".join(f"{k} {v}" for k, v in sorted(rep.items())))
     if fixed:
         print("사이즈 이름 정리: " + " · ".join(f"{k} {v}" for k, v in sorted(fixed.items())))
+    # 모자는 옷 표를 다 정리한 **뒤에** 따로 넣는다 — 옷 표 정리(칸 수 맞추기 · 뒤집힌 라벨 빼기 …)는 옷 칸을 전제로 한다.
+    heads = 0
+    for u, (slug, text, opts) in head_todo.items():
+        if u in out and out[u].get("source") == "manual":
+            continue
+        ph = parse_head(text)
+        if not ph:
+            continue
+        hs, hr = ph
+        n = len(next(iter(list(hs.values()) + list(hr.values()))))
+        olist = [o.strip() for o in opts.split("|") if o.strip()]
+        names = olist if n > 1 and len(olist) == n else None
+        out[u] = {"brand_slug": slug, "source": "html", "axis": "head", "size_names": names, "sizes": hs,
+                  **({"ranges": hr} if hr else {})}
+        heads += 1
+    if heads:
+        print(f"모자 실측(머리둘레 · 깊이 · 챙길이) {heads}벌")
     OUT.write_text(json.dumps(out, ensure_ascii=False, indent=0), encoding="utf-8")
     print(f"사이즈 있는 상품 {len(out)} / {len(rows)} ({len(out)/len(rows):.0%}) — html {src['html']} · ocr {src['ocr']} → {OUT}")
     lab = Counter(c for e in out.values() for c in e["sizes"])

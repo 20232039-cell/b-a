@@ -27,6 +27,7 @@ None(못 읽음)과 달리 가드레일에 세지 않는다.
 import argparse
 import importlib
 import json
+import re
 import sys
 from datetime import datetime
 
@@ -49,7 +50,17 @@ def size_table_from_text(text: str) -> dict:
     if not text:
         return {}
     names, cols = size_from_ocr.from_ocr(crawl_sixshop.front_back(text))
-    return {**cols, **({"_names": names} if names else {})} if len(cols) >= 2 else {}
+    if len(cols) >= 2:
+        return {**cols, **({"_names": names} if names else {})}
+    # 총장 **한 칸만** 있는 옷도 받는다(사람 결정 2026-09-29 「다 받아」) — 둘레를 비우고 나면 총장만 남는 원피스
+    # (minju-kim 「총기장 77 · 밑단둘레 136」) · 고무 허리 치마(doucan 「Waist 33-47 / Length 97」).
+    # 총장이 글에 **딱 한 번** 나올 때만 — 여러 번이면 어느 사이즈 값인지 모른다.
+    hits = re.findall(r"(?i)(?<![가-힣A-Za-z])(?:총\s?기장|총\s?장|총\s?길이|total\s*length|length)\s*[:：]?\s*(\d{2,3}(?:\.\d)?)\s*(?:cm)?(?![\d.~\-])", text)
+    if len(hits) == 1:
+        v = size_from_ocr.fix_value("총장", hits[0])
+        if v is not None:
+            return {"총장": [v]}
+    return {}
 
 
 def crawl_one(http: cc.PoliteSession, slug: str, log=print) -> dict:

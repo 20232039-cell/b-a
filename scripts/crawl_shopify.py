@@ -30,6 +30,7 @@ from datetime import datetime
 from pathlib import Path
 
 import crawl_cafe24 as cc
+import kiwi_sizing
 from platforms import SHOPIFY, SHOPIFY_META_DESC, SHOPIFY_PAGES
 
 CRAWL_DIR = cc.CRAWL_DIR
@@ -308,12 +309,19 @@ def crawl_one(http: cc.PoliteSession, slug: str, log=print) -> dict:
         log(f"[{slug}] 가드레일: {rep['guard']}")
         return rep
     page_http = cc.PoliteSession(delay=max(http.delay, PAGE_DELAY)) if slug in SHOPIFY_PAGES else None
+    # 실측표를 Kiwi Sizing 에만 둔 매장(고엔제이) — 그 밖의 매장은 None 이라 아무 것도 안 부른다(kiwi_sizing 머리말)
+    kiwi = kiwi_sizing.client(slug, log)
     rows = []
     for p in got:
         d = to_row(p, slug, base, now_ts)
         if page_http:
             enrich(d, prev.get(d["product_no"]), p.get("updated_at") or "", page_http)
+        # enrich 뒤에 붙인다 — enrich 가 detail_text 를 새로 짜므로 모델 안내가 그 뒤에 이어져야 산다
+        if kiwi:
+            kiwi.enrich(d, prev.get(d["product_no"]), p)
         rows.append(d)
+    if kiwi:
+        log(f"[{slug}] Kiwi Sizing {kiwi.calls}번 받음 · 실측표 {sum(1 for d in rows if (d.get('kiwi') or {}).get('table'))}벌")
     return merge_rows(slug, prev, rows, now_ts, rep, log)
 
 
