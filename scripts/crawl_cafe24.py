@@ -1015,11 +1015,11 @@ ACC_TYPE_VOCAB = {
     "백팩": ["백팩", "backpack", "knapsack", "냅색", "짐색", "gym sack",
             "럭색", "럭샄", "rucksack", "ruck sack", "daypack", "day pack", "데이팩",
             "roll top", "rolltop", "roll-top", "롤탑", "배낭"],
-    "미니백": ["미니백", "mini bag", "미니 백"],
+    "미니백": ["미니백", "mini bag", "미니 백", "minibag"],
     "호보백": ["호보백", "hobo bag", "호보 백", "호보", "hobo"],
     "보스턴백": ["보스턴", "boston", "더플", "duffle", "duffel", "weekender"],
     "클러치": ["클러치", "clutch"],
-    "파우치": ["파우치", "pouch", "필통"],
+    "파우치": ["파우치", "pouch", "필통", "laptop sleeve"],
     "에코백": ["에코백", "ecobag", "eco bag", "canvas bag", "캔버스백"],
     "지갑": ["지갑", "wallet", "월렛", "코인 포켓", "coin pocket", "coin purse", "동전지갑", "카드 포켓"],
     "카드지갑": ["카드지갑", "card holder", "카드홀더", "카드 홀더", "card case", "명함"],
@@ -1028,9 +1028,9 @@ ACC_TYPE_VOCAB = {
     # 모자
     "볼캡": ["볼캡", "ball cap", "baseball cap", "야구모자", "캠프캡", "camp cap", "5패널",
             "five panel", "6패널", "snapback", "스냅백", "work cap", "워크캡", "뉴스보이", "newsboy", "헌팅캡", "hunting cap",
-            "cap", "캡"],
+            "cap", "캡", "ballcap"],
     "비니": ["비니", "beanie", "watch cap", "beanie hat"],
-    "버킷햇": ["버킷햇", "bucket hat", "버킷 햇", "boonie", "부니", "boonie hat", "jungle hat"],
+    "버킷햇": ["버킷햇", "bucket hat", "denim bucket", "버킷 햇", "boonie", "부니", "boonie hat", "jungle hat"],
     "베레": ["베레", "beret", "페도라", "fedora", "헌팅캡", "hunting cap", "베이커보이", "fedora hat", "beret hat"],
     # 「hood gear」는 옷이 아니라 머리에 쓰는 두건이다 — the-museum-visitor
     # 「ART WORK PRINTED HOOD GEAR」가 후드티로 잡혀 사이즈를 찾고 있었다(2026-09-05 사람 확인).
@@ -1048,10 +1048,10 @@ ACC_TYPE_VOCAB = {
     "모자": ["hat"],
     # 주얼리
     "목걸이": ["목걸이", "necklace", "네클레이스", "네크리스", "넥클리스", "네클레스", "네클리스",
-             "펜던트", "pendant"],
+             "펜던트", "pendant", " 체인 "],
     "팔찌": ["팔찌", "브레이슬렛", "브레이슬릿", "bracelet", "뱅글", "bangle", "앵클릿", "anklet"],
-    "반지": ["반지", "ring"],
-    "귀걸이": ["귀걸이", "earring", "이어커프", "ear cuff"],
+    "반지": ["반지", "ring", " 링 "],
+    "귀걸이": ["귀걸이", "earring", "이어커프", "ear cuff", "이어링"],
     "브로치": ["브로치", "brooch", "pin badge", "뱃지", "badge", "pin"],
     # 액세서리
     "벨트": ["벨트", "belt"],
@@ -1060,16 +1060,17 @@ ACC_TYPE_VOCAB = {
     # 넥워머는 스카프가 아니라 목도리다(사람 지시 2026-09-05). 띄어 쓴 「넥 워머」도 받는다 —
     # rough-side 「23FW 패커블 다운 넥 워머」가 「다운」 때문에 패딩으로 잡혀 있었다.
     "목도리": ["넥워머", "넥 워머", "neck warmer", "넥게이터", "neck gaiter", "목도리"],
-    "장갑": ["장갑", "glove", "글로브", "글러브", "gloves", "미튼", "mitten", "암워머", "arm warmer"],
+    "장갑": ["장갑", "glove", "글로브", "글러브", "gloves", "미튼", "mitten", "암워머", "arm warmer",
+            "핸드워머", "핸드 워머", "hand warmer", "handwarmer"],
     "헤어": ["헤어밴드", "hair band", "headband", "head band", "hairband", "헤어 밴드",
             "헤어핀", "hairpin", "바레트", "barrette", "스크런치",
             "커치프", "kerchief", "헤드랩", "headwrap", "두건", "반다나", "bandana",
             "scrunchie", "머리끈", "집게핀", "헤어 클립", "hair clip"],
     "아이웨어": ["선글라스", "sunglass", "안경", "eyewear", "glasses"],
     "우산": ["우산", "umbrella", "양산", "parasol"],
-    "넥타이": ["넥타이", "necktie", "tie", "보타이", "bow tie"],
+    "넥타이": ["넥타이", "necktie", "tie", "보타이", "bow tie", " 니트 타이 "],
     "키링": ["키링", "keyring", "key ring", "키홀더", "key holder", "charm", "카라비너", "karabiner",
-            "키체인", "keychain", "key chain"],
+            "키체인", "keychain", "key chain", "팬츠 홀더"],
     "가방끈": ["스트랩", "strap", "핸들", "handle", "체인 스트랩"],
     "폰액세서리": ["그립톡", "grip ring", "그립링", "폰케이스", "phone case", "iphone case", "airpod", "에어팟", "case", "케이스"],
     "레그웨어": ["타이츠", "tights", "레그워머", "leg warmer", "레그 워머", "스타킹", "stocking"],
@@ -1081,6 +1082,7 @@ ACC_TYPE_VOCAB = {
     # 화장품은 늘 앞말이 붙는다(핸드크림·바디크림·섬유탈취 스프레이).
     "캔들": ["캔들", "candle", "인센스", "incense", "디퓨저", "diffuser", "방향제",
             "에센스", "essence", "클리너", "크리너", "cleaner", "reiniger", "balsam", "왁스", "보호제",
+            "케어 브러쉬", "care brush",
             "핸드크림", "hand cream", "바디크림", "body cream", "풋크림", "foot cream",
             "탈취 스프레이", "섬유 스프레이", "fabric spray",
             "퍼퓸", "parfum", "perfume", "향수", "코롱", "cologne",
@@ -1253,7 +1255,8 @@ ACC_MASK = re.compile(
     r"off[\s_-]*shoulder|오프[\s_-]*숄더|one[\s_-]*shoulder|원[\s_-]*숄더|"
     r"drop[\s_-]*shoulder|드롭[\s_-]*숄더|"
     r"\bpin[\s_-]*(?:check|stripe|striped)\b|핀[\s_-]*(?:체크|스트라이프)|"
-    r"saddle\s*brown|새들\s*브라운", re.I)
+    r"saddle\s*brown|새들\s*브라운|"
+    r"레이어링|layering", re.I)
 
 
 # 소재 낱말이 머리 낱말을 이기던 것 — 「FLEECED BERET」이 플리스라서 아우터로, 「WS DENIM CAP」이
@@ -1269,6 +1272,10 @@ HEAD_MISC = re.compile(
 
 
 
+DENIM_TAIL = re.compile(r"\s(?:[-–]\s*)?(?:(?:blue|black|light|dark|washed|워시드)\s+)?"
+                        r"[a-z가-힣.]*(?:denim|데님)\s*$", re.I)
+
+
 def match_acc(name: str) -> str:
     """잡화 세분류 — 옷 낱말이 잡화 낱말보다 뒤에 있으면 옷이다.
     「Cotton scarf top」은 스카프가 아니라 탑, 「BELT LAYERED JEANS」는 벨트가 아니라 청바지.
@@ -1278,6 +1285,14 @@ def match_acc(name: str) -> str:
     n = re.split(r"\bwith\b|\bw/\b", name or "", maxsplit=1, flags=re.I)[0]
     # 꼬리의 색·소재는 머리 낱말이 아니다(「shoulder bag _ sashiko denim」)
     n = re.sub(r"[_,]\s*(?:[\w가-힣#/&+.-]+\s*){1,3}$", " ", n)
+    # 잡화 낱말 **바로 뒤** 맨 끝의 데님은 소재·색이다(「TRAVEL CAP DENIM」·「볼캡 - 블루데님」).
+    # 사이에 딴 말이 끼면 안 뗀다 — 「RIBBON STRAP POCKET DENIM」·「Ring yarn washing denim」은 청바지다.
+    m = DENIM_TAIL.search(n)
+    if m:
+        cut = n[:m.start()].rstrip()
+        a = match_head(cut, ACC_TYPE_VOCAB)
+        if a and head_end(cut, ACC_TYPE_VOCAB, a) >= len(cut) + 1:
+            n = cut
     n = ACC_MASK.sub(" ", n)           # 목선·무늬·색 이름은 잡화 낱말이 아니다
     acc = match_head(n, ACC_TYPE_VOCAB)
     if not acc:
