@@ -284,8 +284,10 @@ def template_pass(rows: dict, ocr: dict, out: dict) -> Counter:
         if checked < _TPL_MIN_CHECK or agree / checked < _TPL_MIN_AGREE:
             continue
         for r, (names, cols) in todo:
+            # 「MEDIUM」 「LARGE」는 뒤의 이름 다듬기가 사이즈로 안 읽어 지운다 — 여기서 S · M · L 로 적는다
             out[r["source_url"]] = {"brand_slug": brand, "source": "ocr", "template": True,
-                                    "size_names": names, "sizes": blank_lone_jump(sleeve_to_hwajang(cols))}
+                                    "size_names": [_TPL_ALIAS.get(nm, nm) for nm in names],
+                                    "sizes": blank_lone_jump(sleeve_to_hwajang(cols))}
             added[brand] += 1
     return added
 
@@ -3001,7 +3003,9 @@ _OCR_SIZE = {"8": "S", "5": "S", "$": "S"}
 # 판독기 표에서 글자로만 된 이름 가운데 사이즈로 인정하는 것. 「S/P」·「Short」 같은 매장식 이름은 HTML 표에만
 # 있어 여기 안 걸린다(이 목록은 ocr·sibling 표에만 쓴다).
 _OCR_NAME_OK = {"XXS", "XS", "S", "M", "L", "XL", "XXL", "XXXL", "2XL", "3XL", "4XL",
-                "F", "FREE", "ONE", "OS", "ONESIZE", "SS"}
+                "F", "FREE", "ONE", "OS", "ONESIZE", "SS",
+                # 기장으로 나눈 사이즈(ava-molli 코트 「STANDARD / LONG」, 코덱스 012)
+                "STANDARD", "LONG", "SHORT", "REGULAR"}
 _UNIT_TAIL = re.compile(r"\s*[\[(]\s*c?m\s*[\])]\s*$", re.I)
 
 
