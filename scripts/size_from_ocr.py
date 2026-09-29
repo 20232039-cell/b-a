@@ -189,7 +189,12 @@ def _tpl_read(text: str, group: str, templates: dict):
         rs = _tpl_rows(body)
         if not rs:
             continue
-        n = Counter(len(v) for _, v in rs).most_common(1)[0][0]
+        # 칸 수는 **틀이 있는 것** 가운데 가장 흔한 것 — 깨진 줄(「| ei 0 55 56 585 69」 다섯 수)이 가장 흔하면
+        # 멀쩡한 네 칸 줄을 버렸다(beyond-closet 11120, 코덱스 013).
+        widths = [w for w, _ in Counter(len(v) for _, v in rs).most_common() if templates.get((group, w))]
+        if not widths:
+            continue
+        n = widths[0]
         rs = [(nm, v) for nm, v in rs if len(v) == n]
         tpl = templates.get((group, n))
         if not tpl or tpl[1] < _TPL_MIN_SEEN or tpl[2] < _TPL_MIN_SHARE:
@@ -2142,34 +2147,80 @@ _NF_ROW = re.compile(r"^\s*(XXS|XS|S|M|L|XL|XXL|2XL|3XL|FREE|F|STANDARD|LONG|SHO
 _NF_PAIR = re.compile(r"([가-힣A-Za-z]{1,8})(?:\s*\([^)\s]{0,10}\)?)?\s*[:：]?\s*(\d{1,3}(?:\.\d{1,2})?)(?![\d.]|\s*/\s*\d)")
 
 
+_NF_FB = re.compile(r"([가-힣A-Za-z]{1,8})\s*\(\s*앞\s*/\s*뒤\s*\)\s*[:：]?\s*(\d{1,3}(?:\.\d{1,2})?)\s*/\s*(\d{1,3}(?:\.\d{1,2})?)")
+_NF_ONE = {"FREE", "F"}
+
+
+def _nf_cells(rest: str) -> dict[str, str]:
+    cells: dict[str, str] = {}
+    # 「총장(앞/뒤) 77/83」 · 「밑위(앞/뒤) 24.5/38」 — 한 칸에 앞 · 뒤 두 값. 밑위는 뒤밑위 칸이 따로 있어 둘 다
+    # 받고, 나머지는 앞 값만 쓴다(총장 칸은 하나다). 코덱스 013 · ava-molli.
+    for m in _NF_FB.finditer(rest):
+        c = canon_label(m.group(1))
+        if c and c not in cells:
+            cells[c] = m.group(2)
+            if c == "밑위":
+                cells.setdefault("뒤밑위", m.group(3))
+    rest = _NF_FB.sub(" ", rest)
+    for lab, v in _NF_PAIR.findall(rest):
+        c = canon_label(lab)
+        if c and c not in cells:
+            cells[c] = v
+    return cells
+
+
+def _nf_positional(rests: list[str]) -> dict[str, list[str]] | None:
+    """「 / 」로 칸을 나눈 줄 — 칸 수가 줄마다 같으면 자리로 맞춘다. 한 줄에서 라벨이 깨져도(「ADH(e) 52」)
+    다른 줄이 그 자리의 라벨을 알려 준다(o-oi, 코덱스 013). 자리마다 읽힌 라벨이 서로 다르면 그 자리는 버린다."""
+    parts = [[c.strip() for c in re.split(r"\s/\s|\s/|/\s", r) if c.strip()] for r in rests]
+    n = len(parts[0])
+    if n < 2 or any(len(p) != n for p in parts):
+        return None
+    cols: dict[str, list[str]] = {}
+    for j in range(n):
+        labs, vals = set(), []
+        for p in parts:
+            m = re.match(r"([가-힣A-Za-z]{1,8})", p[j])
+            c = canon_label(m.group(1)) if m else None
+            if c:
+                labs.add(c)
+            nums = re.findall(r"(?<![\d.])(\d{1,3}(?:\.\d{1,2})?)(?![\d.])", p[j])
+            vals.append(nums[-1] if nums else None)
+        if len(labs) == 1 and all(v is not None for v in vals):
+            c = labs.pop()
+            if c not in cols:
+                cols[c] = vals
+    return cols
+
+
 def parse_name_first_rows(text: str) -> tuple[list[str], dict[str, list[float]]] | None:
     lines = [ln.strip() for ln in (text or "").splitlines()]
     best = None
     for i, ln in enumerate(lines):
         if not _NF_HEAD.match(ln):
             continue
-        rows: list[tuple[str, dict[str, str]]] = []
+        rows: list[tuple[str, str, dict[str, str]]] = []
         for nxt in lines[i + 1:i + 12]:
             if not nxt:
                 continue
             m = _NF_ROW.match(nxt)
             if not m or re.search(r"(?i)model|모델", nxt):
                 break
-            cells: dict[str, str] = {}
-            for lab, v in _NF_PAIR.findall(m.group(2)):
-                c = canon_label(lab)
-                if c and c not in cells:
-                    cells[c] = v
+            cells = _nf_cells(m.group(2))
             if len(cells) < 2:
                 break
-            rows.append((m.group(1).upper(), cells))
-        if len(rows) < 2 or len({nm for nm, _ in rows}) != len(rows):
+            rows.append((m.group(1).upper(), m.group(2), cells))
+        # 한 사이즈뿐인 표는 FREE 일 때만(「FREE 총장(앞/뒤) 77/83 어깨넓이 57 …」) — 다른 이름 하나는 우연히 걸린 줄일 수 있다
+        if not rows or (len(rows) < 2 and rows[0][0] not in _NF_ONE) or len({nm for nm, _, _ in rows}) != len(rows):
             continue
-        common = [c for c in rows[0][1] if all(c in r for _, r in rows)]
-        cols = {c: [fix_value(c, r[c]) for _, r in rows] for c in common}
+        raw = _nf_positional([r for _, r, _ in rows]) if len(rows) >= 2 else None
+        if not raw:
+            common = [c for c in rows[0][2] if all(c in r for _, _, r in rows)]
+            raw = {c: [r[c] for _, _, r in rows] for c in common}
+        cols = {c: [fix_value(c, v) for v in vs] for c, vs in raw.items()}
         cols = {c: v for c, v in cols.items() if any(x is not None for x in v)}
         if len(cols) >= 2 and (best is None or len(cols) > len(best[1])):
-            best = ([nm for nm, _ in rows], cols)
+            best = ([nm for nm, _, _ in rows], cols)
     return best
 
 
