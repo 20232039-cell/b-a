@@ -1276,6 +1276,19 @@ HEAD_MISC = re.compile(
 
 
 
+# 이름 뒤쪽(끝에서 세 낱말 안)의 bucket/버킷/버켓 — 가방 낱말이 없고 앞 단계(잡화 어휘 · 단정문 · 칸 이름)가
+# 아무 말도 안 했을 때만 모자로 본다. 「Leno Bucket Tan」(ostkaka 가방)은 앞 단계에서 이미 가방이 된다.
+BUCKET_TAIL = re.compile(r"(?:(?<![a-z])bucket|버킷|버켓)(?:\s+[^\s]+){0,2}\s*$", re.I)
+BUCKET_BAG = re.compile(r"(?<![a-z])(?:bags?|backpack|shoulder|tote|cross|basket|brocle)(?![a-z])|백|가방|숄더|토트", re.I)
+
+DECLARED_MISC = re.compile(
+    r"(버킷\s?햇|스트로우?\s?햇|스트로우|햇|모자|보닛|비니|베레모?|바라클라바|발라클라바|헤드\s?워머|버킷|버켓"
+    r"|스크런치|헤어\s?밴드|머리띠|핸드\s?워머|레그\s?워머|워머|오브제)"
+    r"(?:으로|이며|이고)?\s*(?:입니다|예요|이에요)")
+DECLARED_MISC_CODE = {"스크런치": "accessories", "헤어밴드": "accessories", "머리띠": "accessories", "핸드워머": "accessories",
+                      "레그워머": "accessories", "워머": "accessories", "오브제": "lifestyle"}
+
+
 DENIM_TAIL = re.compile(r"\s(?:[-–]\s*)?(?:(?:blue|black|light|dark|washed|워시드)\s+)?"
                         r"[a-z가-힣.]*(?:denim|데님)\s*$", re.I)
 
@@ -1465,6 +1478,11 @@ def classify_category(name: str, category_names: list[str], description: str = "
     item = match_head(name, ITEM_TYPE_VOCAB)
     if item in ITEM_TO_CATEGORY:
         return ITEM_TO_CATEGORY[item]
+    # 이름에 옷 낱말이 없고 설명글이 「…버킷 햇입니다」 · 「…스크런치입니다」라고 못박으면 그 물건이다(misu-a-barbe 「AMULET STRAW」 ·
+    # 「BIG EARS BLUE」). 옷 낱말 뒤에 둔다 — 티셔츠 설명의 「…신체일부와 같은 모자입니다」(horlisun)가 모자가 되지 않게.
+    dm = DECLARED_MISC.search(description or "")
+    if dm and not re.search(r"(?:과|와|랑|하고)\s*$", (description or "")[:dm.start()][-4:]):
+        return DECLARED_MISC_CODE.get(re.sub(r"\s+", "", dm.group(1)), "headwear")
     # 옵션이 신발 치수면 신발이다 — 「260(41) 270(42) 280(43)」. 옷 옵션에는 220~320 이
     # 줄줄이 서지 않는다(atelier-de-lumen 「MEN'S WOVEN FLIP」이 하의로 섰다, 사람 지적
     # 2026-09-15). 카테고리 이름이 매장 이름 하나뿐인 곳에서 이름만으로는 못 가린다.
@@ -1493,6 +1511,8 @@ def classify_category(name: str, category_names: list[str], description: str = "
     # 약 200벌(캐시미어 V넥 · 미디 SK · 윈드셸 …)도 함께 「기타」로 떨어졌다 — 설명에 치수 낱말이
     # 하나뿐인 옷이 많다. 이 폴백에 걸리는 잡화는 칸 이름·신발 치수·단정문 규칙으로 먼저 거르고,
     # 그래도 남는 것은 manual_items.csv 에 적는다.
+    if BUCKET_TAIL.search(name) and not BUCKET_BAG.search(name):
+        return "headwear"
     low = (description or "").lower()
     for code, keys in SPEC_RULES:
         if any(k in low for k in keys):
