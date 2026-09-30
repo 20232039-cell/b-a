@@ -775,6 +775,10 @@ def carry_over(prev: dict, d: dict, when: str) -> None:
 # 뒤의 27,911 은 근거가 약하다 — 매장이 딱지만 붙이고 옵션엔 표시를 안 한 것일 수도 있고,
 # 그 옵션이 치수가 아니라 색일 수도 있다. 되돌릴 수 있게 잣대를 따로 둔다.
 TRUST_SOLDOUT_WITHOUT_MARKS = False   # True 면 「표시 없는」 27,911 벌을 품절로 둔다
+# 매장 딱지가 맞다고 확인한 매장 — 옵션에 품절 표시가 없어도 딱지를 따른다. 두 곳 다 상세 페이지의
+# JSON-LD 가 OutOfStock 이고 재고 0 인데 우리 앱엔 판매중으로 섰다(pushbutton 448 중 376 · o-oi 384 중 305,
+# 조사 2026-09-29). 사람 지시 2026-09-30 「품절 표시해」. 창고 전체 잣대(위)는 그대로 둔다.
+TRUST_SOLDOUT_BRANDS = {"pushbutton", "o-oi"}
 
 
 def is_soldout(d: dict) -> bool:
@@ -799,7 +803,7 @@ def is_soldout(d: dict) -> bool:
     live = [o for o in opts if o not in dead]
     if not live:
         return True
-    if not dead and TRUST_SOLDOUT_WITHOUT_MARKS:
+    if not dead and (TRUST_SOLDOUT_WITHOUT_MARKS or d.get("brand_slug") in TRUST_SOLDOUT_BRANDS):
         return True
     return False
 
