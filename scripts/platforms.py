@@ -98,8 +98,13 @@ SHOPIFY_PAGES: set[str] = {"recto", "post-archive-faction"}
 # crump 780 · jeanbach 31 · maison-marais 1 · tripleroot 1벌. 걷은 자료는 두고 앱에만 안 내보낸다.
 # 2026-09-27 밤 처음 걷는 매장 13곳과 PAGES 여덟 곳 — 그날 사람이 성별을 판정했고 「상품 수집 함 하자」고 했다. 식스샵 셋 때처럼
 # 사람이 값·설명·실측을 보기 전까지 앱에 안 내보낸다. 게시 판이 수집보다 먼저 돌든 나중에 돌든 앱이 같게.
-NEW_HOLD: set[str] = {"alyss", "antome", "arend", "areuban", "egnarts", "freckle", "generalidea", "le",
-                      "eudon-choi", "goen-j", "finoacinque", "merely-made", "polyteru", "anglan"} | set(PAGES)
+# 2026-09-30 사람이 아홉 곳을 풀었다(「너 추천대로 하고 풀어도 되는건 풀자」). 판매중 옷 기준 실측 · 소재 · 상세가 모두
+# 95% 넘은 곳 — generalidea 99.6 · khakis 100 · areuban 100 · antome 100 · arend 99.6 · le 99.3 · minju-kim 96.9 ·
+# alyss 95.3 · doucan 97.2(대표색만 21%). 국외 차단 여섯 곳(anglan · PAGES 의 imweb 다섯)은 데이터는 찼어도
+# 해외 CI 가 주간 갱신을 못 해 품절 · 값이 9/28 에 굳어 있어 묶어 둔다.
+RELEASED_0930: set[str] = {"generalidea", "khakis", "areuban", "antome", "arend", "le", "minju-kim", "alyss", "doucan"}
+NEW_HOLD: set[str] = ({"egnarts", "freckle", "eudon-choi", "goen-j", "finoacinque", "merely-made", "polyteru", "anglan"}
+                      | set(PAGES)) - RELEASED_0930
 # anglan 은 해외 IP 를 막는 카페24 매장이라 사람 PC(국내)에서 걷어 왔다(2026-09-28, 코덱스 중계 005 · 638벌).
 # CI(해외)에서는 주간 갱신이 목록을 못 받아 가드레일이 상태를 안 바꾼다 — 품절·값이 굳는다. 국내 러너(작업 #11)가 서기 전까지.
 # 같은 날 PC 에서 연 나머지 다섯 곳은 imweb 이었고 PAGES 에 올렸다(paco-sply 도 imweb — 아직 안 걷음).
