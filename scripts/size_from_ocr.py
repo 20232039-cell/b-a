@@ -2257,6 +2257,47 @@ def parse_lettered_rows(text: str) -> tuple[list[str], dict[str, list[float]]] |
     return ([nm for nm, _ in rows], cols) if len(cols) >= 2 else None
 
 
+# 한 줄에 사이즈 이름과 「라벨 값」이 잇달아 오는 글 — diagonal 이 이 꼴이다(코덱스 015 · 18번):
+#     SIZE(cm) small 총장 105 허리단면 34 힙단면 46 … medium 총장 106 허리단면 36 … large 총장 107 …
+# 크롤러 표는 small 줄만 잡았다. 이름 뒤 라벨이 셋 이상 · 줄마다 라벨 차례가 같음 · 이름이 겹치지 않음이 다 맞을 때만 받는다.
+_IR_NAME = re.compile(r"(?<![A-Za-z0-9가-힣.])(x-?small|small|medium|x-?large|large|xxs|xs|s|m|l|xl|xxl|free)\s+(?=[가-힣A-Za-z])", re.I)
+_IR_CANON = {"small": "S", "medium": "M", "large": "L", "xsmall": "XS", "x-small": "XS", "xlarge": "XL", "x-large": "XL"}
+
+
+def parse_inline_named_rows(text: str) -> tuple[list[str], dict[str, list[float]]] | None:
+    for seg in re.split(r"\n|\{#title\}", text or ""):
+        ms = list(_IR_NAME.finditer(seg))
+        if len(ms) < 2:
+            continue
+        rows: list[tuple[str, list[tuple[str, str]]]] = []
+        for i, m in enumerate(ms):
+            chunk = seg[m.end():ms[i + 1].start() if i + 1 < len(ms) else len(seg)]
+            cells: list[tuple[str, str]] = []
+            for lab, v, pos in _label_value_pairs(chunk):
+                if (not cells and pos > 0) or any(lab == c for c, _ in cells):
+                    break                          # 이름 바로 뒤가 라벨이 아니거나 같은 라벨이 또 — 이 줄 끝
+                cells.append((lab, v))
+            nm = m.group(1).lower()
+            rows.append((_IR_CANON.get(nm, nm.upper()), cells))
+        rows = [r for r in rows if len(r[1]) >= 3]
+        if len(rows) < 2:
+            continue
+        order = [c for c, _ in rows[0][1]]
+        rows = [(nm, cells[:len(order)]) for nm, cells in rows]
+        if any([c for c, _ in cells] != order for _, cells in rows):
+            continue
+        names = [nm for nm, _ in rows]
+        if len(set(names)) != len(names):
+            continue
+        # 무리 밖 값을 소수점으로 접지 않는다 — 플레어 스커트 「밑단 102」가 10.2 로 섰다(nick-nicole). 글 값은 그대로만.
+        raw = lambda c, v: (lambda x: x if x is not None and abs(x - float(v)) < 1e-9 else None)(fix_value(c, v))
+        cols = {c: [raw(c, cells[j][1]) for _, cells in rows] for j, c in enumerate(order)}
+        cols = {c: v for c, v in cols.items() if any(x is not None for x in v)}
+        if len(cols) >= 3:
+            return names, cols
+    return None
+
+
 _FS_MODEL = re.compile(r"\bmodel\b|모델", re.I)
 
 
@@ -2270,6 +2311,8 @@ def fill_single_from_text(sizes: dict[str, list], body: str) -> dict[str, list] 
     # 표 값과 안 맞아 떨어지고, 모델 말 뒤에 오는 실측(oddpresent 「… 모델 착용 … Measurements 총장: 105」)은 산다.
     segs = [p for seg in re.split(r"\n|\{#title\}", body or "") for p in _FS_MODEL.split(seg)]
     for seg in segs:
+        if "소매밑단" in seg:                      # 「소매단면 12 소매밑단 10」 — 둘 다 있으면 단면은 소매 너비(arend, 코덱스 015)
+            seg = seg.replace("소매단면", "소매통")
         pairs = _label_value_pairs(seg)
         if len(pairs) <= len(one):
             continue
@@ -3999,6 +4042,10 @@ def main():
                     lr = parse_lettered_rows(body)
                     if lr and len(clean_ocr(lr[1])) > len(sizes):
                         sizes, names, source = clean_ocr(lr[1]), lr[0], "html"
+                if len(sizes) < 2:
+                    ir = parse_inline_named_rows(body)
+                    if ir and len(clean_ocr(ir[1])) > len(sizes):
+                        sizes, names, source = clean_ocr(ir[1]), ir[0], "html"
                 # 이름 줄 뒤에 라벨마다 빗금 값(parse_names_slash_rows 주석 — ostkaka)
                 if len(sizes) < 2:
                     ns = parse_names_slash_rows(body)
@@ -4027,6 +4074,13 @@ def main():
                         isinstance(sizes[c][0], (int, float)) and isinstance(lcs[c][0], (int, float)) and abs(sizes[c][0] - lcs[c][0]) <= 1
                         for c in set(sizes) & set(lcs) if sizes[c]):
                     sizes, names = lcs, lr[0]
+                # 「small 총장 105 … medium 총장 106 …」 한 줄 표(parse_inline_named_rows 주석) — 조건은 위와 같다
+                ir = parse_inline_named_rows(body)
+                ics = clean_ocr(ir[1]) if ir else {}
+                if not names and ics and len(ir[0]) > wide0 and len(set(sizes) & set(ics)) >= 2 and all(
+                        isinstance(sizes[c][0], (int, float)) and isinstance(ics[c][0], (int, float)) and abs(sizes[c][0] - ics[c][0]) <= 1
+                        for c in set(sizes) & set(ics) if sizes[c]):
+                    sizes, names = ics, ir[0]
                 if not names:
                     fs = fill_single_from_text(sizes, body)
                     if fs:
