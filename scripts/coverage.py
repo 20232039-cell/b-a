@@ -122,7 +122,11 @@ def main() -> None:
     # 남은 매장이 있는데(haleine 14건 — 전부 「http://www.haleineshop.com/」), build_csv 는
     # 이를 정상 상세 주소로 복원하고 product_sizes.json 도 그 주소로 적힌다. 크롤 쪽 주소로
     # 찾으면 사이즈가 있는데도 없다고 세게 된다(2026-09-05).
-    catalog = {(r["brand_slug"], str(r["product_no"])): r["source_url"]
+    # 판매 상태와 분류도 products_full 의 것을 쓴다(2026-09-30). 크롤 원본의 soldout 딱지 · 즉석 분류를 쓰면
+    # 앱과 잣대가 어긋난다 — 앱은 「옵션에 품절 표시가 없으면 판매중」(is_soldout)과 사람이 고친 분류
+    # (manual_items.csv)를 거친 products_full 을 보여 주는데, 여기서는 딱지만 보고 빼고 misu-a-barbe 모자
+    # 59벌 같은 손 고침을 무시했다.
+    catalog = {(r["brand_slug"], str(r["product_no"])): r
                for r in csv.DictReader(open(DATA / "products_full.csv", encoding="utf-8-sig"))}
 
     tot = live = app = 0
@@ -138,14 +142,15 @@ def main() -> None:
         for line in open(f, encoding="utf-8"):
             r = json.loads(line)
             tot += 1
-            if r.get("soldout"):
+            c = catalog.get((slug, str(r["product_no"])))
+            if c is None:
+                continue      # products_full 이 대표컷 중복으로 뺀 행 — 앱에 없는 상품이다
+            if c.get("status") != "ON_SALE" or c.get("delisted") in ("1", "true", "True"):
                 continue
             live += 1
-            if not is_apparel(r):
+            if not is_apparel({**r, "category_code": c.get("category_code") or ""}):
                 continue
-            u = catalog.get((slug, str(r["product_no"])))
-            if u is None:
-                continue      # products_full 이 대표컷 중복으로 뺀 행 — 앱에 없는 상품이다
+            u = c["source_url"]
             app += 1
             s = u in sizes
             m = bool(((tags.get(u) or {}).get("tags") or {}).get("material"))
