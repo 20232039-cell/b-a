@@ -2224,6 +2224,70 @@ def parse_name_first_rows(text: str) -> tuple[list[str], dict[str, list[float]]]
     return best
 
 
+# 사이즈마다 글자 번호로 라벨을 늘어놓은 글 — generalidea 가 이 꼴이다(코덱스 014 · 2,198벌):
+#     [SIZE] S (55) a. 어깨 37 / b. 소매기장 17 / c. 가슴 45 / … M (66) a. 어깨 39 / b. 소매기장 18 / …
+# 크롤러는 첫 사이즈만 잡고(「a. 어깨 37」) 뒤 사이즈를 버렸다. 이름 뒤 괄호(「(55)」 국내 호칭)는 이름에 안 넣는다.
+# 값 둘 「d. 밑단 39/67」(밑단 / 트임 밑단)은 앞 값을 쓴다 — 두 번째 값에서 끊기면 그 뒤 라벨이 모두 빠졌다.
+_LR_BLOCK = re.compile(r"(?<![A-Za-z0-9.])(XXS|XS|S|M|L|XL|XXL|XXXL|2XL|3XL|FREE|F|\d{1,3})\s*(?:\(\s*\d{2,3}\s*\))?\s+"
+                       r"((?:[a-z]\s*[.)]\s*[가-힣A-Za-z ]{1,12}?\s*[:：]?\s*\d{1,3}(?:\.\d{1,2})?(?:\s*/\s*\d{1,3}(?:\.\d{1,2})?(?!\s*[a-z]\s*[.)]))?"
+                       r"\s*(?:cm)?\s*/?\s*){2,})", re.I)
+_LR_PAIR = re.compile(r"[a-z]\s*[.)]\s*([가-힣A-Za-z ]{1,12}?)\s*[:：]?\s*(\d{1,3}(?:\.\d{1,2})?)", re.I)
+
+
+def parse_lettered_rows(text: str) -> tuple[list[str], dict[str, list[float]]] | None:
+    rows: list[tuple[str, dict[str, str]]] = []
+    for m in _LR_BLOCK.finditer(text or ""):
+        cells: dict[str, str] = {}
+        for lab, v in _LR_PAIR.findall(m.group(2)):
+            c = canon_label(lab.strip())
+            if c and c not in cells:
+                cells[c] = v
+        if len(cells) >= 2:
+            nm = m.group(1).upper()
+            if rows and nm == rows[-1][0]:
+                continue
+            if any(nm == r[0] for r in rows):
+                break                          # 같은 표가 한 번 더 찍혔다 — 첫 벌만
+            rows.append((nm, cells))
+    if len(rows) < 2:
+        return None
+    common = [c for c in rows[0][1] if all(c in r for _, r in rows)]
+    cols = {c: [fix_value(c, r[c]) for _, r in rows] for c in common}
+    cols = {c: v for c, v in cols.items() if any(x is not None for x in v)}
+    return ([nm for nm, _ in rows], cols) if len(cols) >= 2 else None
+
+
+_FS_MODEL = re.compile(r"\bmodel\b|모델", re.I)
+
+
+def fill_single_from_text(sizes: dict[str, list], body: str) -> dict[str, list] | None:
+    """한 칸짜리 크롤러 표를 설명글의 같은 줄로 채운다 — 크롤러가 이름 줄로 잘못 먹은 칸(arend 「허리 31」 이 이름
+    「31」로 섰다, 코덱스 014)이 글에는 남아 있다. 표의 값이 모두 그 줄에 그대로 있을 때만 그 줄의 나머지 라벨을 더한다."""
+    one = {c: v[0] for c, v in sizes.items() if isinstance(v, list) and len(v) == 1 and isinstance(v[0], (int, float))}
+    if len(one) < 2 or len(one) != len(sizes):
+        return None
+    # 「MODEL … waist 61」 모델 몸 치수는 옷 값이 아니다(le) — 모델 말마다 끊어 조각마다 본다. 모델 치수 조각은
+    # 표 값과 안 맞아 떨어지고, 모델 말 뒤에 오는 실측(oddpresent 「… 모델 착용 … Measurements 총장: 105」)은 산다.
+    segs = [p for seg in re.split(r"\n|\{#title\}", body or "") for p in _FS_MODEL.split(seg)]
+    for seg in segs:
+        pairs = _label_value_pairs(seg)
+        if len(pairs) <= len(one):
+            continue
+        got: dict[str, float] = {}
+        seen: set[str] = set()
+        for lab, v, _ in pairs:
+            if lab in seen:
+                break                              # 같은 라벨이 또 — 세트의 둘째 벌(freckle 수트 바지)이다
+            seen.add(lab)
+            x = fix_value(lab, v)
+            # 무리 밖 값을 소수점으로 접은 것(밑단 105 → 10.5, oddpresent)은 OCR 용 — 글에 적힌 값은 그대로만 받는다
+            if x is not None and abs(x - float(v)) < 1e-9:
+                got[lab] = x
+        if all(c in got and abs(got[c] - x) <= 0.5 for c, x in one.items()) and len(got) > len(one):
+            return {c: [x] for c, x in got.items()}
+    return None
+
+
 def _from_ocr(text: str) -> tuple[list[str] | None, dict[str, list[float]]]:
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     sr = parse_size_rows(text)
@@ -3931,6 +3995,10 @@ def main():
                     sr = parse_size_rows(body)
                     if sr and len(clean_ocr(sr[1])) > len(sizes):
                         sizes, names, source = clean_ocr(sr[1]), sr[0], "html"
+                if len(sizes) < 2:
+                    lr = parse_lettered_rows(body)
+                    if lr and len(clean_ocr(lr[1])) > len(sizes):
+                        sizes, names, source = clean_ocr(lr[1]), lr[0], "html"
                 # 이름 줄 뒤에 라벨마다 빗금 값(parse_names_slash_rows 주석 — ostkaka)
                 if len(sizes) < 2:
                     ns = parse_names_slash_rows(body)
@@ -3951,6 +4019,18 @@ def main():
                 wide0 = max((len(v) for v in sizes.values() if isinstance(v, list)), default=0)
                 if ncs and set(sizes) <= set(ncs) and len(ns[0]) == wide0:
                     sizes, names = ncs, ns[0]
+                # 크롤러가 첫 사이즈만 잡은 「S (55) a. 어깨 37 / …  M (66) …」(parse_lettered_rows 주석) — 글이 사이즈를 더 많이
+                # 담았고 첫 칸이 크롤러 값과 1cm 안에서 맞으면 글을 쓴다(크롤러는 「소매기장」을 기장으로도 잘못 읽었다).
+                lr = parse_lettered_rows(body)
+                lcs = clean_ocr(lr[1]) if lr else {}
+                if lcs and len(lr[0]) > wide0 and len(set(sizes) & set(lcs)) >= 2 and all(
+                        isinstance(sizes[c][0], (int, float)) and isinstance(lcs[c][0], (int, float)) and abs(sizes[c][0] - lcs[c][0]) <= 1
+                        for c in set(sizes) & set(lcs) if sizes[c]):
+                    sizes, names = lcs, lr[0]
+                if not names:
+                    fs = fill_single_from_text(sizes, body)
+                    if fs:
+                        sizes = fs
                 if not names and all(isinstance(v, list) and len(v) == 1 for v in sizes.values()):
                     par = parse_paren_slash(body)
                     cp = clean_ocr(par[1]) if par else {}

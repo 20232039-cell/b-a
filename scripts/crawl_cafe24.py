@@ -244,7 +244,9 @@ ITEM_TYPE_VOCAB = {
     "스커트": ["skirt", "스커트",
              # skort(스커트+팬츠) 19벌 — 매장은 하의 칸에 두지만 옷은 스커트다.
              "skort"],
-    "원피스": ["dress", "원피스", "드레스", "one-piece", "onepiece", "one piece"],
+    # 「ops」는 원피스 약자다(「jersey contrast tiered ops」 · 「turtleneck ops」). 영문 낱말 경계로만 걸려 tops 에는 안 걸린다.
+    # 상의로 섰더니 원피스 총장 121.5 가 「상의에 있을 수 없는 값」으로 지워졌다(코덱스 014 · le 2109).
+    "원피스": ["dress", "원피스", "드레스", "one-piece", "onepiece", "one piece", "ops"],
     "파자마": ["파자마", "pajama", "pyjama", "잠옷", "홈웨어", "라운지웨어", "loungewear"],
     "베스트": ["vest", "베스트"],
     "바람막이": ["windbreak", "windbreaker", "바람막이", "윈드브레이커", "윈드스토퍼", "windstopper",
@@ -2556,6 +2558,9 @@ def repeated_block_table(seq: list[tuple[str, list[float], int]], t: str) -> dic
     return cols
 
 
+_JUNK_NAMES = {"INFO", "SIZE", "SIZEINFO", "CM", "INCH", "사이즈", "단위"}
+
+
 def collapse_repeated_columns(tbl: dict) -> dict:
     """같은 표가 페이지에 두 번 찍혀 칸이 배로 늘어난 것을 접는다.
 
@@ -2575,6 +2580,11 @@ def collapse_repeated_columns(tbl: dict) -> dict:
         return tbl
     nm = tbl.get("_names")
     nm = nm if isinstance(nm, list) and len(nm) == n else None
+    # 표 머리말(「SIZE INFO」)이나 첫 값(「31」)이 이름 줄로 잡힌 표 — 이름이 달라 접히지 않아 값이 두 번씩 섰다
+    # (arend 93벌 「_names ['31', 'INFO']」, 코덱스 014). 사이즈 이름이 아닌 낱말이 섞였으면 이름을 믿지 않는다.
+    junk = nm is not None and any(str(x).strip().upper() in _JUNK_NAMES for x in nm)
+    if junk:
+        nm = None
     for p in range(1, n):
         if n % p:
             continue                     # 되풀이 마디는 칸 수를 나누어떨어뜨려야 한다
@@ -2586,6 +2596,8 @@ def collapse_repeated_columns(tbl: dict) -> dict:
             tbl[l] = tbl[l][:p]
         if nm:
             tbl["_names"] = nm[:p]
+        elif junk:
+            tbl.pop("_names", None)
         return tbl
     return tbl
 
