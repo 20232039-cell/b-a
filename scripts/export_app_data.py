@@ -185,7 +185,32 @@ def thin_row(r: dict, tags: dict, bi: dict, ci: dict, pref: dict) -> dict:
                  ("cg", COLOR_GROUP.get(r["source_url"], 0))):
         if v:
             row[k] = v
+    st = sorted(style_tags(t), key=lambda x: (TAG_DF[x], x))[:TAG_MAX]
+    if st and TAG_ID:
+        row["tg"] = [TAG_ID[x] for x in st]
     return row
+
+
+# ── 스타일 태그 번호 (앱 Discover 추천의 스타일 점수용, 앱 세션 부탁 2026-10-01) ─────────────────
+# 점수는 태그를 IDF 가중으로 겹쳐 본다 — 흔한 태그는 거의 안 쓰이니 **드문 것부터** 많아야 여섯. 말은 catalog.tags 에 한 번만,
+# 줄에는 번호만(11만 줄이라 글자로 실으면 무겁다). 번호는 흔한 태그일수록 작게 — 자릿수가 줄어 압축 전 크기도 준다.
+# 축: 디자인 요소 · 실루엣 · 구성 · 기장 · 무늬(「단색」 뺌) · 둘째 소재(대표 소재는 ma 로 이미 있다).
+TAG_AXES = ("design_element", "silhouette", "construction", "length", "pattern")
+TAG_MAX = 6
+TAG_DF: Counter = Counter()
+TAG_ID: dict[str, int] = {}
+
+
+def style_tags(t: dict) -> list[str]:
+    got: list[str] = []
+    for ax in TAG_AXES:
+        for x in t.get(ax) or []:
+            if x and x != "단색" and x not in got:
+                got.append(x)
+    for x in (t.get("material") or [])[1:2]:
+        if x and x not in got:
+            got.append(x)
+    return got
 
 
 KNOWN_T: set[str] = set()   # 창고 품목(subtype)에 쓰이는 말 — main 이 채운다(size_entry 주석)
@@ -322,6 +347,11 @@ def main() -> int:
         print(f"아직 안 내보내는 매장 {sorted(platforms.APP_HOLD)} — {held}벌 뺌")
     tags = json.loads((DATA / "product_tags_full.json").read_text(encoding="utf-8"))
     sizes = json.loads((DATA / "product_sizes.json").read_text(encoding="utf-8"))
+    for r in rows:
+        TAG_DF.update(style_tags((tags.get(r["source_url"]) or {}).get("tags") or {}))
+    tag_list = [x for x, _ in sorted(TAG_DF.items(), key=lambda kv: (-kv[1], kv[0]))]
+    TAG_ID.update({x: i for i, x in enumerate(tag_list)})
+    print(f"스타일 태그 사전 {len(tag_list)}개 — 흔한 것: {', '.join(tag_list[:8])}")
     KNOWN_T.update(r.get("subtype") for r in rows if r.get("subtype"))
     crawl = {}
     for p in sorted((DATA / "crawl").glob("*.jsonl")):
@@ -568,6 +598,7 @@ def main() -> int:
             "c": "cats 번호", "t": "품목(subtype)", "g": "W 여성 · M 남성 · U 남녀공용",
             "s": "1 판매중 · 0 품절", "co": "대표색", "ma": "대표소재", "se": "시즌",
             "cg": "색만 다른 형제 묶음(없으면 안 적힘)",
+            "tg": "스타일 태그 — tags 번호 배열, 드문 것부터 많아야 6(없으면 안 적힘)",
         },
         # 무드는 **브랜드에만** 있다 — 상품마다 붙일 것이 아니다(아래 fold_mood 참고)
         "brand_fields": {"mo": "무드 — moods 안의 말만 쓴다",
@@ -584,6 +615,8 @@ def main() -> int:
         "cats": [{"i": ci[c], "c": c, "n": cat_label.get(c, ""), "g": grp_label.get(c, "")}
                  for c in codes],
         "moods": MOOD_APP,
+        # 줄의 tg 가 가리키는 말. 축: 디자인 요소 · 실루엣 · 구성 · 기장 · 무늬(단색 뺌) · 둘째 소재. 흔한 것이 앞번호.
+        "tags": tag_list,
         "files": files,
     }
     b = write(out / "catalog.json", catalog, args.dry)
