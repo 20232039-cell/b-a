@@ -139,9 +139,14 @@ def main() -> None:
         slug = os.path.basename(f)[:-6]
         if slug.startswith("_"):
             continue
+        # 같은 상품이 jsonl 에 여러 줄일 수 있다(다시 받은 상품 · 상세 보정이 줄을 덧붙인다) — 줄로 세면 판매중 의류가
+        # 1,336 부풀었다(조사 2026-10-01). 상품 번호마다 마지막 줄(가장 새 기록)만 센다.
+        latest: dict[str, dict] = {}
         for line in open(f, encoding="utf-8"):
             r = json.loads(line)
             tot += 1
+            latest[str(r["product_no"])] = r
+        for r in latest.values():
             c = catalog.get((slug, str(r["product_no"])))
             if c is None:
                 continue      # products_full 이 대표컷 중복으로 뺀 행 — 앱에 없는 상품이다
