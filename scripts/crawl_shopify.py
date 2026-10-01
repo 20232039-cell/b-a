@@ -31,7 +31,7 @@ from pathlib import Path
 
 import crawl_cafe24 as cc
 import kiwi_sizing
-from platforms import SHOPIFY, SHOPIFY_META_DESC, SHOPIFY_PAGES
+from platforms import SHOPIFY, SHOPIFY_META_DESC, SHOPIFY_OWN_TAG, SHOPIFY_PAGES
 
 CRAWL_DIR = cc.CRAWL_DIR
 PAGE_LIMIT = 250          # Shopify 가 한 쪽에 주는 최대
@@ -147,6 +147,44 @@ def to_row(p: dict, slug: str, base: str, now: str) -> dict:
 _META_DESC = re.compile(r'(?is)<meta\s+(?:property="og:description"|name="description")\s+content="([^"]*)"')
 _TAB = re.compile(r'(?is)<details[^>]*>\s*<summary[^>]*>(.*?)</summary>(.*?)</details>')
 _RICH = re.compile(r'(?is)<div class="metafield-rich_text_field">(.*?)</div>')
+# 테마가 실측표를 메타필드 글이 아니라 **틀로 그리는** 매장(2026-10-01 새로 걷는 두 곳). 둘 다 목록 API 에는 없다.
+# - thug-club: 「Size Guide」 탭 안의 <table class="size-table"> — Size/cm · Length · Shoulder · Chest · Under · Arm
+#   (tc-subliminal-shirt 1~4 Size). 탭 글이 아니라 _RICH 로는 안 잡혔다.
+# - sansan-gear: 「size guide」 창의 <div class="sz__guide"> — 머리 칸(.label)과 사이즈 줄(<li>)이 <span> 칸이다
+#   (insulated-vest-black: Chest/Shoulder/Length × 1~4). 표가 아니라 extract_size_any 가 그대로는 한 줄로
+#   이어 읽어(「length 59.5, 41.5, 77.5 …」) 표로 바꿔 넘긴다. 바로 옆의 모델 정보(182cm 62kg)는 이 틀 밖이다.
+_SIZE_TABLE = re.compile(r'(?is)<table[^>]*class="[^"]*\bsize-table\b[^"]*"[^>]*>.*?</table>')
+_SZ_GUIDE = re.compile(r'(?is)<div class="sz__guide[^"]*">(.*?)</ul>')
+_SZ_CELLS = re.compile(r'(?is)<span[^>]*>(.*?)</span>')
+
+
+def _sz_guide_table(block: str) -> str:
+    # 바지 쪽은 머리 칸에 style 이 붙는다(<div class="label" style="margin-top: 16px;"> — sweatpants-black)
+    head = re.search(r'(?is)<div class="label"[^>]*>(.*?)</div>', block)
+    rows = re.findall(r'(?is)<li[^>]*>(.*?)</li>', block)
+    if not head or not rows:
+        return ""
+    heads = [_text(c) or "Size" for c in _SZ_CELLS.findall(head.group(1))]
+    body = [[_text(c) for c in _SZ_CELLS.findall(r)] for r in rows]
+    # 래글런은 어깨 칸에 값 대신 「RAG」를 적는다 — 그때 sleeve 는 어깨 솔기가 없어 뒷목에서 잰 화장이다
+    # (paneled-t-shirt 반팔 sleeve 50/52/54 · chest 53 — 어깨~소매끝이면 반팔이 50 일 수 없다). 소매길이로 두면
+    # sleeve_to_hwajang(80 넘을 때만 고친다)도 못 잡는다.
+    sh = [i for i, h in enumerate(heads) if re.fullmatch(r"(?i)shoulder", h)]
+    if sh and body and all(len(r) > sh[0] and re.fullmatch(r"(?i)rag(?:lan)?", r[sh[0]]) for r in body):
+        heads = ["화장" if re.fullmatch(r"(?i)sleeve", h) else h for h in heads]
+    e = html.escape
+    out = "<tr>" + "".join(f"<th>{e(h)}</th>" for h in heads) + "</tr>"
+    out += "".join("<tr>" + "".join(f"<td>{e(c)}</td>" for c in r) + "</tr>" for r in body)
+    return f"<table>{out}</table>"
+
+
+def page_size_html(html_text: str) -> str:
+    """상품 페이지에 틀로 그린 실측표 — 위 두 꼴. 없으면 빈 글. 줄의 page_extras 에 남으므로 빈칸을 접는다."""
+    m = _SIZE_TABLE.search(html_text or "")
+    if m:
+        return re.sub(r"\s+", " ", re.sub(r"(?s)<!--.*?-->", "", m.group(0)))
+    m = _SZ_GUIDE.search(html_text or "")
+    return _sz_guide_table(m.group(1)) if m else ""
 
 
 def page_extras(html_text: str) -> dict:
@@ -169,7 +207,11 @@ def page_extras(html_text: str) -> dict:
             continue
         h = _text(head).splitlines()[-1] if _text(head) else ""
         tabs.append((h, "\n".join(_text(x) for x in rich)))
-    return {"meta": meta, "tabs": tabs}
+    out = {"meta": meta, "tabs": tabs}
+    size_html = page_size_html(html_text)
+    if size_html:
+        out["size_html"] = size_html
+    return out
 
 
 def enrich(d: dict, old: dict | None, updated_at: str, http: cc.PoliteSession) -> None:
@@ -217,6 +259,14 @@ def enrich(d: dict, old: dict | None, updated_at: str, http: cc.PoliteSession) -
         if len(cols) >= 2 and n > width:
             d["size_table"] = {**cols, **({"_names": names} if names else {})}
             break
+    # 틀로 그린 실측표(page_size_html) — 탭 글 표보다 사이즈가 많을 때만 갈아탄다(같은 잣대)
+    if ex.get("size_html"):
+        width = max((len(v) for k, v in (d.get("size_table") or {}).items()
+                     if not k.startswith("_") and isinstance(v, list)), default=0)
+        t = cc.extract_size_any(ex["size_html"])
+        n = max((len(v) for k, v in t.items() if not k.startswith("_") and isinstance(v, list)), default=0)
+        if len([k for k in t if not k.startswith("_")]) >= 2 and n > width:
+            d["size_table"] = t
 
 
 def load_prev(slug: str) -> dict[int, dict]:
@@ -301,6 +351,12 @@ def crawl_one(http: cc.PoliteSession, slug: str, log=print) -> dict:
     if got is None:
         rep["guard"] = "목록 받기 실패"
         return rep
+    own = SHOPIFY_OWN_TAG.get(slug)
+    if own:
+        # 남의 브랜드도 파는 매장은 자체 상품 태그가 붙은 것만(platforms.SHOPIFY_OWN_TAG 주석)
+        keep = [p for p in got if own in {str(t).strip().casefold() for t in p.get("tags") or []}]
+        rep["skipped"] = len(got) - len(keep)
+        got = keep
     rep["listed"] = len(got)
     active = {no for no, d in prev.items() if not d.get("soldout") and not d.get("delisted")}
     if len(active) > 20 and len(got) < GUARD_RATIO * len(active):

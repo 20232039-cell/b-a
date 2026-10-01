@@ -137,7 +137,13 @@ _GIRTHABLE = {"가슴", "허리", "엉덩이", "밑단", "허벅지"}
 # 표**를 만들었다 — 앱에서 프리사이즈처럼 뜨는 틀린 표다(받아 둔 9619435 · 9463206 으로 확인, 2026-10-01).
 # 그래서 줄마다 읽어 사이즈를 다 받는다. 한글 라벨은 매장이 단면으로 적으므로 둘레 짐작(아래 _GIRTHABLE)은
 # 값이 무리를 넘을 때만 한다.
-_KO_ROW = re.compile(r"^[ \t]*([A-Za-z0-9]{1,4})[ \t]*(?:사이즈|size)[ \t]*[-–—:：][ \t]*(.+?)[ \t]*$", re.I | re.M)
+# 트래블(travel)은 「사이즈」 말 없이 사이즈 이름만 두고, 라벨에 잰 자리를 괄호로 붙인다 —
+# 「S - 총장(옆목점) 66 / 어깨 56 / 가슴 56 / 소매(어깨끝에서) 57」 줄이 사이즈마다 하나(TROEAWCR04UC5).
+# 위 되돌림이 첫 줄만 읽어 S 한 사이즈 표가 됐다(2026-10-01 첫 시험). 「사이즈」 말이 없을 때는 사이즈 이름
+# (S · M · XL · FREE · 숫자)만 받고, 괄호는 값을 읽기 전에 지운다 — 아래 「줄 전체가 라벨값」 검사는 그대로다.
+_KO_ROW = re.compile(r"^[ \t]*(?:([A-Za-z0-9]{1,4})[ \t]*(?:사이즈|size)|(XXS|XS|S|M|L|XL|XXL|XXXL|[2-4]XL|FREE|\d{1,3}))"
+                     r"[ \t]*[-–—:：][ \t]*(.+?)[ \t]*$", re.I | re.M)
+_PAREN = re.compile(r"\([^()\n]{0,20}\)")
 _KO_PAIR = re.compile(r"([가-힣]{1,6})[ \t]*[:：]?[ \t]*(\d{1,3}(?:\.\d{1,2})?)(?![\d.])")
 
 
@@ -153,11 +159,28 @@ def size_dict(text: str) -> tuple[list[str] | None, dict[str, list[float]]]:
             one = one or bool(one_name)
     korean = False
     if not rows:
-        for name, body in _KO_ROW.findall(text or ""):
+        # 같은 표가 설명에 두 번 실린 상품이 있다 — 첫 벌은 줄이 붙어(「SIZE (S/M/L)S - …」 · 「… 80모델사이즈」)
+        # 앞뒤 줄을 놓치고, 둘째 벌은 온전하다(travel TRTOAWHD12UI4: 첫 벌의 M L 과 둘째 벌의 S M L XL 이 한 표로
+        # 이어져 여섯 사이즈가 됐다 — 2026-10-01 시험 판). 그래서 **줄이 바로 이어지는 것끼리만** 한 벌로 묶고
+        # (사이에 다른 줄 · 못 읽은 줄이 끼면 끊는다), 줄이 가장 많은 벌(같으면 뒤의 것)만 쓴다.
+        blocks: list[list] = [[]]
+        last_end = None
+        for m in _KO_ROW.finditer(text or ""):
+            named, bare, body = m.groups()
+            name = named or bare.upper()
+            body = _PAREN.sub(" ", body)
             pairs = [(k, float(v)) for k, v in _KO_PAIR.findall(body)]
             # 줄 전체가 「라벨값」으로만 되어 있어야 한다 — 문장 속의 「1사이즈 - 여유있게 …」를 표로 읽지 않게
             if len(pairs) >= 2 and not re.sub(r"[가-힣]{1,6}[ \t]*[:：]?[ \t]*\d{1,3}(?:\.\d{1,2})?(?:cm)?|[\s/,|]", "", body):
-                rows.append((name, pairs))
+                if last_end is not None and (text[last_end:m.start()].strip() or any(name == x[0] for x in blocks[-1])):
+                    blocks.append([])
+                blocks[-1].append((name, pairs))
+                last_end = m.end()
+            else:                                  # 못 읽은 줄 — 다음 줄은 새 벌
+                if blocks[-1]:
+                    blocks.append([])
+                last_end = None
+        rows = max(reversed(blocks), key=len)
         korean = bool(rows)
     # 줄 하나는 「ONE SIZE」·「FREE SIZE」일 때만 받는다 — 「SIZE 1:」 한 줄만 잡혔으면 나머지 줄을 놓친 것이다.
     if not rows or (len(rows) < 2 and not one) or (one and len(rows) != 1) \

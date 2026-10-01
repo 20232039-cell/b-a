@@ -18,6 +18,10 @@ SHOPIFY: dict[str, str] = {
     # 2026-09-27 사람이 성별을 판정한 새 매장 — products.json 이 열리는 것을 확인했다(96 · 250벌+)
     "eudon-choi": "https://www.eudonchoi.com",
     "goen-j": "https://kr.goenj.com",
+    # 2026-10-01 사람이 성별을 판정한 새 매장(NEW_1001) — meta.json 이 KR · KRW, products.json 이 원화로 열린다(345 · 589벌).
+    # thug-club.com 은 thugclub.store 로 넘어간다. 실측표·소재 탭은 상품 페이지에만 있다(SHOPIFY_PAGES · page_size_html).
+    "sansan-gear": "https://sansangear.com",
+    "thug-club": "https://thugclub.store",
 }
 
 # slug → 식스샵 가게 주소. `<주소>/sitemap.xml` 에 상품 주소가 다 있다(crawl_sixshop 주석).
@@ -30,6 +34,8 @@ SIXSHOP: dict[str, str] = {
     "finoacinque": "https://www.finoacinque.co.kr",
     "merely-made": "https://www.merelymade.com",
     "polyteru": "https://www.polyteru-store.com",
+    # 2026-10-01 새 매장 — sitemap.xml 상품 549줄. 상세는 거의 그림이고, 그림이 무신사 · 29CM 서버(msscdn · 29cm)에 있다.
+    "travel": "https://travelwebsite.kr",
 }
 
 # slug → 가게 주소. 틀이 매장마다 달라(고도몰 · 위사몰 · 메이크샵 · Cargo · 직접 만든 사이트) 매장별 해석기
@@ -54,6 +60,18 @@ PAGES: dict[str, str] = {
     "my-joyful-decisions": "https://www.myjoyfuldecisions.com",
     "preoccupy": "https://www.preoccupy-center.com",
     "taille": "https://taille.kr",
+    # 2026-10-01 사람이 성별을 판정한 새 매장(NEW_1001) 가운데 카페24 · Shopify · 식스샵이 아닌 곳. 해석기 머리말에 길과 한계.
+    "rolarola": "https://www.rolarola.com",               # 위사몰 — 목록(rows=200) · 실측 · 소재는 상세 그림(OCR)
+    "thisisneverthat": "https://thisisneverthat.com",     # 헤드리스 Shopify(국내몰 ko) — products.json + Storefront 실측
+    "we11done": "https://we11-done.com",                  # 고도몰5 — 국내몰은 /us/ 없는 주소 · 성별 칸 목록 ajax
+    # 아래 넷은 이 컨테이너(미국)에서 첫 화면부터 403 이다 — eenk · taille 와 **같은 차단 화면**(CloudFront · S3,
+    # ETag 2b9893bf…)이고 이름 서버도 같은 hostcocoa 무리라 imweb 국외 차단으로 본다. 해석기는 _imweb 을 묶기만 했고
+    # **아직 한 번도 열어 보지 못했다** — 국내 PC 에서 `stores/_try.py <slug>` 로 먼저 확인한다. CI(해외)에서는
+    # list_urls 가 None 이라 가드레일이 판을 버린다(데이터는 안 바뀐다).
+    "samo-ondoh": "https://www.samoondoh.co.kr",
+    "savage": "https://savage.co.kr",
+    "urago": "https://u-rago.com",
+    "welter-experiment": "https://welter-experiment.com",
 }
 
 NOT_CAFE24: set[str] = set(SHOPIFY) | set(SIXSHOP) | set(PAGES)
@@ -80,7 +98,14 @@ SHOPIFY_META_DESC: set[str] = {"recto"}
 # 상품 페이지까지 여는 매장 — 목록 API 에 없는 것이 페이지에만 있는 곳(렉토 설명 · PAF 소재·실측 탭).
 # Hyein Seo 는 목록 API 글에 혼용률(159벌 중 158)과 실측표(149)가 다 있어 열지 않는다. 페이지를
 # 여는 만큼 매장에 짐이 되고, 봇 이름으로 연 상품 페이지에는 매장이 429 를 준다(2026-09-23 실측).
-SHOPIFY_PAGES: set[str] = {"recto", "post-archive-faction"}
+# 2026-10-01 thug-club(소재 · 세탁 탭 + 실측 <table>) · sansan-gear(실측 창)도 실측이 페이지에만 있다 — body_html 로
+# 실측표가 읽힌 상품이 589벌 · 345벌 중 0벌이었다(crawl_shopify.page_size_html 주석).
+SHOPIFY_PAGES: set[str] = {"recto", "post-archive-faction", "thug-club", "sansan-gear"}
+
+# 남의 브랜드도 같이 파는 Shopify 매장 — 이 태그(소문자)가 붙은 상품만 걷는다(편집숍은 자체 상품만 — 사람 결정 2026-09-28).
+# sansan-gear 는 345벌 중 27벌이 러닝 브랜드 TOJI(vendor TOJI · 태그 toji — 「TOJI의 다용도 하프 슬리브 티셔츠」,
+# CNOC 물병)다. 자체 상품 318벌에는 모두 「san san gear」 태그가 있다(협업 SAN SAN X SEALSON · YUMINHA 포함, 2026-10-01).
+SHOPIFY_OWN_TAG: dict[str, str] = {"sansan-gear": "san san gear"}
 
 # 걷기는 하지만 앱에는 아직 안 내보내는 매장 — export_app_data 가 뺀다.
 # 렉토·Hyein Seo·PAF 는 첫 판에서 값·사진·품절은 찼지만 설명·소재·실측이 덜 찼다: 렉토는 진짜 상품
