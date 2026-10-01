@@ -829,16 +829,42 @@ def parse_girth_decimal(text: str) -> tuple[list[str], dict[str, list]] | None:
         if len(xs) < 3 or xs != sorted(set(xs)) or not all(20 <= x <= 52 for x in xs):
             continue
         cols: dict[str, list] = {}
+        pend = None                                # 값 없이 라벨만 선 줄(「,허벅지둘레」) — 다음 줄의 값이 그 라벨 것이다
         for l2 in lines[i + 1:i + 16]:
             for a, b in _GD_TYPO:
                 l2 = l2.replace(a, b)
             toks = [t.strip("|«»()[]'\"“”,;") for t in l2.split()]
             toks = [t for t in toks if t]
             j = next((k for k, t in enumerate(toks) if canon_label(t)), None)
-            if j is None:
+            if j is not None and j == len(toks) - 1:
+                pend = toks[j]
                 continue
+            if j is None:
+                # 라벨이 앞 줄에 따로 섰고 이 줄은 머리에 잡음 + 값만(코덱스 017 · concepts1one 30561 「ow 110% iia] =~ 629 B41 654 …」).
+                # 끝에서부터 값 칸을 사이즈 수만큼만 모은다. 사이에 깨진 토막 하나(「B41」)는 빈칸으로 — 그 칸은 짐작하지 않는다.
+                if not pend:
+                    continue
+                run: list = []
+                bad = 0
+                for t in reversed(toks):
+                    if len(run) == len(names):
+                        break
+                    if t in ("-", "–", "—", "_", "=", "=~", "==", "~"):
+                        run.append("-")
+                    elif re.fullmatch(r"\d{2,4}(?:\.\d{1,2})?", t):
+                        run.append(t)
+                    elif re.fullmatch(r"[A-Za-z]\d{2,3}|\d{2,3}[A-Za-z]", t) and bad == 0:
+                        run.append("-")
+                        bad += 1
+                    else:
+                        break
+                raw, pend = pend, None
+                if len(run) != len(names):
+                    continue
+                toks, j = [raw] + run[::-1], 0
             raw = toks[j]
             lab = canon_label(raw)
+            pend = None
             cells: list = []
             for t in toks[j + 1:]:
                 pm = _GD_PAIR.match(t)
@@ -1290,6 +1316,12 @@ def _ns_cols(cols: dict[str, tuple[str, list[str]]], basis: str | None) -> dict[
     girthy = lambda c: c in GIRTH_MIN and c != "어깨"
     proven = basis == "둘레" and any(girthy(c) and "둘레" not in lab and float(x) >= GIRTH_MIN[c]
                                     for c, (lab, vals) in cols.items() for x in vals)
+    # 매장이 라벨에 「가슴둘레 · 밑단둘레」라고 **스스로** 적었으면 그것이 증거다 — 그 칸은 부르는 쪽이 이미 접어 문턱 아래로
+    # 내려가 위 검사에 안 걸렸고, 그래서 같은 표의 소매부리 18 이 그대로 남았다(코덱스 017 · ostkaka 1981, 2026-10-01).
+    # 다만 **소매단에만** 쓴다 — 같은 매장이 「둘레 기준」이라 적고도 소매통은 단면으로 잰다(2395 소매통 19 · 20: 둘레면 팔통
+    # 단면 9.5 라 사람 팔이 안 들어간다). 소매통이 함께 있으면 그 소매통도 둘레(_NS_SLEEVE_GIRTH 이상)일 때만 접는다.
+    cuff_proven = basis == "둘레" and any(girthy(c) and "둘레" in lab for c, (lab, _) in cols.items()) and (
+        "소매통" not in cols or any(float(x) >= _NS_SLEEVE_GIRTH["소매통"] for x in cols["소매통"][1]))
     out: dict[str, list[float]] = {}
     for c, (lab, vals) in cols.items():
         fv: list[float | None] = []
@@ -1299,7 +1331,8 @@ def _ns_cols(cols: dict[str, tuple[str, list[str]]], basis: str | None) -> dict[
             # 단면으로는 나오기 어려운 값(_NS_SLEEVE_GIRTH 이상)만 접는다.
             if basis != "단면" and "둘레" not in lab and (
                     (girthy(c) and (v >= GIRTH_MIN[c] or proven))
-                    or (c in _NS_SLEEVE_GIRTH and (v >= _NS_SLEEVE_GIRTH[c] or proven))):
+                    or (c in _NS_SLEEVE_GIRTH and (v >= _NS_SLEEVE_GIRTH[c] or proven))
+                    or (c == "소매단" and cuff_proven)):
                 lo, hi = RANGES.get(c, (3, 200))
                 y = round(v / 2, 1)
                 fv.append(y if lo <= y <= hi else None)
