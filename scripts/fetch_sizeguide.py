@@ -131,6 +131,16 @@ def text_in(html: str) -> list[str]:
     soup = BeautifulSoup(html, "lxml")
     for t in soup(["script", "style", "noscript"]):
         t.decompose()
+    # 카페24 사이즈가이드 창에서 **상품마다** 다른 글은 `.userGuide` 칸 하나다. 나머지는 매장 공용 나라별
+    # 환산표(KR·US·JP… 표가 아니라 div 격자라 칸 하나가 한 줄로 떨어진다)다. saintpain 은 그 환산표 줄이
+    # 수백 줄인데 대부분 「44 (85)」「9-11」처럼 짧아서 아래의 공용 줄 거르기(8자 이상만)를 빠져나가,
+    # 상품 실측 「M / 총장 70.5 어깨 47 …」(4713)이 그 밑에 묻힌 채 저장됐다(2026-10-01, 302벌 전부).
+    # 그 칸에 숫자가 있으면 그 칸만 읽는다 — cayl 도 표가 이 칸 안에 있다(cls/html2/cayl_sg_3766 확인).
+    # 칸이 비었거나(displaynone · 4455) 없는 스킨은 예전처럼 창 전체를 읽는다.
+    ug = [u for u in soup.select(".userGuide")
+          if "displaynone" not in (u.get("class") or []) and re.search(r"\d", u.get_text(" "))]
+    if ug:
+        soup = BeautifulSoup("".join(str(u) for u in ug), "lxml")
     out = []
     for tb in soup.find_all("table"):
         for tr in tb.find_all("tr"):

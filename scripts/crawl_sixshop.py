@@ -105,8 +105,16 @@ def front_back(text: str) -> str:
     return "\n".join(out)
 
 
-_SIZE_ROW = re.compile(r"\bSIZE\s*([A-Z0-9]{1,4})\s*[:：]\s*(.*?)(?=\bSIZE\s*[A-Z0-9]{1,4}\s*[:：]|$)", re.I | re.S)
-_PAIR = re.compile(r"([A-Za-z가-힣][A-Za-z가-힣 .]*?)\s*[-:：]\s*(\d+(?:[.,]\d+)?)")
+# 줄 이름 — 「SIZE 1:」「SIZE M:」, 그리고 한 사이즈뿐인 옷의 「ONE SIZE:」「FREE SIZE:」.
+# 칸 사이 줄표는 하이픈만이 아니다 — 메리메이드 조거 팬츠(5517975)의 셋째 줄이 「OUTER SEAM –104」(en dash)라
+# 그 줄만 칸이 하나 모자랐고, 「줄마다 칸 이름이 같아야 한다」에 걸려 표 전체를 버렸다. 「ONE SIZE:」는
+# 줄 이름으로 안 잡혀 타이 팬츠(4870907)의 「ONE SIZE: WAIST - 132 / HIP - 160 / OUTER SEAM - 82」를
+# 통째로 놓쳤다(2026-10-01).
+_ROW_HEAD = r"(?:\bSIZE\s*[A-Z0-9]{1,4}|\b(?:ONE|FREE)\s*SIZE)\s*[:：]"
+_SIZE_ROW = re.compile(r"(?:\bSIZE\s*([A-Z0-9]{1,4})|\b((?:ONE|FREE)\s*SIZE))\s*[:：]\s*(.*?)(?=" + _ROW_HEAD + r"|$)",
+                       re.I | re.S)
+_DASH = r"[-–—:：]"
+_PAIR = re.compile(r"([A-Za-z가-힣][A-Za-z가-힣 .]*?)\s*" + _DASH + r"\s*(\d+(?:[.,]\d+)?)")
 
 
 # 「SIZE 1: WAIST - 79 / HIP - 112 / HEM - 68 / OUTER SEAM - 53 SIZE 2: …」(메리메이드 JSON-LD)를 **칸 이름째로**
@@ -120,19 +128,40 @@ _EN_LABEL = {"outer seam": "총장", "outseam": "총장", "os": "총장", "total
              "cb": "총장", "center back": "총장", "centre back": "총장", "shoulders": "어깨",
              "bust": "가슴", "hips": "엉덩이", "front rise": "밑위", "sleeve length": "소매길이"}
 # 「CB - 88/93」처럼 한 칸에 값이 둘 — 앞뒤인지 두 길이인지 모른다. 그 칸만 통째로 뺀다.
-_DUAL = re.compile(r"[A-Za-z][A-Za-z .]*?\s*[-:：]\s*\d+(?:[.,]\d+)?\s*/\s*\d+(?:[.,]\d+)?")
+_DUAL = re.compile(r"[A-Za-z][A-Za-z .]*?\s*" + _DASH + r"\s*\d+(?:[.,]\d+)?\s*/\s*\d+(?:[.,]\d+)?")
 _GIRTHABLE = {"가슴", "허리", "엉덩이", "밑단", "허벅지"}
+
+
+# 「0사이즈 - 허리37 허벅지31 밑위34 밑단26 총장103」 — 한 줄에 한 사이즈, 한글 라벨에 값이 붙는다(폴리테루 캡션).
+# 캡션을 설명에 넣자 이 글이 처음 들어왔는데, 아래 from_ocr 되돌림은 첫 줄만 읽어 「허리 [37]」처럼 **한 사이즈
+# 표**를 만들었다 — 앱에서 프리사이즈처럼 뜨는 틀린 표다(받아 둔 9619435 · 9463206 으로 확인, 2026-10-01).
+# 그래서 줄마다 읽어 사이즈를 다 받는다. 한글 라벨은 매장이 단면으로 적으므로 둘레 짐작(아래 _GIRTHABLE)은
+# 값이 무리를 넘을 때만 한다.
+_KO_ROW = re.compile(r"^[ \t]*([A-Za-z0-9]{1,4})[ \t]*(?:사이즈|size)[ \t]*[-–—:：][ \t]*(.+?)[ \t]*$", re.I | re.M)
+_KO_PAIR = re.compile(r"([가-힣]{1,6})[ \t]*[:：]?[ \t]*(\d{1,3}(?:\.\d{1,2})?)(?![\d.])")
 
 
 def size_dict(text: str) -> tuple[list[str] | None, dict[str, list[float]]]:
     import size_from_ocr
     rows = []
-    for name, body in _SIZE_ROW.findall(text or ""):
+    one = False
+    for name, one_name, body in _SIZE_ROW.findall(text or ""):
         body = _DUAL.sub(" ", body)
         pairs = [(re.sub(r"\s+", " ", k.strip().lower()), float(v.replace(",", "."))) for k, v in _PAIR.findall(body)]
         if len(pairs) >= 2:
-            rows.append((name, pairs))
-    if len(rows) < 2 or len({tuple(k for k, _ in p) for _, p in rows}) != 1:
+            rows.append((name or re.sub(r"\s+", " ", one_name.upper()), pairs))
+            one = one or bool(one_name)
+    korean = False
+    if not rows:
+        for name, body in _KO_ROW.findall(text or ""):
+            pairs = [(k, float(v)) for k, v in _KO_PAIR.findall(body)]
+            # 줄 전체가 「라벨값」으로만 되어 있어야 한다 — 문장 속의 「1사이즈 - 여유있게 …」를 표로 읽지 않게
+            if len(pairs) >= 2 and not re.sub(r"[가-힣]{1,6}[ \t]*[:：]?[ \t]*\d{1,3}(?:\.\d{1,2})?(?:cm)?|[\s/,|]", "", body):
+                rows.append((name, pairs))
+        korean = bool(rows)
+    # 줄 하나는 「ONE SIZE」·「FREE SIZE」일 때만 받는다 — 「SIZE 1:」 한 줄만 잡혔으면 나머지 줄을 놓친 것이다.
+    if not rows or (len(rows) < 2 and not one) or (one and len(rows) != 1) \
+            or len({tuple(k for k, _ in p) for _, p in rows}) != 1:
         return None, {}
     cols: dict[str, list[float]] = {}
     for j, (k, _) in enumerate(rows[0][1]):
@@ -149,7 +178,7 @@ def size_dict(text: str) -> tuple[list[str] | None, dict[str, list[float]]]:
         if lab in _GIRTHABLE:
             if any(v > hi for v in vals):
                 vals = [v / 2 for v in vals]
-            elif all(v / 2 >= lo for v in vals):
+            elif not korean and all(v / 2 >= lo for v in vals):
                 continue
         if all(lo <= v <= hi for v in vals):
             cols[lab] = [round(v, 1) for v in vals]
@@ -235,13 +264,29 @@ def parse_page(html_text: str, url: str, slug: str, now: str) -> dict | None:
                        html_text, re.S)
         raw = mr.group(1).replace('\\"', '"') if mr else ""
     ld_text = re.sub(r"\s*˙\s*", "\n", html.unescape(raw)).strip()
+    # 상품 머리 옆의 짧은 소개(#shopProductCaption) — 메리메이드는 FABRICS · DETAILS · SIZING(실측) · MODEL 을
+    # 여기에 둔다. JSON-LD description 이 이 글과 같지만 줄바꿈이 다 빠져 있고, 매장 글의 인치 표기
+    # (「(57"-58")」)가 따옴표를 깨 JSON-LD 가 통째로 안 읽히는 벌도 있다. 그런데 우리는 상세 칸
+    # (#productDescriptionDetailPage)이 짧을 때만 JSON-LD 를 앞에 붙였다 — 조거 팬츠(5517975)·타이 팬츠
+    # (4870907)는 상세 칸에 한·영 소개 두 문단이 있어 그 조건에 안 걸렸고, 실측 「SIZE 1: WAIST - 81 /
+    # HIP - 116 / OUTER SEAM - 101」이 설명에서 통째로 빠졌다(분류 결과 merely-made 100벌, 2026-10-01).
+    # 캡션은 줄이 살아 있으니 JSON-LD 대신 이것을 쓰고, 상세 칸에 이미 들어 있지 않으면 **늘** 붙인다.
+    # 붙이는 자리: 상세 칸이 비었거나 짧으면 앞(예전 JSON-LD 규칙과 같다), 아니면 상세 칸의 배송·교환
+    # 공지 **앞** — 소개 문단 → 캡션(소재·실측) → 공지 차례가 되고, product_desc 가 공지를 걷어도 남는다.
+    # 폴리테루·고낙도 캡션에 소재·실측을 두는 벌이 있다(받아 둔 페이지로 확인, 2026-10-01).
+    cap_text = re.sub(r"[ \t]*˙[ \t]*", "", _desc_text(s.select_one("#shopProductCaption"))).strip()
+    _flat = lambda x: re.sub(r"[\s˙]+", " ", x or "").strip()
+    add = cap_text if len(cap_text) >= 30 else ld_text
     if not text:
-        text = ld_text
-    elif (_NOTICE_FIRST.match(text) or len(_NOTICE_ANY.split(text, 1)[0].strip()) < 120) \
-            and len(ld_text) >= 30 and ld_text not in text:
-        # 길이는 **공지 앞까지만** 잰다 — 메리메이드 영문 상세 칸은 「상품 이름 · PRODUCT DETAILS · Shipping
-        # information …」이라 전체는 길어도 소개가 없다(코덱스 011 표본을 만들다 잡음, 2026-09-28).
-        text = ld_text + "\n" + text
+        text = add
+    elif len(add) >= 30 and _flat(add) not in _flat(text):
+        head = _NOTICE_ANY.split(text, 1)[0]
+        if _NOTICE_FIRST.match(text) or len(head.strip()) < 120:
+            # 길이는 **공지 앞까지만** 잰다 — 메리메이드 영문 상세 칸은 「상품 이름 · PRODUCT DETAILS · Shipping
+            # information …」이라 전체는 길어도 소개가 없다(코덱스 011 표본을 만들다 잡음, 2026-09-28).
+            text = add + "\n" + text
+        elif add is cap_text:
+            text = head.rstrip() + "\n" + cap_text + ("\n" + text[len(head):].lstrip() if text[len(head):].strip() else "")
     detail_imgs = []
     if desc_el is not None:
         for im in desc_el.find_all("img"):

@@ -298,6 +298,581 @@ def template_pass(rows: dict, ocr: dict, out: dict) -> Counter:
 
 
 
+# ── 느슨한 값 줄 읽기 — 매장 틀 갈래의 둘째 판(2026-10-01) ──────────────────────────────────────────
+# template_pass 는 이름이 줄 맨 앞에 서고 값이 깨끗한 줄만 읽는다. 창고에 남은 것은 그보다 한 겹 더 깨진 줄이다:
+#   beyond-closet 8799   「| 시 MEDUM 54596377」 · 「lake 056 61 64 79」  — 이름이 깨지고 수가 붙었다
+#   beyond-closet 10453  「israel 61.5 66.5 55.25 69.5」 — 이름(MEDIUM)이 「MED」 「IUM」 두 줄로 갈렸다
+#   till-i-die 7000      「FREE 61 = 51 86(래글런) 13.5」 — 「=」·「-」가 빈칸, 칸 뒤에 덧말
+#   till-i-die 7146      「66」 / 「FREE (뒷목점 기준) 56 63.5 55 14.5」 — 첫 칸이 두 줄로 나뉘었다
+#   ronron 2328          「free xX 53cm 48cm …」 — X 칸이 빈칸, 머리줄의 「OFF」(팔통)가 깨져 칸 하나를 못 읽는다
+# 줄은 더 너그럽게 읽되 **표 하나가 받아들여지는 문은 더 좁힌다**(틀린 값이 빈칸보다 나쁘다):
+#   · 칸 수가 머리줄(또는 매장 틀)과 정확히 같아야 하고, 값이 시작된 뒤에 모르는 낱말이 끼면 그 줄을 버린다.
+#   · 범위를 벗어난 칸이 하나라도 있으면 그 줄을 버린다(칸을 밀어 맞추지 않는다).
+#   · 사이즈가 커지면 값이 줄지 않아야 하고, 부위끼리 말이 돼야 한다(_lz_sane).
+#   · 깨진 이름은 **상품 옵션의 차례**로만 메운다(앞줄 이름의 다음 옵션 · 뒷줄 이름의 앞 옵션). 옵션이 없으면 버린다.
+#   · 붙은 수(「54596377」)는 두 자리씩 끊어 칸 수와 맞고, 같은 표의 멀쩡한 이웃 줄과 칸마다 차례가 맞고 8cm 안일 때만.
+#   · 머리줄을 그대로 쓰는 것은 머리줄의 모든 토막이 라벨이거나 표식일 때뿐 — 모르는 토막(깨진 라벨)이 하나라도 있으면
+#     값 줄 하나가 칸을 잃었을 때 칸 수가 우연히 맞아 한 칸씩 밀린다. 그때는 매장 틀(_lz_learn)을 빌린다.
+#   · 매장마다 켤지는 template_pass 와 같은 잣대로 스스로 정한다 — 이미 선 OCR 실측과 10벌 넘게 맞춰 90% 넘게 맞아야.
+_LZ_NAMES = {"XXS": "XXS", "XS": "XS", "S": "S", "SMALL": "S", "M": "M", "MEDIUM": "M", "MEDUM": "M",
+             "L": "L", "LARGE": "L", "XL": "XL", "XLARGE": "XL", "X-LARGE": "XL", "XXL": "XXL", "XX-LARGE": "XXL",
+             "FREE": "FREE", "F": "F", "OS": "OS"}
+_LZ_RANK = {"XXS": 0, "XS": 1, "S": 2, "M": 3, "L": 4, "XL": 5, "XXL": 6}
+_LZ_NUM = re.compile(r"^\d{1,3}(?:\.\d{1,2})?$")
+_LZ_BLANK = re.compile(r"^(?:[-=–—_^]{1,2}|[xX×]{1,2})$")
+_LZ_GLUED = re.compile(r"^\d{4,8}$")
+_LZ_NOTE = "⟨⟩"
+_LZ_SUFFIX = {"넓이", "너비", "단면", "길이", "기장", "둘레", "통", "부리"}
+_LZ_VARIANT = re.compile(r"(?i)겉면|속면|겉감|안감|숏|롱|short|long|regular|상의|하의|세트|\bset\b|\btype|ver\b")
+_LZ_STRIP = ",«»“”'\"‘’|;!"
+_LZ_HEAD_BAD = re.compile(r"착용|오차|조절|추천|권장|기준이며|모델|model|height|키\s*\d", re.I)
+_LZ_STOP = re.compile(r"(?i)^\s*[*※]|^\s*-\s*\S|오차|세탁|^\s*model|모델|착용|사이즈는|fabric|notice|품질")
+_LZ_MARK = re.compile(r"^(?:[^0-9A-Za-z가-힣]+|.|[(\[]?[0-9①-⑳@©®O]{1,2}[)\]]?|0[1-9]|(?:사이즈|sizes?|size\s*info)\W*\w{0,5}\W*"
+                      r"|\(?\s*(?:cm|em|단면|단위\W*\w*|오비포함)\s*\)?)$", re.I)
+
+
+def _lz_label(tok: str) -> str | None:
+    # 칸 표식(「A어깨」 「ㅅ어깨」 「0ㅁ총장」)은 **한글 라벨 앞에서만** 뗀다. 영문 낱말에서 떼면 「CHEST」가 「HEST」가 되어
+    # 라벨을 잃고, 그 자리를 다음 낱말과 붙여 읽어 머리줄이 「깨끗한」 세 칸이 됐다(dnsr 2177 「LENGTH SHOULDER CHEST
+    # SLEEVES」 → 가슴 48 이 소매길이 48 로 섰다, 2026-10-01 창고 대조). _tpl_labels 는 아직 옛 꼴이다.
+    tok = re.sub(r"^[A-Eㅅㄷㅁ0-9@©&«^.·:\-]+(?=[가-힣])", "", tok)
+    if not tok:
+        return None
+    lab = canon_label(tok)
+    # 「허리너비」 「힙너비」 「밑단너비」(raive) — 너비는 단면이다. 한 글자 「힙」은 뒤에 한글이 붙으면 canon_label 이 안 받는다.
+    if lab is None and tok.endswith("너비") and len(tok) > 2:
+        lab = canon_label(tok[:-2])
+    return lab
+
+
+def _lz_head(line: str, slots: bool = False):
+    """머리줄의 라벨과, 토막이 전부 라벨이거나 표식인지(깨끗한지). slots=True 면 칸으로 보이는 토막 수(라벨 + 모르는 토막)도."""
+    s = re.sub(r"\([^()]{0,20}\)", " ", line)            # 「허리(단면)」 「사이즈(cm)」의 괄호 덧말
+    toks = join_multiword(s).split()
+    labs: list[str] = []
+    clean = True
+    n_slot = 0
+    i = 0
+    while i < len(toks):
+        t = toks[i].strip(_LZ_STRIP)
+        lab = _lz_label(t) if t else None
+        # 「어깨 넓이」 「총 기장」 「소매 통」 — 둘째 토막이 홀로 라벨이 아닐 때만 붙인다(「SHOULDER CHEST」는 두 칸이다)
+        if i + 1 < len(toks) and not _lz_label(toks[i + 1].strip(_LZ_STRIP)):
+            lab2 = _lz_label(t + toks[i + 1].strip(_LZ_STRIP))
+            # 같은 라벨로 읽히면 둘째 토막이 아는 꼬리말일 때만 삼킨다 — 「밑단 Ss」의 Ss 는 깨진 다음 칸(총장)이다
+            if lab2 and (lab is None or lab2 != lab or toks[i + 1].strip(_LZ_STRIP) in _LZ_SUFFIX):
+                lab, i = lab2, i + 1
+        if lab:
+            n_slot += 1
+            if lab in labs:
+                clean = False
+            else:
+                labs.append(lab)
+        elif t and re.match(r"(?i)^(?:사이즈|size)", t):
+            if not labs:
+                n_slot = 0                # 「사이즈」 앞의 부스러기(「Shs” rc) 사이즈 Ao BAS CAH DSB」)는 칸이 아니다
+        elif t and not _LZ_MARK.match(t):
+            clean = False
+            n_slot += 1
+        i += 1
+    return (labs, clean, n_slot) if slots else (labs, clean)
+
+
+def _lz_cell(t: str):
+    """토막 하나 → 칸(수 글자 · None 빈칸 · ("G", 붙은 수)) · 덧말 표식 · False(칸이 아니다)."""
+    if t == _LZ_NOTE:
+        return _LZ_NOTE
+    m0 = re.match(r"^0(\d{2}(?:\.\d{1,2})?)$", t)         # 「056」 「059」 — 앞에 붙은 0 은 칸 금
+    if m0:
+        t = m0.group(1)
+    if _LZ_NUM.match(t):
+        return t
+    if _LZ_BLANK.match(t):
+        return None
+    if _LZ_GLUED.match(t):
+        return ("G", t)
+    return False
+
+
+def _lz_row(line: str):
+    """값 줄 하나 → (이름 | None, 칸 목록) | None. 칸: 수 글자 · None(빈칸) · ("G", 붙은 수) · "SLOT"(위 줄에 올라간 값 자리).
+
+    이름이 있으면 이름 **뒤의 토막이 전부** 칸이어야 한다. 이름이 없으면 줄 **끝에서부터 이어진** 칸만 받는다 —
+    줄 머리의 부스러기에 수가 섞여 있다(beyond-closet 8799 「° 4 | | lake 056 61 64 79」의 4). 그 경우에도 칸 수가
+    머리줄과 맞아야 쓰이므로 부스러기가 칸을 먹었으면 줄째 떨어진다. 이름 없는 줄은 「-」로 시작하지 못한다 —
+    쓰레기인지 빈칸인지 모른다(11415 「(eM - 59 60 63」은 어깨 53 이 「-」로 깨진 것이다). 이름 뒤의 「-」만 빈칸으로
+    받는다(8932 「MEDIUM - 65 78.5 76」 래글런)."""
+    s = re.sub(r"\(\s*\d{2,3}\s*[-~]\s*\d{2,3}\s*\)", " ", line)    # 「(95-100)」 국내 호칭
+    s = re.sub(r"\([^()]{0,30}\)", f" {_LZ_NOTE} ", s)
+    s = re.sub(r"(?<=\d):(?=\d)", ".", s)
+    s = re.sub(r"(?i)(?<=\d)\s*cm\b", " ", s)
+    toks = [t.strip(_LZ_STRIP) for t in s.split()]
+    toks = [t for t in toks if t]
+    name, start = None, None
+    for i, t in enumerate(toks):
+        if t.upper() in _LZ_NAMES:
+            name, start = _LZ_NAMES[t.upper()], i + 1
+            break
+    if name is None:
+        start = len(toks)
+        while start > 0 and _lz_cell(toks[start - 1]) is not False:
+            start -= 1
+        while start < len(toks) and _lz_cell(toks[start]) in (None, _LZ_NOTE):
+            start += 1
+        if start >= len(toks):
+            return None
+        # 줄 머리가 사이즈가 아니라 옷 조각 · 면 이름이면 그 줄은 사이즈 줄이 아니다 — 옵션 차례로 메우면 틀린다
+        # (noirer 1948 리버시블 스커트 「겉면 (짧은) 44.5 33.0 …」 / 「속면 (긴) …」, till-i-die 7064 「가디건 …」 「티셔츠 …」).
+        pre = " ".join(toks[:start])
+        if _SET_PIECE.search(pre) or _LZ_VARIANT.search(pre):
+            return None
+    cells: list = []
+    for t in toks[start:]:
+        c = _lz_cell(t)
+        if c is False:
+            return None                   # 값 사이에 모르는 낱말 — 칸이 어떻게 끊겼는지 알 수 없다
+        if c == _LZ_NOTE:
+            if not cells and name:
+                cells.append("SLOT")      # 이름 바로 뒤의 덧말 = 값이 윗줄로 올라간 칸(till-i-die 7146)
+            continue                      # 그 밖의 덧말은 앞 칸에 붙은 말(「86(래글런)」)
+        cells.append(c)
+    return name, cells
+
+
+def _lz_blocks(text: str):
+    """(머리줄, [몸 줄…]) — 머리줄은 「사이즈/size」가 든 짧은 줄이거나 라벨이 셋 넘게 깨끗이 읽히는 줄."""
+    lines = [ln.strip() for ln in text.splitlines()]
+    for i, ln in enumerate(lines):
+        if not ln or len(ln) > 160 or _LZ_HEAD_BAD.search(ln):
+            continue
+        labs, clean = _lz_head(ln)
+        if not (re.search(r"(?i)사이즈|size", ln) or (clean and len(labs) >= 3)):
+            continue
+        body = []
+        for l2 in lines[i + 1:i + 13]:
+            if _LZ_STOP.search(l2):
+                break
+            h2, c2 = _lz_head(l2)
+            if len(h2) >= 2 and not re.search(r"\d", l2):
+                if body:
+                    break
+                continue                  # 영문 둘째 머리줄(「(cm) Total Length Shoulder Width …」)
+            body.append(l2)
+        yield ln, labs, clean, body
+
+
+def _lz_rows(body: list[str]) -> list[tuple]:
+    """몸 줄 → [(이름|None, 칸)]. 이름만 선 줄은 다음 값 줄의 이름이 되고, 수 하나만 선 줄은 다음 줄 SLOT 의 값이 된다."""
+    out, pend, lone = [], None, None
+    for ln in body:
+        r = _lz_row(ln)
+        if r is None:
+            continue
+        nm, cells = r
+        if not cells:
+            pend = nm
+            continue
+        if nm is None and len(cells) == 1 and isinstance(cells[0], str) and cells[0] != "SLOT":
+            lone = cells[0]                # 「66」 — 두 줄로 나뉜 칸의 윗줄
+            continue
+        if "SLOT" in cells:
+            if lone is None:
+                continue
+            cells = [lone if c == "SLOT" else c for c in cells]
+        out.append((nm or pend, cells))
+        pend, lone = None, None
+    return out
+
+
+def _lz_opt_names(opts: str) -> list[str]:
+    """옵션 「MEDIUM(95-100) | LARGE(100-105)」 → [M, L]. 옵션이 **전부** 사이즈 이름일 때만 — 사이즈 말고 다른 갈래가
+    섞이면(drawfit 4348 「S | M | L | XS_short P1 | S_short P2 | M_short P3」) 표의 줄이 어느 옵션인지 알 수 없다.
+    그 표는 P1(XS 숏) · P2 · P3 줄이었는데 S · M · L 로 메워졌다(2026-10-01 창고 대조에서 잡음)."""
+    out = []
+    for o in (opts or "").split("|"):
+        u = re.sub(r"[\[(（].*$", "", o).strip().upper().replace(" ", "")
+        if not u:
+            continue
+        nm = _LZ_NAMES.get(u)
+        if not nm:
+            return []
+        out.append(nm)
+    return out
+
+
+def _lz_sane(cols: dict, n: int) -> bool:
+    """부위끼리 말이 되는가 — 칸이 밀리면 이게 먼저 깨진다(밑단 > 허벅지, 총장 < 밑위 …)."""
+    def at(c, i):
+        v = cols.get(c)
+        return v[i] if v and isinstance(v[i], (int, float)) else None
+    for i in range(n):
+        pairs = (("밑단", "허벅지", 3), ("허벅지", "엉덩이", 0), ("허리", "엉덩이", 2), ("소매단", "소매통", 0),
+                 ("암홀", "가슴", 0), ("소매통", "가슴", 0), ("어깨", "가슴", 8))
+        for a, b, tol in pairs:
+            x, y = at(a, i), at(b, i)
+            if x is not None and y is not None and x > y + tol:
+                return False
+        # 어깨가 가슴의 6할도 안 되면 수 하나가 잘못 읽힌 것이다(beyond-closet 10750 「fee: 28 63 64 72」 — 68 이 28 로)
+        x, y = at("어깨", i), at("가슴", i)
+        if x is not None and y is not None and x < 0.6 * y:
+            return False
+        x, y = at("밑위", i), at("총장", i)
+        if x is not None and y is not None and y < x + 10:
+            return False
+    return True
+
+
+def _lz_read(text: str, group: str, templates: dict, opts: list[str]):
+    """글 안의 표를 모두 읽어 **라벨이 가장 많은 표**를 고른다. ronron 은 상세 맨 위에 칸 몇 개만 추린 요약 줄
+    (「- 어깨 가슴 소매 / Free 44 52 27」)을 싣는데, 그 머리줄의 「소매」 자리 값이 실은 암홀이다 — 아래의 일곱 칸
+    본 표(「어깨 가슴 밑단 팔길이 팔통 암홀 총기장」)와 대 보면 드러난다. 사람이 옮긴 값(manual_sizes)과 대조해
+    요약 줄을 먼저 집은 13벌이 전부 틀렸다(2026-10-01). 라벨 수가 같은 표 둘이 값으로 어긋나면 고르지 않는다."""
+    found = []
+    for got in _lz_read_all(text, group, templates, opts):
+        found.append(got)
+    if not found:
+        return None
+    found.sort(key=lambda g: (len(g[1]), len(g[0])), reverse=True)
+    best = found[0]
+    # 글 어딘가에 이름 붙은 값 줄이 고른 표보다 칸이 많으면, 못 읽은 더 큰 본 표가 있다는 뜻이다 — 고른 것은 요약 줄일
+    # 수 있고 요약 줄의 머리말은 믿을 수 없다(ronron 7290: 본 표 「밑단 64」가 범위 밖이라 떨어지자 요약 줄 「가슴 팔길이
+    # 밑단 / 68 60 24」가 남았는데 그 24 는 팔통이다). 그럴 때는 고르지 않는다.
+    wide = max((len(c) for _, _, _, body in _lz_blocks(text) for nm, c in _lz_rows(body)
+                if nm and not any(isinstance(x, tuple) for x in c)), default=0)
+    if wide > _lz_width(best):
+        return None
+    for other in found[1:]:
+        if len(other[1]) < len(best[1]):
+            break
+        if _tpl_agree(other[:2], {"size_names": best[0], "sizes": best[1]}) is False:
+            return None
+    return best[0], best[1]
+
+
+def _lz_width(got: tuple) -> int:
+    return got[2] if len(got) > 2 else len(got[1])
+
+
+def _lz_read_all(text: str, group: str, templates: dict, opts: list[str]):
+    for head, hlabs, clean, body in _lz_blocks(text):
+        rs = _lz_rows(body)
+        if not rs:
+            continue
+        width = lambda c: len(c)
+        if clean and len(hlabs) >= 2:
+            cand = [len(hlabs)]
+        else:
+            cand = [w for w, _ in Counter(width(c) for _, c in rs if not any(isinstance(x, tuple) for x in c)).most_common()
+                    if templates.get((group, w))]
+            cand += [w for w in sorted({t[1] for t in templates if t[0] == group}) if w not in cand]
+        for n in cand:
+            if clean and len(hlabs) == n:
+                labs = hlabs
+            else:
+                tpl = templates.get((group, n))
+                if not tpl or tpl[1] < _TPL_MIN_SEEN or tpl[2] < _TPL_MIN_SHARE:
+                    continue
+                # 머리줄에서 라벨을 하나도 못 읽었으면(머리줄이 잘렸거나 통째로 깨짐) 매장 틀이 거의 늘 같을 때만 —
+                # till-i-die 다섯 칸 표는 81% 가 「… 소매단」 이고 나머지가 「… 소매통」이라 끝 칸을 가를 수 없다(5916).
+                # 또 머리줄 자리에 깨진 토막이 칸 수만큼 서 있어야 한다 — 「SIZE」 한 낱말뿐인 줄은 머리줄이 아예 없는
+                # 것이라 이 표가 그 틀인지 알 길이 없다(mardi-mercredi 8177 반바지: 매장 틀은 「… 밑단」인데 형제 표는 「… 밑위」).
+                if not hlabs and (tpl[2] < 0.9 or _lz_head(head, slots=True)[2] != n):
+                    continue
+                labs = tpl[0]
+                it = iter(labs)
+                if not all(any(x == y for y in it) for x in hlabs):
+                    continue
+            got = _lz_table(rs, labs, opts)
+            if got:
+                yield (got[0], got[1], len(labs))
+                break
+
+
+def _lz_table(rs: list, labs: list[str], opts: list[str]):
+    n = len(labs)
+    rows = []                                   # (이름|None, 값 목록, 붙은 수였나)
+    for nm, cells in rs:
+        g = [i for i, c in enumerate(cells) if isinstance(c, tuple)]
+        glued = False
+        if g:
+            if len(g) != 1:
+                continue
+            k = n - (len(cells) - 1)            # 붙은 수가 메워야 할 칸 수
+            digits = cells[g[0]][1]
+            if k < 2 or len(digits) != 2 * k:
+                continue
+            cells = cells[:g[0]] + [digits[j:j + 2] for j in range(0, 2 * k, 2)] + cells[g[0] + 1:]
+            glued = True
+        if len(cells) != n:
+            continue
+        vals = [None if c is None else fix_value(lab, c) for lab, c in zip(labs, cells)]
+        # 소수점이 빠진 세 자리(「585」 → 58.5)는 끝자리가 5 일 때만 믿는다 — 이 매장들에서 빠지는 것은 「.5」다.
+        # ronron 플레어 스커트의 「밑단 132」(둘레)가 13.2 로 접혔다(사람 값과 대조, 6915 · 7301 등 7벌).
+        # 밑단은 아예 안 접는다 — 세 자리 밑단은 대개 둘레다(8435 「115」).
+        if any(c is not None and re.fullmatch(r"\d{3}", c) and (c[-1] != "5" or lab == "밑단") and v is not None
+               and v != float(c) for lab, c, v in zip(labs, cells, vals)):
+            continue
+        if any(v is None and c is not None for v, c in zip(vals, cells)):
+            continue                            # 범위 밖 칸 — 줄을 버린다
+        # 빈칸이 절반을 넘으면 빈칸이 아니라 OCR 이 수를 흘린 자리다(beyond-closet 11426 셔츠 「MEDIUM 54 = - 76」 —
+        # 셔츠에 가슴 · 소매가 없을 리 없다). 그런 줄은 다른 칸의 자리도 믿을 수 없다.
+        if sum(v is None for v in vals) * 2 >= n:
+            continue
+        rows.append([nm, vals, glued])
+    if not rows:
+        return None
+    # 깨진 이름 메우기 — 옵션 차례로만
+    if any(r[0] is None for r in rows):
+        if not opts:
+            rows = [r for r in rows if r[0] is not None]
+        else:
+            # 옵션에 없는 이름을 단 줄은 이름을 잘못 읽은 줄이다 — 그 줄만 뺀다(10651 「fF S (95-100) - 65 28 68」, 옵션은 M · L)
+            rows = [r for r in rows if r[0] is None or r[0] in opts]
+            if not rows:
+                return None
+            idx = [opts.index(r[0]) if r[0] is not None else None for r in rows]
+            if all(i is None for i in idx):
+                if len(rows) != len(opts):
+                    return None
+                idx = list(range(len(rows)))
+            for _ in range(len(rows)):
+                for j in range(len(rows)):
+                    if idx[j] is None:
+                        if j > 0 and idx[j - 1] is not None:
+                            idx[j] = idx[j - 1] + 1
+                        elif j + 1 < len(rows) and idx[j + 1] is not None:
+                            idx[j] = idx[j + 1] - 1
+            if any(i is None or not 0 <= i < len(opts) for i in idx):
+                return None
+            for r, i in zip(rows, idx):
+                r[0] = opts[i]
+    elif opts:
+        rows = [r for r in rows if r[0] in opts]
+    if not rows:
+        return None
+    names = [r[0] for r in rows]
+    if len(set(names)) != len(names):
+        return None
+    if len(names) > 1:
+        rk = [_LZ_RANK.get(nm) for nm in names]
+        if None in rk or rk != sorted(rk):
+            return None
+    # 붙은 수를 끊은 줄은 멀쩡한 이웃 줄과 칸마다 차례가 맞고 8cm 안이어야
+    for j, r in enumerate(rows):
+        if not r[2]:
+            continue
+        nb = [(k, o) for k, o in enumerate(rows) if not o[2]]
+        if not nb:
+            return None
+        for k, o in nb:
+            for a, b in zip(r[1], o[1]):
+                if a is None or b is None:
+                    continue
+                if abs(a - b) > 8 or (k > j and a > b + 0.5) or (k < j and a < b - 0.5):
+                    return None
+    cols = {lab: [r[1][i] for r in rows] for i, lab in enumerate(labs)}
+    cols = {c: v for c, v in cols.items() if any(x is not None for x in v)}
+    if any(any(b < a - 0.5 for a, b in zip(*(lambda xs: (xs, xs[1:]))([x for x in v if x is not None]))) for v in cols.values()):
+        return None
+    if not _lz_sane(cols, len(names)):
+        return None
+    # 한 라벨만 사이즈 사이 폭이 유난히 크면(다른 라벨 폭의 세 배 넘고 5cm 넘게) 그 라벨의 어느 칸이 잘못 읽힌 것이다 —
+    # 어느 칸인지 모르니 라벨째 뺀다(beyond-closet 11392 가슴 61 → 68, 사람 값은 61 → 63 · 다른 라벨은 1~2cm 폭).
+    if len(names) >= 2:
+        step = {c: max((b - a for a, b in zip(v, v[1:]) if a is not None and b is not None), default=None)
+                for c, v in cols.items()}
+        for c, st in list(step.items()):
+            others = [x for k, x in step.items() if k != c and x is not None]
+            if st is not None and others and st > 5 and st > 3 * max(statistics.median(others), 0.5):
+                cols.pop(c)
+    cols = clean_ocr(cols)
+    if len(cols) < 2:
+        return None
+    return names, cols
+
+
+def _lz_learn(texts_by_group: dict[str, list[str]]) -> dict:
+    """매장 틀 — 머리줄이 깨끗이 읽히고 값 줄이 전부 그 칸 수인 표에서 라벨 차례를 센다."""
+    cnt: dict = defaultdict(Counter)
+    for g, texts in texts_by_group.items():
+        for t in texts:
+            for head, labs, clean, body in _lz_blocks(t):
+                if not clean or len(labs) < 3:
+                    continue
+                rs = [(nm, c) for nm, c in _lz_rows(body) if nm]
+                if rs and all(len(c) == len(labs) and not any(isinstance(x, tuple) for x in c) for _, c in rs):
+                    cnt[(g, len(labs))][tuple(labs)] += 1
+                    break
+    out = {}
+    for key, c in cnt.items():
+        tpl, seen = c.most_common(1)[0]
+        out[key] = (list(tpl), seen, seen / sum(c.values()))
+    return out
+
+
+def _lz_agree(got: tuple, ent: dict) -> bool | None:
+    """_tpl_agree 와 같되, 이미 선 표에 사이즈 이름이 없고 느슨한 읽기가 줄을 하나만 건졌으면 맞춰 보지 않는다 —
+    어느 사이즈 줄끼리 대야 할지 모른다. 그대로 대면 M 줄과 L 줄을 견줘 「어긋남」으로 셌다(beyond-closet 11309 ·
+    11458 등 9벌, 그 탓에 맞음 89% 로 문턱 밑이었다)."""
+    if not ent.get("size_names") and len(got[0]) < 2:
+        return None
+    return _tpl_agree(got, ent)
+
+
+def loose_pass(rows: dict, ocr: dict, out: dict) -> Counter:
+    """template_pass 가 못 읽은 옷을 느슨한 줄 읽기로 한 번 더 — 매장별로 켤지는 이미 선 OCR 실측과 맞춰 보고 정한다."""
+    group = lambda r: "bottom" if r.get("category") in _TPL_BOTTOM else "top"
+    by_brand: dict = defaultdict(list)
+    for k, r in rows.items():
+        if ocr.get(k) and r.get("category") in GARMENT_LABELS:
+            by_brand[k[0]].append((k, r))
+    # 색만 다른 형제가 이미 제대로 된 표(라벨 둘 이상)를 가졌으면 그 표가 뒤에서 물려 내려온다 — 느슨한 읽기로 먼저
+    # 채우면 형제의 온전한 표를 밀어낸다(diafvine 1255: 형제 표 L · XL · 2XL 이 L 한 줄로, 2026-10-01 창고 대조).
+    sib_ok: set = set()
+    for k, r in rows.items():
+        e = out.get(r["source_url"])
+        if e and len(e.get("sizes") or {}) >= 2:
+            sib_ok.add((k[0], color_base(r["name"])))
+    added: Counter = Counter()
+    for brand, items in by_brand.items():
+        tg: dict = defaultdict(list)
+        for k, r in items:
+            tg[group(r)].append(ocr[k])
+        tpls = _lz_learn(tg)
+        agree = checked = 0
+        todo = []
+        for k, r in items:
+            ent = out.get(r["source_url"])
+            if ent is not None and ent.get("source") != "ocr":
+                continue
+            got = _lz_read(ocr[k], group(r), tpls, _lz_opt_names(r.get("options") or ""))
+            if not got:
+                continue
+            if ent is None:
+                cb = color_base(r["name"])
+                if not (cb and (brand, cb) in sib_ok):
+                    todo.append((r, got))
+            else:
+                ok = _lz_agree(got, ent)
+                if ok is not None:
+                    checked += 1
+                    agree += ok
+                elif len(ent.get("sizes") or {}) <= 1 < len(got[1]):
+                    todo.append((r, got))
+        if checked < _TPL_MIN_CHECK or agree / checked < _TPL_MIN_AGREE:
+            continue
+        for r, (names, cols) in todo:
+            out[r["source_url"]] = {"brand_slug": brand, "source": "ocr", "template": True,
+                                    "size_names": names, "sizes": blank_lone_jump(sleeve_to_hwajang(cols))}
+            added[brand] += 1
+    return added
+
+
+
+# ── 소수점이 빠진 둘레 표 — 이름 줄 「(cm) 28 29 30 …」 + 라벨 줄(2026-10-01) ───────────────────────────────
+# concepts1one(지오다노)의 DETAIL SIZE 그림은 글씨가 가늘어 OCR 이 소수점을 통째로 흘린다:
+#     <= (cm) 28 29 30 31 _ 32 _ 33 34 _ 36
+#     fw | peel og 허리둘레 - 712 797 822 84.8 87.3 89.9 949        ← 그림은 - 77.2 79.7 82.2 84.8 87.3 89.9 94.9
+#     | | 기 엉덩이둘레 - 984 101.0 1035 1060 1086 111 1162
+# 세 · 네 자리 맨수는 끝자리 앞에 소수점을 되살린다(712 → 71.2, 1010 → 101.0). 그런데 **숫자 자체를 잘못 읽기도 한다**
+# (77.2 → 「712」). 그래서 칸마다 믿을지를 표 스스로에게 묻는다 — 이 매장 표는 사이즈마다 같은 폭으로 늘어난다(허리
+# 둘레 인치당 2.54). 사이즈 번호에 대한 직선(테일-센 기울기)에서 벗어난 칸은 버리고(712 → 71.2 는 직선에서 6cm 떨어진다),
+# 남은 칸이 셋 미만이거나 3분의 2 미만이면 그 라벨을 통째로 버린다. 「-」는 그 사이즈가 없다는 빈칸이다.
+# 둘레(라벨에 「둘레」)는 단면으로 접는다. 라벨이 깨진 줄(「리둘2」 「10빼」)은 읽지 않는다.
+_GD_NAMES = re.compile(r"\(\s*cm\s*\)\s*\|?\s*((?:(?:\d{2}|_)\s+)+\d{2})\s*$", re.I)
+# 두 칸이 붙은 토막 「95.3978」(= 95.3 · 97.8, 15701)
+_GD_PAIR = re.compile(r"^(\d{2,3}\.\d)(\d{2,3}\.?\d)$")
+# 이 표에서만 보이는 라벨 오독 — 「열덜이둘레」 「얼덜이둘레」(30505 · 30561). 별칭 표에 넣기엔 너무 낯선 꼴이라 여기서만 고친다.
+_GD_TYPO = (("열덜이", "엉덩이"), ("얼덜이", "엉덩이"))
+
+
+def _gd_val(t: str) -> float | None:
+    if re.fullmatch(r"\d{2,3}\.\d{1,2}", t):
+        return float(t)
+    if re.fullmatch(r"\d{3,4}", t):
+        return int(t) / 10
+    if re.fullmatch(r"\d{2}", t):
+        return float(t)
+    return None
+
+
+def _gd_fit(xs: list[int], ys: list) -> list:
+    pts = [(x, y) for x, y in zip(xs, ys) if y is not None]
+    if len(pts) < 3:
+        return [None] * len(ys)
+    sl = sorted((b[1] - a[1]) / (b[0] - a[0]) for i, a in enumerate(pts) for b in pts[i + 1:] if b[0] != a[0])
+    slope = statistics.median(sl)
+    icpt = statistics.median(y - slope * x for x, y in pts)
+    tol = max(0.6, 0.25 * abs(slope))
+    keep = [y if y is not None and abs(y - (icpt + slope * x)) <= tol else None for x, y in zip(xs, ys)]
+    n_keep = sum(v is not None for v in keep)
+    if slope < -0.05 or n_keep < 3 or n_keep * 3 < len(pts) * 2:
+        return [None] * len(ys)
+    return keep
+
+
+def parse_girth_decimal(text: str) -> tuple[list[str], dict[str, list]] | None:
+    lines = [ln.strip() for ln in (text or "").splitlines()]
+    for i, ln in enumerate(lines):
+        m = _GD_NAMES.search(ln)
+        if not m:
+            continue
+        names = [x for x in m.group(1).split() if x != "_"]
+        # 이름 하나의 앞자리만 깨진 것(「… 33 84 36」의 84 = 34)은 이웃 사이에 끝자리가 같은 수가 하나뿐일 때만 고친다
+        for k in range(1, len(names) - 1):
+            a, b, c = int(names[k - 1]), int(names[k]), int(names[k + 1])
+            if not a < b < c:
+                fit = [x for x in range(a + 1, c) if x % 10 == b % 10]
+                if len(fit) == 1:
+                    names[k] = str(fit[0])
+        xs = [int(x) for x in names]
+        if len(xs) < 3 or xs != sorted(set(xs)) or not all(20 <= x <= 52 for x in xs):
+            continue
+        cols: dict[str, list] = {}
+        for l2 in lines[i + 1:i + 16]:
+            for a, b in _GD_TYPO:
+                l2 = l2.replace(a, b)
+            toks = [t.strip("|«»()[]'\"“”,;") for t in l2.split()]
+            toks = [t for t in toks if t]
+            j = next((k for k, t in enumerate(toks) if canon_label(t)), None)
+            if j is None:
+                continue
+            raw = toks[j]
+            lab = canon_label(raw)
+            cells: list = []
+            for t in toks[j + 1:]:
+                pm = _GD_PAIR.match(t)
+                if t in ("-", "–", "—", "_", "=", "=~", "==", "~"):
+                    cells.append("-")
+                elif pm:
+                    cells += [pm.group(1), pm.group(2)]
+                elif re.fullmatch(r"\d{2,4}(?:\.\d{1,2})?", t):
+                    cells.append(t)
+                else:
+                    cells = None                  # 값 사이에 모르는 토막 — 칸을 믿을 수 없다
+                    break
+            if not cells or len(cells) != len(names) or lab in cols:
+                continue
+            girth = "둘레" in raw
+            lo, hi = RANGES.get(lab, (3, 200))
+            ys = []
+            for c in cells:
+                v = None if c == "-" else _gd_val(c)
+                if v is not None and girth:
+                    v = round(v / 2, 2)
+                ys.append(v if v is not None and lo <= v <= hi else None)
+            keep = _gd_fit(xs, ys)
+            if any(v is not None for v in keep):
+                cols[lab] = [round(v, 1) if v is not None else None for v in keep]
+        # 어느 라벨에도 값이 없는 사이즈는 그 상품에 없는 사이즈다(「-」 칸, 30507 의 28) — 이름째 뺀다.
+        # 그대로 두면 앱에 고를 수 없는 사이즈 칩이 선다.
+        live = [k for k in range(len(names)) if any(v[k] is not None for v in cols.values())]
+        if len(cols) >= 2 and live:
+            return [names[k] for k in live], {c: [v[k] for k in live] for c, v in cols.items()}
+    return None
+
+
+
 def iter_jsonl(p):
     """줄 하나가 깨졌다고 판 전체를 버리지 않는다 — 그 줄만 건너뛰고 몇 줄인지 남긴다.
 
@@ -3878,6 +4453,322 @@ def drop_impossible(out: dict, rows_by_url: dict) -> int:
     return dropped
 
 
+# ── 이미 받아 둔 글(설명글 · 사이즈가이드 창)에서 못 읽던 꼴 — 2026-10-01 parseB 갈래 ──────────────────────
+# 분류 결과(cls/result1~3)가 짚은 매장들은 실측이 **글로** 창고에 있는데 읽는 갈래가 없었다. 기존 해석기는
+# 건드리지 않고 새 함수로만 덧붙인다 — 부르는 자리도 「기존 갈래가 다 못 읽었을 때」뿐이다.
+
+# ① 한 사이즈(FREE)만 적은 「SIZE (CM) FREE 총기장 73 어깨넓이 49 가슴둘레 122 … 사이즈는 둘레 기준」 — ostkaka.
+# parse_names_slash_rows 는 이름이 둘 이상일 때만 받는다(「S / M」). 이 매장 옷 62벌 가운데 대부분이 FREE 라 크롤러가
+# 잡은 공용 아동 인치표(「가슴inches 22 23 …」 — 공용표로 걸러진다)만 남고 실측은 비어 있었다. 몇 벌은 OCR 이 모델 세 명의
+# 몸 치수(「Bust 81cm 78cm 80cm」)를 가슴 · 허리 세 칸으로 읽어 그게 섰다(ostkaka 1641 · 1643).
+# 「FREE 긴팔 총기장 50 … 나시 총기장 47 …」(트윈 세트)는 첫 벌만 — 라벨이 다시 나오면 거기서 끊는다.
+# 「FREE SHIRT / BUSTIER 총기장 72 / 16.5 …」처럼 벌 이름을 빗금으로 이은 것은 어느 칸이 어느 벌인지 몰라 받지 않는다.
+_FR_HEAD = re.compile(r"(?:SIZE|사이즈)\s*[\(（]\s*CM\s*[\)）]\s*[\ufeff\u200b\s]*(?:FREE|F|ONE\s?SIZE|OS)"
+                      r"(?:\s+(?:긴팔|반팔|나시|이너|아우터|가디건|조끼|베스트|상의|하의))?(?=[\s\ufeff\u200b])", re.I)
+_FR_PAIR = re.compile(r"[\ufeff\u200b\s]*([가-힣A-Za-z][가-힣A-Za-z.]{0,7})\s*[:：]?\s*(\d{1,3}(?:\.\d{1,2})?)(?![\d.]|\s*/\s*\d|\s*[xX×*]\s*\d)")
+# 표 뒤에 이어지는 모델 몸 치수(「MODEL 171.5CM BUST 76 WAIST 57」)에서 멈춘다 — 모르는 라벨은 건너뛰고 잇기 때문에
+# 이 낱말을 막지 않으면 BUST 가 가슴으로 들어올 수 있다.
+_FR_STOP = re.compile(r"(?i)^(?:model|모델|height|키|신장|bust|waist|hips?|weight|몸무게|체중)$")
+
+
+def parse_free_rows(text: str) -> tuple[list[str], dict[str, list[float]]] | None:
+    best = None
+    for m in _FR_HEAD.finditer(text or ""):
+        pos, cols = m.end(), {}
+        while True:
+            r = _FR_PAIR.match(text, pos)
+            if not r or _FR_STOP.match(r.group(1)):
+                break
+            # 「어깨끈 29.5」는 끈 길이다 — 별칭으로는 어깨가 되지만 어깨너비가 아니다(ostkaka 1936 페플럼 탑)
+            c = None if "끈" in r.group(1) else canon_label(r.group(1))
+            if c and c in cols:
+                break                          # 같은 라벨이 또 — 둘째 벌이 시작됐다
+            if c:
+                cols[c] = (r.group(1), [r.group(2)])
+            pos = r.end()                      # 모르는 라벨(「A.H」 · 「목넓이」)은 건너뛰고 잇는다
+        if len(cols) < 2:
+            continue
+        note = _NS_NOTE.search(text[pos:pos + 200])
+        # 매장이 기준을 적지 않았으면 값 크기로 둘레를 짐작하지 않는다 — nick-nicole 플레어 스커트(6693)
+        # 「허리 32 엉덩이 48 밑단 78」의 밑단 78 은 단면인데 문턱(60)을 넘는다고 접으면 엉덩이보다 좁은 39 가 된다.
+        # 라벨에 「둘레」가 붙은 칸은 부르는 쪽(halve_girth_lines)이 이미 접었다.
+        got = _ns_cols(cols, note.group(1) if note else "단면")
+        if len(got) >= 2 and (best is None or len(got) > len(best[1])):
+            best = (["FREE"], got)
+    return best
+
+
+# ①-2 「SIZE (CM) FREE INNER / VEST 총기장 55.5 / 49 어깨 37 가슴 87 / 74 …」 — 벌 이름을 빗금으로 이은 트윈 세트(ostkaka 1848 ·
+# 1862 · 1937 · 1990 · 1991 · 2151 · 2560, 2026-10-01). 크롤러 표는 두 벌을 두 사이즈로 읽어 「총장 [55.5, 49]」로 섰고 이름이 없어 끝까지
+# 살아남았다(가슴 87 은 둘레인데 그대로였다). **첫 벌만** 받는다 — 「값 / 값」 칸의 앞 값. 값이 하나뿐인 칸(「어깨 37」 · 「소매기장 67」)은
+# 어느 벌 것인지 글만으로는 모르므로 버린다.
+_FPS_HEAD = re.compile(r"(?:SIZE|사이즈)\s*[\(（]\s*CM\s*[\)）]\s*[\ufeff\u200b\s]*(?:FREE|F|ONE\s?SIZE)\s+"
+                       r"([A-Za-z가-힣]{2,10})\s*/\s*([A-Za-z가-힣]{2,10})(?=\s)", re.I)
+_FPS_PAIR = re.compile(r"[\ufeff\u200b\s]*([가-힣A-Za-z][가-힣A-Za-z.]{0,7})\s*[:：]?\s*(\d{1,3}(?:\.\d{1,2})?)(?:\s*/\s*(\d{1,3}(?:\.\d{1,2})?))?(?![\d.]|\s*/\s*\d)")
+
+
+def parse_free_piece_slash(text: str) -> tuple[list[str], dict[str, list[float]]] | None:
+    m = _FPS_HEAD.search(text or "")
+    if not m or canon_label(m.group(1)) or canon_label(m.group(2)):
+        return None                            # 「FREE 총장 / 어깨 …」라면 벌 이름이 아니라 라벨이다
+    pos, cols = m.end(), {}
+    while True:
+        r = _FPS_PAIR.match(text, pos)
+        if not r or _FR_STOP.match(r.group(1)):
+            break
+        c = None if "끈" in r.group(1) else canon_label(r.group(1))
+        if c and c in cols:
+            break
+        if c and r.group(3):
+            cols[c] = (r.group(1), [r.group(2)])
+        pos = r.end()
+    if len(cols) < 2:
+        return None
+    note = _NS_NOTE.search(text[pos:pos + 200])
+    got = _ns_cols(cols, note.group(1) if note else "단면")
+    return (["FREE"], got) if len(got) >= 2 else None
+
+
+# ② 세트의 벌마다 덩어리로 적은 글 — nick-nicole(2026-10-01 · 6554 · 6557 · 5053):
+#     SIZE(CM) PANTS 허리단면 33 허벅지단면 32 … 총장 104 SKIRT 허리 34 엉덩이 39 밑단 41 총장 79
+#     SIZE(cm) FREE PANTS - 허리 27 … 총장 105 SKIRT - 허리 35 …
+# 크롤러는 PANTS · SKIRT 를 사이즈 이름으로 보고 두 벌에 다 있는 라벨만 두 칸으로 남겼다(밑단 [27, 41]) — 그 표는
+# 끝에서 drop_piece_tables 가 통째로 뺀다. **상품의 갈래(category)에 맞는 벌 하나만** 받는다: 바지 갈래면 PANTS.
+# 맞는 벌이 없거나 둘 이상이면 받지 않는다(어느 벌이 이 상품인지 모른다).
+_PC_PIECE = {
+    "Pants": r"pants|trousers|bottoms?|slacks|팬츠|바지|슬랙스",
+    "Denim": r"pants|denim|jeans?|bottoms?|팬츠|바지|데님",
+    "Skirts": r"skirt|스커트|치마",
+    "Tops": r"tops?|tee|t-?shirts?|shirts?|blouse|티셔츠|셔츠|블라우스|상의",
+    "Shirts": r"shirts?|blouse|셔츠|블라우스",
+    "Knitwear": r"knit|cardigan|sweater|니트|가디건",
+    "Outerwear": r"jacket|coat|outer|vest|jumper|자켓|재킷|코트|조끼|점퍼",
+    "Dresses": r"dress|원피스",
+}
+_PC_ANY = "|".join(sorted({w for v in _PC_PIECE.values() for w in v.split("|")}, key=len, reverse=True))
+_PC_HEAD = re.compile(r"(?:SIZE|사이즈)\s*(?:[\(（]\s*cm\s*[\)）])?\s*(?:FREE\s+|F\s+)?(?=(?:" + _PC_ANY + r")\b)", re.I)
+_PC_TOK = re.compile(r"\s*(" + _PC_ANY + r")\b\s*[-:：]?", re.I)
+
+
+def parse_piece_sections(text: str, category: str) -> tuple[list[str] | None, dict[str, list[float]]] | None:
+    want = _PC_PIECE.get(category or "")
+    if not want:
+        return None
+    for m in _PC_HEAD.finditer(text or ""):
+        pos, pieces = m.end(), []
+        free = bool(re.search(r"(?i)FREE|F\s*$", m.group(0)))
+        while True:
+            t = _PC_TOK.match(text, pos)
+            if not t:
+                break
+            pos, cells = t.end(), {}
+            while True:
+                r = _FR_PAIR.match(text, pos)
+                if not r or _FR_STOP.match(r.group(1)):
+                    break
+                c = None if "끈" in r.group(1) else canon_label(r.group(1))
+                if c and c in cells:
+                    break
+                if c:
+                    cells[c] = r.group(2)
+                pos = r.end()
+            pieces.append((t.group(1), cells))
+        if len(pieces) < 2:
+            continue
+        hit = [cells for nm, cells in pieces if re.fullmatch(want, nm, re.I)]
+        if len(hit) != 1 or len(hit[0]) < 2:
+            return None
+        cols = {c: [fix_value(c, v)] for c, v in hit[0].items()}
+        cols = {c: v for c, v in cols.items() if v[0] is not None}
+        return (["FREE"] if free else None, cols) if len(cols) >= 2 else None
+    return None
+
+
+# ③ 라벨도 값도 빗금으로 잇되 값마다 「cm」를 붙인 글 — dnsr 1971(2026-10-01):
+#     가슴/소매(래글런)/암홀/총길이 67cm/88cm/31cm/71.5cm 69cm/90cm/32cm/73cm 71cm/92cm/33cm/74.5cm
+# parse_slash_table 의 값 줄 눈이 「67cm/」에서 걸렸다. 빗금 사이의 cm 만 떼고 그 해석기에 그대로 넘긴다.
+# 래글런 소매는 목점에서 소매끝까지 재므로 화장이다(88 — 소매길이로는 나올 수 없는 값).
+_SC_CM = re.compile(r"(?<=\d)\s*cm\s*(?=/)|(?<=/)\s*(\d{1,3}(?:\.\d)?)\s*cm(?![A-Za-z가-힣])", re.I)
+_SC_RAGLAN = re.compile(r"소매\s*[\(（]\s*(?:래글런|레글런|라글란|raglan)\s*[\)）]", re.I)
+
+
+def parse_slash_table_cm(text: str) -> tuple[list[str], dict[str, list[float]]] | None:
+    # 괄호 머리 꼴(「SIZE (총장 / 어깨너비 / 가슴 단면 / 밑단) S l 54cm / 34cm / 35cm」)은 parse_paren_slash 몫이다.
+    # 여기서 받으면 라벨 넷에 값 셋인 줄을 「가슴 / 밑단」을 떼고 맞춰 읽는다(badblood 14377, 2026-10-01 전후 대조).
+    if not text or not re.search(r"\dcm\s*/\s*\d", text, re.I) or _PAREN_HEAD.search(text):
+        return None
+    t = _SC_RAGLAN.sub("화장", text)
+    t = _SC_CM.sub(lambda m: m.group(1) or "", t)
+    got = parse_slash_table(t)
+    if not got:
+        return None
+    # 이름 없는 줄에 parse_slash_table 이 차례 번호(1 · 2 · 3)를 붙인다 — 지어낸 이름이라 비워 두고 매장 옵션에서
+    # 채우게 한다(dnsr 1971 옵션 「S | M | L」).
+    names = None if got[0] == [str(i + 1) for i in range(len(got[0]))] else got[0]
+    return names, got[1]
+
+
+# ⑥ 「SIZE (총장 / 가슴 단면 / 밑단) S l 36cm / / 36cm / 34cm」 — 빗금이 두 번 겹친 빈 칸(badblood 12851 · 12852, 수집기 갈래가
+# 넘김 2026-10-01). parse_paren_slash 의 값 줄 눈은 칸마다 수를 요구해서 줄째 놓쳤다. 괄호 머리 뒤 400자 안의 빗금 줄만 다듬는다:
+#   칸 수 = 라벨 수이고 빈 칸이 있으면 → 그 칸만 비운다(「0」을 넣어 fix_value 가 무리 밖으로 버리게 한다).
+#   칸 수 = 라벨 수 + 1 이고 빈 칸이 딱 하나면 → 그 빈 칸은 칸이 아니다(빗금이 한 번 더 찍혔거나, 머리에 없는 칸이다).
+#     어느 쪽으로 읽어도 남은 세 값의 자리는 같다. 그 밖의 꼴은 짐작하지 않고 그대로 둔다(못 읽는다).
+_PB_CELL = r"\d{1,3}(?:[.,]\d{1,2})?\s*(?:cm)?"
+_PB_RUN = re.compile(rf"(?:{_PB_CELL})?(?:\s*/\s*(?:{_PB_CELL})?)+(?<!/)", re.I)
+
+
+def parse_paren_slash_blank(text: str) -> tuple[list[str], dict[str, list[float]]] | None:
+    if not text or not re.search(r"/\s*/", text):
+        return None
+    out, last, changed = [], 0, False
+    for m in _PAREN_HEAD.finditer(text):
+        n = len(re.split(r"[/,·|]", m.group(1)))
+        a, b = max(m.end(), last), min(len(text), m.end() + 400)
+        if a >= b:
+            continue
+        seg = text[a:b]
+
+        def fix(r: re.Match) -> str:
+            nonlocal changed
+            slots = [x.strip() for x in r.group(0).split("/")]
+            blanks = [k for k, x in enumerate(slots) if not x]
+            if not blanks or not re.search(r"\d", r.group(0)):
+                return r.group(0)
+            if len(slots) == n:
+                slots = [x or "0" for x in slots]
+            elif len(slots) == n + 1 and len(blanks) == 1:
+                slots = [x for x in slots if x]
+            else:
+                return r.group(0)
+            changed = True
+            return " / ".join(slots)
+        out.append(text[last:a])
+        out.append(_PB_RUN.sub(lambda r: fix(r) if "/" in r.group(0) else r.group(0), seg))
+        last = b
+    if not changed:
+        return None
+    out.append(text[last:])
+    return parse_paren_slash("".join(out))
+
+
+def parse_text_extras(body: str, row: dict, ranges: dict | None = None) -> tuple[list[str] | None, dict[str, list[float]]] | None:
+    """설명글에서 기존 갈래가 못 읽은 꼴(위 ①~③ · ⑥ · 아래 ⑤). 부르는 쪽이 「기존 갈래가 두 라벨도 못 읽었을 때」만 부른다.
+    ranges 를 넘기면 밴딩 허리 범위(⑤)를 거기에 담는다."""
+    pc = parse_piece_sections(body, row.get("category") or "")
+    if pc:
+        return pc
+    fp = parse_free_piece_slash(body)
+    if fp:
+        return fp
+    fr = parse_free_rows(body)
+    if fr:
+        return fr
+    sc = parse_slash_table_cm(body)
+    if sc:
+        return sc
+    pb = parse_paren_slash_blank(body)
+    if pb:
+        return pb
+    # 수집기가 폭 값(「65~67」) 표를 상세 글 끝에 줄 그대로 남긴다(fix/collect 3c710f5 · horlisun 1332 · 1333) —
+    # 사이즈가이드 창의 같은 꼴과 같은 함수로 읽는다.
+    if "|" in body:
+        gc = parse_grid_cols([x.strip() for x in body.splitlines() if x.strip()], ranges)
+        if gc:
+            return gc
+    return None
+
+
+# ④ 사이즈가이드 창의 「라벨 | 값 | 값」 표(parse_grid_rows)에 넘기기 전에 다듬는다 — cayl(2026-10-01, 창 552건):
+#     A 기장 / 앞-뒤 | 65.5~70 | 67.5~72 | …   ← 앞 기장 ~ 뒤 기장. 범위가 아니라 두 자리의 값이다.
+#     C 몸통단면 | 51 | 54 | 57.5 | 59           ← 몸통단면 = 가슴단면(같은 매장 창: 「C 몸통단면 (가슴부분)」)
+#     A 허리단면 | 35~41.5 | 37~43 | …          ← 밴딩 허리의 줄인 폭 ~ 늘인 폭
+# 「앞/뒤」 두 값은 앞 값을 쓰는 것이 이 해석기의 관례다(_nf_cells · 코덱스 013 「총장 칸은 하나다」). fix_value 의
+# 가운뎃값(67.8)은 앞에도 뒤에도 없는 길이였다. 밴딩 허리 범위는 앱이 [작은값, 큰값]으로 그리므로(사람 결정
+# 2026-09-29 · doucan 「ranges」) 가운뎃값으로 접지 않고 ranges 로 따로 넘긴다.
+_PG_FB = re.compile(r"앞\s*[-/~]\s*뒤")
+_PG_RANGE = re.compile(r"^\s*(\d{1,3}(?:[.,]\d+)?)\s*[~\-–]\s*(\d{1,3}(?:[.,]\d+)?)\s*(?:c?m)?\s*$", re.I)
+
+
+def prep_grid_lines(lines: list[str]) -> tuple[list[str], dict[str, list[list[float]]]]:
+    out, ranges = [], {}
+    for ln in lines:
+        cells = [c.strip() for c in ln.split("|")]
+        if len(cells) < 3:
+            out.append(ln)
+            continue
+        lab = re.sub(r"몸통\s*(?=단면|둘레|너비)", "가슴", cells[0])
+        vals = cells[1:]
+        if _PG_FB.search(lab):
+            vals = [(lambda m: m.group(1) if m else v)(_PG_RANGE.match(v)) for v in vals]
+        elif canon_label(lab) == "허리" and vals and all(_PG_RANGE.match(v) for v in vals):
+            rg = [[float(x.replace(",", ".")) for x in _PG_RANGE.match(v).groups()] for v in vals]
+            lo, hi = RANGES.get("허리", (3, 200))
+            if all(lo <= a < b <= hi for a, b in rg) and "허리" not in ranges:
+                ranges["허리"] = rg
+            continue
+        out.append(" | ".join([lab] + vals))
+    return out, ranges
+
+
+# ⑤ 사이즈가 줄이고 라벨이 칸인 창 표 — horlisun 1332 · 1333(2026-10-01, 「Size Measurement」):
+#     Size | 총장(Length) | 어깨(Shoulder) | 가슴(Chest) | 소매(Sleeve)
+#     S | 65~67 | 56~58 | 59~62 | 50.5~52.5
+# parse_grid_rows 와 눕는 방향이 반대다. 머리줄의 칸이 **모두** 정식 라벨(서로 다름)이고 인치 말이 없을 때만,
+# 값 줄은 칸 수가 머리줄과 같고 칸이 모두 수(또는 범위)일 때만 받는다. 범위는 fix_value 관례대로 가운뎃값 —
+# 이 매장은 「와플 원단이라 제품마다 실측 차이」라 적고 범위로 실었다.
+_GC_HEAD0 = re.compile(r"(?i)(?:size|사이즈|사이즈\s*/\s*size|단위)?\s*(?:[\(（]\s*cm\s*[\)）]|cm)?")
+
+
+def parse_grid_cols(lines: list[str], ranges: dict | None = None) -> tuple[list[str] | None, dict[str, list[float]]] | None:
+    # 머리줄이 둘 이상이면 벌마다 표가 따로 있는 세트다(nilby-p 「34size[민소매]」 표 + 「34size[가디건]」 표 — 2026-10-01
+    # 창 전수 대조에서 첫 표인 민소매를 가디건 세트의 치수로 받을 뻔했다). 어느 표가 이 상품인지 모르니 받지 않는다.
+    heads = [ln for ln in lines if "|" in ln and _GC_HEAD0.fullmatch(ln.split("|")[0].strip())
+             and sum(1 for c in ln.split("|")[1:] if canon_label(c.strip())) >= 2]
+    if len(heads) > 1:
+        return None
+    for i, ln in enumerate(lines):
+        cells = [c.strip() for c in ln.split("|")]
+        # 첫 칸은 「Size」 · 「사이즈」 · 「SIZE(cm)」 · 「cm」 · 빈 칸. 인치 말이 있는 머리줄은 공용 환산표다.
+        if (len(cells) < 3 or not _GC_HEAD0.fullmatch(cells[0])
+                or _INCH_WORD.search(ln)):
+            continue
+        # 모르는 칸(「Weight」 따위)은 건너뛴다 — 칸을 「|」로 나눠 받으므로 자리가 밀리지 않는다. 아는 칸은 둘 이상 · 겹치지 않게.
+        labs = [canon_label(c) if c else None for c in cells[1:]]
+        known = [c for c in labs if c]
+        if len(known) < 2 or len(set(known)) != len(known):
+            continue
+        names, vals = [], []
+        for nx in lines[i + 1:i + 12]:
+            cs = [c.strip() for c in nx.split("|")]
+            if (len(cs) != len(cells) or not cs[0]
+                    or not all(_GRID_NUM.match(c) or _GRID_DASH.match(c) for c, lb in zip(cs[1:], labs) if lb)):
+                break
+            names.append(cs[0])
+            vals.append(cs[1:])
+        # 이름에 「[민소매]」처럼 벌 이름이 붙으면 세트의 한 벌 표다 — 받지 않는다(위 주석)
+        if not names or len(set(names)) != len(names) or any("[" in x for x in names):
+            continue
+        cols: dict[str, list[float]] = {}
+        for j, c in enumerate(labs):
+            if not c:
+                continue
+            raw = [re.sub(r"\s*c?m\s*$", "", v[j], flags=re.I) for v in vals]
+            # 밴딩 허리 범위는 가운뎃값으로 접지 않고 ranges 로(prep_grid_lines 와 같은 관례 — 사람 결정 2026-09-29)
+            if c == "허리" and all(_PG_RANGE.match(x) for x in raw):
+                rg = [[float(y.replace(",", ".")) for y in _PG_RANGE.match(x).groups()] for x in raw]
+                lo, hi = RANGES.get("허리", (3, 200))
+                if ranges is not None and all(lo <= a < b <= hi for a, b in rg):
+                    ranges["허리"] = rg
+                continue
+            cols[c] = [None if _GRID_DASH.match(x) else fix_value(c, x) for x in raw]
+        cols = {c: v for c, v in cols.items() if any(x is not None for x in v)}
+        if len(cols) >= 2:
+            return names, cols
+        if ranges is not None:
+            ranges.clear()
+    return None
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--report", action="store_true")
@@ -4004,6 +4895,7 @@ def main():
                 import crawl_cafe24 as _cc2
                 st = _cc2.collapse_repeated_columns(dict(st))
             sizes, names, source = {}, None, None
+            sg_rng: dict = {}   # 사이즈가이드 창의 밴딩 허리 범위(prep_grid_lines)
             # 늘어나는 허리 같은 폭 값(「_ranges」 — doucan 해석기) · 앱이 [작은값, 큰값]으로 그린다(사람 결정 2026-09-29).
             st_ranges = st.pop("_ranges", None) if isinstance(st, dict) else None
             if isinstance(st, dict) and st and (k[0], json.dumps(st, sort_keys=True, ensure_ascii=False)) not in shared:
@@ -4098,6 +4990,18 @@ def main():
                             isinstance(a, (int, float)) and isinstance(b, (int, float)) and abs(a - b) <= 1
                             for a, b in zip(sizes[c], cs[c])) for c in sizes):
                     sizes, names = cs, sr[0]
+            # 설명글의 남은 꼴(parse_text_extras 주석 — 2026-10-01 parseB). 위 갈래가 두 라벨도 못 읽었거나, 읽은 표의
+            # 칸 이름이 벌 이름뿐일 때만(그 표는 끝에서 drop_piece_tables 가 통째로 뺀다 — nick-nicole 「PANTS · SKIRT」).
+            # 「FREE INNER / VEST …」 트윈 세트는 크롤러가 두 벌을 두 칸으로 읽은 표가 이름 없이 서 있어도 다시 읽는다(parse_free_piece_slash).
+            body_x = halve_girth_lines("\n".join(t for t in (d.get("description") or "", d.get("detail_text") or "") if t))
+            if (len(sizes) < 2 or (names and len(names) >= 2 and all(_SET_PIECE.search(str(x) or "") for x in names))
+                    or (not names and _FPS_HEAD.search(body_x))):
+                tx_rng: dict = {}
+                tx = parse_text_extras(body_x, r, tx_rng)
+                if tx and len(clean_ocr(tx[1])) >= 2:
+                    sizes, names, source = clean_ocr(tx[1]), tx[0], "html"
+                    if tx_rng:
+                        st_ranges = {**(st_ranges if isinstance(st_ranges, dict) else {}), **tx_rng}
             # 브라우저가 본 표·설명글 — 서버 HTML 에 없던 것이 여기 있다
             b = brw.get(r["source_url"])
             if len(sizes) < 2 and b:
@@ -4137,6 +5041,13 @@ def main():
                 # 표가 반대로 누운 매장은 parse_grid_rows 가 읽는다(「라벨 | 값 | 값」).
                 # 부르는 쪽이 매장 공용 줄을 이미 지웠고 이 갈래도 canon_label 을 통과하는
                 # 줄만 받으므로, 카페24 인치 환산표는 두 겹으로 걸린다.
+                # 「앞-뒤」 두 값 · 몸통단면 · 밴딩 허리 범위를 먼저 다듬는다(prep_grid_lines 주석 — cayl 2026-10-01).
+                # 다듬은 표가 안 읽히면(허리 줄을 빼고 나니 한 줄만 남는 등) 원래 줄로 되돌아간다.
+                if not pr:
+                    sgl2, rg2 = prep_grid_lines(sgl)
+                    pr = parse_grid_rows(sgl2) if sgl2 != sgl or rg2 else None
+                    if pr:
+                        sg_rng = rg2
                 if not pr:
                     pr = parse_grid_rows(sgl)
                 # 칸마다 줄이 바뀐 표(legacy · lmood). 매장 공용 표는 위에서 이미 걸렀다.
@@ -4144,6 +5055,12 @@ def main():
                     pr = sg_stack.get(r["source_url"])
                 if not pr:
                     pr = parse_section_stack(sgl)
+                # 사이즈가 줄 · 라벨이 칸인 창 표(parse_grid_cols 주석 — horlisun 2026-10-01)
+                if not pr:
+                    rg3: dict = {}
+                    pr = parse_grid_cols(sgl, rg3)
+                    if pr:
+                        sg_rng = rg3
                 if pr:
                     s3 = clean_ocr(pr[1])
                     if len(s3) > len(sizes):
@@ -4157,6 +5074,11 @@ def main():
                 names2, sizes2 = from_ocr(halve_girth_lines(ocr[k]))
                 if len(sizes2) > len(sizes):
                     sizes, names, source = sizes2, names2, "ocr"
+            # 소수점이 빠진 둘레 표(parse_girth_decimal 주석 — concepts1one) · 앞 갈래가 다 못 읽었을 때만
+            if len(sizes) < 2 and ocr.get(k):
+                gd = parse_girth_decimal(ocr[k])
+                if gd and len(gd[1]) > len(sizes):
+                    sizes, names, source = gd[1], gd[0], "ocr"
             if not sizes:
                 continue
             # HTML 표에는 사이즈 이름 열이 없다(크롤러가 라벨 칸만 읽었다 — 2026-09-05 에
@@ -4210,6 +5132,11 @@ def main():
                 rg = {c: v for c, v in st_ranges.items() if c not in sizes and isinstance(v, list) and len(v) == n}
                 if rg:
                     out[r["source_url"]]["ranges"] = rg
+            elif source == "sizeguide" and sg_rng:
+                # 창 표에서 따로 뺀 밴딩 허리 범위 — 위 html 갈래와 같은 모양으로 붙인다(prep_grid_lines 주석)
+                rg = {c: v for c, v in sg_rng.items() if c not in sizes and len(v) == n}
+                if rg:
+                    out[r["source_url"]]["ranges"] = rg
             src[source] += 1
             (per_brand_html if source in ("html", "browser") else per_brand_ocr)[k[0]] += 1
     # 머리줄만 깨진 OCR 표를 매장 틀로 읽는다(template_pass 주석) — 사람 값 · 형제 물려주기보다 앞.
@@ -4217,6 +5144,11 @@ def main():
     if tpl_added:
         print(f"매장 틀로 읽은 OCR 표 {sum(tpl_added.values())}벌: {dict(tpl_added.most_common(10))}")
         src["ocr"] += sum(tpl_added.values())
+    # 그래도 남은 것은 느슨한 줄 읽기로(loose_pass 주석) — 같은 잣대로 매장마다 켤지 정한다
+    lz_added = loose_pass(rows, ocr, out)
+    if lz_added:
+        print(f"느슨한 줄 읽기로 읽은 OCR 표 {sum(lz_added.values())}벌: {dict(lz_added.most_common(15))}")
+        src["ocr"] += sum(lz_added.values())
     # 사람이 직접 옮겨 적은 값. 기계가 못 읽는 자리(사이즈가이드 탭 그림 등)를 사람이 메운
     # 것이라 무엇보다 앞선다. 형제 물려주기보다 먼저 넣어야 같은 옷의 다른 색도 함께 산다.
     for u, ent in load_manual().items():
@@ -4244,7 +5176,9 @@ def main():
                                     "sibling_of": donor["source_url"],
                                     "size_names": base_entry["size_names"], "sizes": base_entry["sizes"],
                                     # 세트는 색만 달라도 하의 표까지 같다
-                                    **({"size_parts": base_entry["size_parts"]} if base_entry.get("size_parts") else {})}
+                                    **({"size_parts": base_entry["size_parts"]} if base_entry.get("size_parts") else {}),
+                                    # 밴딩 허리 범위도 같은 옷이라 같다 — 빠뜨리면 형제는 허리 칸을 통째로 잃는다(cayl 2026-10-01)
+                                    **({"ranges": base_entry["ranges"]} if base_entry.get("ranges") else {})}
             lent += 1
     if lent:
         print(f"색만 다른 형제에게서 물려받은 사이즈 {lent}벌")

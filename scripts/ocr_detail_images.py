@@ -990,7 +990,8 @@ def merge_extra_size_images(slug: str, latest: dict[int, dict]) -> set[str]:
             # 한 장으로 줄어든다. 그러면 「이미 여섯 장 읽었으니 다시 안 읽어도 된다」가 되어
             # 되읽기 대상에서 빠진다 — 2026-09-17 판 41 에서 그 일이 났다(cayl·99-is·munn·
             # juntae-kim 이 한 벌도 안 움직였다. 이 매장들은 상세 그림이 없어 갤러리를 읽는다).
-            have = list(d.get("detail_images") or []) or list(d.get("gallery") or [])
+            # 갤러리 꼬리(gallery_tail)까지 — 갤러리만 넘기면 13장째부터의 실측표가 이 상품에서 사라진다(알리스, 2026-10-01).
+            have = images_of(d)
             d["detail_images"] = urls + [u for u in have if u not in urls]
             got.update(urls)
     return got
@@ -1093,7 +1094,39 @@ def images_of(d: dict) -> list[str]:
     괜히 예산만 먹는다. 없을 때만 대신 본다.
     """
     # 갤러리 13장째부터(gallery_tail)도 같이 본다 — 뒤에서부터 읽으므로 맨 끝의 실측표가 먼저 읽힌다(알리스).
-    return list(d.get("detail_images") or []) or (list(d.get("gallery") or []) + list(d.get("gallery_tail") or []))
+    return collapse_variants(list(d.get("detail_images") or [])
+                             or (list(d.get("gallery") or []) + list(d.get("gallery_tail") or [])))
+
+
+# 카페24는 한 그림을 tiny·small·medium·big 칸에 나눠 두고, 상품 페이지는 썸네일 줄(extra/small)과 큰 그림
+# 줄(extra/big)을 **둘 다** 싣는다. 크롤러는 둘을 다른 그림으로 받아 알리스 갤러리가 「작은 그림 21장 →
+# 큰 그림 19장」이 됐다. 그러면 뒤에서부터 읽는 차례의 맨 앞이 실측표(마지막 그림)가 아니라 큰 그림 줄의
+# 끝이고, 같은 그림을 두 번 세느라 예산 8장이 사진에 다 쓰였다 — 769 의 사이즈표
+# (extra/…/cfd3747b…jpg, 990x1000)를 끝내 못 읽었다(2026-10-01). 같은 파일은 **처음 나온 자리**에 하나만
+# 두고, 큰 칸 주소가 있으면 그 주소를 쓴다. 장 수가 줄 뿐 늘지 않으므로 다른 매장 예산은 그대로거나 준다.
+_SLOT = re.compile(r"/web/product/(extra/)?(big|medium|small|tiny)/")
+_SLOT_RANK = {"big": 3, "medium": 2, "small": 1, "tiny": 0}
+
+
+def collapse_variants(urls: list[str]) -> list[str]:
+    out: list[str] = []
+    at: dict[str, int] = {}
+    for u in urls:
+        m = _SLOT.search(u or "")
+        if not m:
+            if u not in out:
+                out.append(u)
+            continue
+        key = _SLOT.sub(lambda mm: f"/web/product/{mm.group(1) or ''}*/", u.split("?")[0])
+        if key not in at:
+            at[key] = len(out)
+            out.append(u)
+            continue
+        i = at[key]
+        prev = _SLOT.search(out[i])
+        if prev and _SLOT_RANK[m.group(2)] > _SLOT_RANK[prev.group(2)]:
+            out[i] = u
+    return out
 
 
 def process_brand(slug: str, only_short: bool, max_images: int, delay: float, log,
