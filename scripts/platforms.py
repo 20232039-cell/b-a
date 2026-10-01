@@ -108,4 +108,11 @@ NEW_HOLD: set[str] = ({"egnarts", "freckle", "eudon-choi", "goen-j", "finoacinqu
 # anglan 은 해외 IP 를 막는 카페24 매장이라 사람 PC(국내)에서 걷어 왔다(2026-09-28, 코덱스 중계 005 · 638벌).
 # CI(해외)에서는 주간 갱신이 목록을 못 받아 가드레일이 상태를 안 바꾼다 — 품절·값이 굳는다. 국내 러너(작업 #11)가 서기 전까지.
 # 같은 날 PC 에서 연 나머지 다섯 곳은 imweb 이었고 PAGES 에 올렸다(paco-sply 도 imweb — 아직 안 걷음).
-APP_HOLD: set[str] = {"numbering", "kijun", "crump", "jeanbach", "maison-marais", "tripleroot"} | NEW_HOLD
+# 2026-10-01 사람이 남은 32곳을 판정했다(둘다 13 · 남성 4 · 여성 3 · 제외 11 · 보류 1)하고 「오늘 새로운 브랜드도 수집하자」고 했다.
+# 처음 걷는 곳은 9/27 처럼 사람이 값 · 설명 · 실측을 보기 전까지 앱에 안 내보낸다.
+NEW_1001: set[str] = {"rolarola", "samo-ondoh", "sansan-gear", "savage", "sieg", "studio-tomboy", "system", "thisisneverthat",
+                      "thug-club", "tngt", "travel", "urago", "we11done", "welter-experiment"}
+NEW_HOLD |= NEW_1001
+# 「제외」 판정 가운데 이미 걷혀 있던 곳 — rocket-x-lunch(10-01) · bourie(9/27 판정인데 빠져 있었다, 950벌 전부 품절). 앱에만 안 내보낸다.
+APP_HOLD: set[str] = {"numbering", "kijun", "crump", "jeanbach", "maison-marais", "tripleroot",
+                      "rocket-x-lunch", "bourie"} | NEW_HOLD
