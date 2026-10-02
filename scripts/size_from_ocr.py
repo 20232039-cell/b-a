@@ -3612,6 +3612,31 @@ def clean_html_table(st: dict, body: str) -> dict:
     return out
 
 
+_LOW_ONLY = {"허리", "엉덩이", "허벅지", "밑위", "뒤밑위", "밑단", "무릎", "인심"}
+
+
+def html_low_part(parts: list, brand: str, girth_keys: set | None, label_med: dict | None) -> dict | None:
+    """크롤러가 넘긴 둘째 표(「_parts」) 가운데 하의 표 — size_parts 한 칸 모양으로. 없으면 None.
+
+    하의 라벨(허리 · 허벅지 · 밑위 …)이 둘 넘고 상의 라벨(가슴 · 어깨 · 소매)이 없을 때만 받는다 —
+    둘째 표가 같은 옷의 다른 단위 표이거나 남의 표면 안 붙인다.
+    """
+    for p in parts:
+        if not isinstance(p, dict) or p.get("part") != "하의":
+            continue
+        raw = {c: v for c, v in p.items() if c not in ("part", "_names")}
+        low = normalize_html(raw, brand, girth_keys, label_med) if raw else {}
+        low = {c: v for c, v in low.items() if any(isinstance(x, (int, float)) for x in v)}
+        if len(set(low) & _LOW_ONLY) < 2 or set(low) & {"가슴", "어깨", "소매길이", "화장"}:
+            continue
+        n = min(len(v) for v in low.values())
+        low = {c: v[:n] for c, v in low.items()}
+        names = p.get("_names") if isinstance(p.get("_names"), list) else None
+        return {"part": "하의", "size_names": [str(x) for x in names][:n] if names and len(names) >= n else None,
+                "sizes": low}
+    return None
+
+
 def normalize_html(st: dict, brand: str = "", girth_keys: set | None = None,
                    med: dict | None = None) -> dict[str, list[float]]:
     if sweep_all(st):
@@ -5112,6 +5137,10 @@ def main():
             sg_rng: dict = {}   # 사이즈가이드 창의 밴딩 허리 범위(prep_grid_lines)
             # 늘어나는 허리 같은 폭 값(「_ranges」 — doucan 해석기) · 앱이 [작은값, 큰값]으로 그린다(사람 결정 2026-09-29).
             st_ranges = st.pop("_ranges", None) if isinstance(st, dict) else None
+            # 한 벌에 표가 둘(위 · 아래)인 상품 — 크롤러가 둘째 표를 「_parts」로 넘긴다(sansan-gear INTRA-SUIT,
+            # 코덱스 018). 기본 표가 상의이고 하의 표는 size_parts 로 나간다(SIZE_PARTS 주석 · 앱의 상의 · 하의 탭 —
+            # 사람 2026-10-02 「표가 두벌이면 우리 상의 하의 탭 둘 다 있잖아」).
+            st_parts = st.pop("_parts", None) if isinstance(st, dict) else None
             if isinstance(st, dict) and st and (k[0], json.dumps(st, sort_keys=True, ensure_ascii=False)) not in shared:
                 # 공용 표 판정은 저장된 그대로의 표로 한다(위 줄). 걷어 내는 것은 그 뒤다.
                 st = clean_html_table(st, "\n".join(t for t in (d.get("description") or "", d.get("detail_text") or "") if t))
@@ -5342,6 +5371,10 @@ def main():
                 names = names[:n] if len(names) >= n else None
             sizes = blank_lone_jump(sleeve_to_hwajang(sizes))
             out[r["source_url"]] = {"brand_slug": k[0], "source": source, "size_names": names, "sizes": sizes}
+            if source == "html" and isinstance(st_parts, list):
+                low = html_low_part(st_parts, k[0], girth_keys, label_med)
+                if low:
+                    out[r["source_url"]]["size_parts"] = [low]
             if source == "html" and isinstance(st_ranges, dict):
                 rg = {c: v for c, v in st_ranges.items() if c not in sizes and isinstance(v, list) and len(v) == n}
                 if rg:

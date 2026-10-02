@@ -155,6 +155,12 @@ _RICH = re.compile(r'(?is)<div class="metafield-rich_text_field">(.*?)</div>')
 #   이어 읽어(「length 59.5, 41.5, 77.5 …」) 표로 바꿔 넘긴다. 바로 옆의 모델 정보(182cm 62kg)는 이 틀 밖이다.
 _SIZE_TABLE = re.compile(r'(?is)<table[^>]*class="[^"]*\bsize-table\b[^"]*"[^>]*>.*?</table>')
 _SZ_GUIDE = re.compile(r'(?is)<div class="sz__guide[^"]*">(.*?)</ul>')
+# 한 창에 머리 칸 + 줄 묶음이 둘 서는 옷 — 위 · 아래가 한 벌인 수트(intra-suit-black: Chest/Shoulder/Sleeve/Length 다음에
+# Waist/Crotch/Thigh/Bottom Width/Length). 첫 묶음만 읽어 하의 표를 버렸다(코덱스 018). 둘째 묶음은 size_html_parts 로.
+_SZ_GUIDE_ALL = re.compile(r'(?is)<div class="sz__guide[^"]*">(.*?)<div class="sz__model')
+_SZ_PAIR = re.compile(r'(?is)(<div class="label"[^>]*>.*?</div>\s*<ul[^>]*>.*?</ul>)')
+# 받아 둔 page_extras 의 꼴 — 바뀌면 지난 판 것을 쓰지 않고 페이지를 다시 연다(enrich)
+PAGE_EXTRAS_V = 2
 _SZ_CELLS = re.compile(r'(?is)<span[^>]*>(.*?)</span>')
 
 
@@ -219,17 +225,22 @@ def page_extras(html_text: str) -> dict:
             continue
         h = _text(head).splitlines()[-1] if _text(head) else ""
         tabs.append((h, "\n".join(_text(x) for x in rich)))
-    out = {"meta": meta, "tabs": tabs}
+    out = {"meta": meta, "tabs": tabs, "v": PAGE_EXTRAS_V}
     size_html = page_size_html(html_text)
     if size_html:
         out["size_html"] = size_html
+    m = _SZ_GUIDE_ALL.search(html_text or "")
+    pairs = _SZ_PAIR.findall(m.group(1)) if m else []
+    if len(pairs) >= 2:
+        out["size_html_parts"] = [_sz_guide_table(x) for x in pairs[1:] if _sz_guide_table(x)]
     return out
 
 
 def enrich(d: dict, old: dict | None, updated_at: str, http: cc.PoliteSession) -> None:
     """상품 페이지를 읽어 설명·스펙·실측을 채운다. 상품이 안 바뀌었으면 지난 판 것을 쓴다."""
     ex = None
-    if old and old.get("page_updated_at") == updated_at and "page_extras" in old:
+    if (old and old.get("page_updated_at") == updated_at and isinstance(old.get("page_extras"), dict)
+            and old["page_extras"].get("v", 1) >= PAGE_EXTRAS_V):
         ex = old["page_extras"]
     else:
         r = get_patient(http, d["source_url"])
@@ -279,6 +290,14 @@ def enrich(d: dict, old: dict | None, updated_at: str, http: cc.PoliteSession) -
         n = max((len(v) for k, v in t.items() if not k.startswith("_") and isinstance(v, list)), default=0)
         if len([k for k in t if not k.startswith("_")]) >= 2 and n > width:
             d["size_table"] = t
+    # 둘째 표 — 하의 라벨이면 size_table 의 「_parts」로(size_from_ocr.html_low_part 가 하의 탭으로 낸다)
+    low_keys = {"waist", "thigh", "rise", "crotch", "hip", "hem", "inseam"}
+    for h2 in ex.get("size_html_parts") or []:
+        t2 = cc.extract_size_any(_height_is_length(h2))
+        cols = [k for k in t2 if not k.startswith("_")]
+        if len(cols) >= 2 and d.get("size_table") and any(any(x in k.lower() for x in low_keys) for k in cols):
+            d["size_table"] = {**d["size_table"], "_parts": [{"part": "하의", **t2}]}
+            break
 
 
 def load_prev(slug: str) -> dict[int, dict]:
