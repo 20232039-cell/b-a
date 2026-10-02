@@ -34,8 +34,8 @@ SIXSHOP: dict[str, str] = {
     "finoacinque": "https://www.finoacinque.co.kr",
     "merely-made": "https://www.merelymade.com",
     "polyteru": "https://www.polyteru-store.com",
-    # 2026-10-01 새 매장 — sitemap.xml 상품 549줄. 상세는 거의 그림이고, 그림이 무신사 · 29CM 서버(msscdn · 29cm)에 있다.
-    "travel": "https://travelwebsite.kr",
+    # travel(travelwebsite.kr)은 10-01 첫 판을 걷었지만 상세 그림이 무신사 · 29CM 서버(msscdn · 29cm)에 있어
+    # 실측을 못 채운다 — 2026-10-02 사람: 「travel 그냥 목록에서 제외해」. 씨앗에서 빼(brands_seed_hold.csv) 더 걷지 않는다.
 }
 
 # slug → 가게 주소. 틀이 매장마다 달라(고도몰 · 위사몰 · 메이크샵 · Cargo · 직접 만든 사이트) 매장별 해석기
@@ -137,7 +137,12 @@ NEW_HOLD: set[str] = ({"egnarts", "freckle", "eudon-choi", "goen-j", "finoacinqu
 # 처음 걷는 곳은 9/27 처럼 사람이 값 · 설명 · 실측을 보기 전까지 앱에 안 내보낸다.
 NEW_1001: set[str] = {"rolarola", "samo-ondoh", "sansan-gear", "savage", "sieg", "studio-tomboy", "system", "thisisneverthat",
                       "thug-club", "tngt", "travel", "urago", "we11done", "welter-experiment"}
-NEW_HOLD |= NEW_1001
+# 2026-10-02 사람이 「공개하고」 — 코덱스 018(25벌 중 23 맞음, 틀림 둘은 고침 · 설계)로 값 · 품절 · 옵션 · 실측 · 소재 · 설명을
+# 본 세 곳을 푼다. 판매중 옷 실측 thisisneverthat 99.6 · thug-club 98.6 · sansan-gear 99.3%.
+# rolarola(실측이 그림뿐 — OCR 중) · we11done 은 코덱스 019 뒤에. travel 은 목록에서 뺐다(위 SIXSHOP 주석).
+# robots 가 * 를 막은 sieg · studio-tomboy · system(국내 한섬) · tngt 와 국외 403 인 imweb 넷은 보류 — 앞의 넷은 씨앗에서도 뺐다.
+RELEASED_1002: set[str] = {"thisisneverthat", "thug-club", "sansan-gear"}
+NEW_HOLD = (NEW_HOLD | NEW_1001) - RELEASED_1002   # thisisneverthat 은 PAGES 라 위 set(PAGES) 에서도 빼야 한다
 # 「제외」 판정 가운데 이미 걷혀 있던 곳 — rocket-x-lunch(10-01) · bourie(9/27 판정인데 빠져 있었다, 950벌 전부 품절). 앱에만 안 내보낸다.
 APP_HOLD: set[str] = {"numbering", "kijun", "crump", "jeanbach", "maison-marais", "tripleroot",
                       "rocket-x-lunch", "bourie"} | NEW_HOLD
