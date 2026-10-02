@@ -3773,7 +3773,27 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
     # 설명으로 들어왔고, nomanual 은 반품 안내가 아예 설명 자리를 차지하고 있었다(2026-10-01).
     POLICY = re.compile(r"교환\s*및\s*반품|교환\s*[&/]\s*반품|반품\s*주소|환불|배송\s*(안내|기간|비|방법)|고액결제|무통장|카드사|주문\s*(취소|보류)|"
                         r"상품구매안내|상품사용후기|상품Q&A|관련상품|RETURN|EXCHANGE|SHIPPING|DELIVERY|월 렌탈|게시물이 없습니다|View All|"
-                        r"리뷰 작성|글읽기 권한|성인인증|Related Items|Out of stock|게시글 신고|신고사유|상품결제정보")
+                        r"리뷰 작성|글읽기 권한|성인인증|Related Items|Out of stock|게시글 신고|신고사유|상품결제정보|"
+                        # 배송 안내를 칸마다 나눠 적는 매장(dunst 「배송 방식」 · 「CJ대한통운 택배」 · 「1-3영업일 내 출고」 —
+                        # 판매중 2,721벌 중 2,662벌 설명이 이것뿐이었다, 2026-10-02). 예약 상품의 「순차 출고」는 상품 글이라 넣지 않는다.
+                        r"배송\s*방식|반품\s*[&/]\s*교환|\d\s*영업일|영업일\s*(이내|내|소요)|결제\s*완료일|택배|송장|착불|무료\s*배송|"
+                        r"출고가?\s*지연|당일\s*출고|품절\s*(로\s*인한\s*)?취소|취소가\s*불가|변경이\s*불가|고객센터|반품\s*접수|교환\s*접수|자동\s*수거|"
+                        r"문의\s*사항|법정\s*대리인|오배송|상품\s*불량")
+    # 탭 이름 줄(「REVIEW(1) Q&A(0) GUIDE」 · 「▪ Review (5) ▪ Q&A」 · 「Review write all 1」)은 둘 이상 이어질 때만 지운다 —
+    # 「SIZE GUIDE」 하나는 상품 글에도 쓰인다.
+    _TAB_RUN = re.compile(r"(?:[▪·|]?\s*\b(?:REVIEW|Review|리뷰|Q\s*&\s*A|GUIDE|WRITE|write|LIST|VIEW ALL|View all|See All|all|상품후기|상품문의)"
+                          r"(?![\w&])(?:\s*\(\s*\d+\s*\))?(?:\s+\d+(?![\w.]))?\s*){2,}")
+
+    # 상품 후기 · Q&A · 관련/추천 상품 · 카페24 공용 사이즈 환산 안내 · 게시글 신고 창은 설명이 아니다. 카페24 는 이것들을
+    # 설명 그릇(.xans-product-additional) 안에 함께 두어, 판매중 상품 설명 157,052벌 가운데 30,373벌에 남의 후기 · 문의
+    # 목록 · 다른 상품 이름과 값이 섞였다(satur 1,678 전부 · ronron 2,313 · etmon 1,227 — 코덱스 024 감사, 2026-10-02).
+    # 후기 글이 태거에 들어가면 「좀 긴듯한데」 같은 남의 말이 핏 · 품목 근거가 된다. 모듈 이름으로 걷는다.
+    # 사이즈가이드 모듈은 통째로 걷지 않는다 — 카페24 공용 나라별 환산표(.sizeFemale · .sizeMale …)만 걷고, 매장이 직접 적은
+    # .userGuide(satur 「XS - 총장 70 / 어깨 51 …」)는 남긴다(표본 대조 2026-10-02 satur 4723).
+    _BOARD_SEL = (".xans-product-review, .xans-product-qna, .xans-product-relation, "
+                  ".xans-product-sizeguide .sizeFemale, .xans-product-sizeguide .sizeMale, .xans-product-sizeguide .sizeChild, "
+                  ".xans-product-sizeguide .sizeInfant, .boardReport, #prdReview, #prd-review, #prd_review, #prdQnA, #prdQna, "
+                  "#prd-qna, #prd_qna, #prdRelated, .crema-product-reviews, [class*=vreview]")
 
     def _clean_text(el) -> str:
         el = BeautifulSoup(str(el), "lxml")
@@ -3782,10 +3802,24 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
         # 0 (0개)」로 시작했다(코덱스 검증 004, 2026-09-28). .headingArea 의 요약(.bottom)은 남긴다.
         for t in el.select("table, script, style, select, button, .xans-product-detailinfo, .xans-product-action, "
                            "#totalProducts, #totalPrice, .totalPrice, .guideArea, .productOption, .ec-base-help, "
-                           ".headingArea > .headingMobile, .headingArea > .headingPC, .headingArea > .right"):
+                           ".headingArea > .headingMobile, .headingArea > .headingPC, .headingArea > .right, " + _BOARD_SEL):
             t.decompose()
         _join_split_numbers(el)
         return re.sub(r"\s+", " ", el.get_text(" ", strip=True))
+
+    def _add_part(out: list[str], t: str) -> None:
+        """같은 요약을 여러 그릇이 함께 든다(etmon 은 .simple_desc_top · .detaildesign · .detailArea 셋에 같은 글이 있어 설명이
+        세 번 되풀이됐다). 새 조각이 이미 받은 조각을 품으면 그 부분을 빼고 남은 것만 받는다."""
+        t = _TAB_RUN.sub(" ", t)
+        t = re.sub(r"\s+", " ", t).strip()
+        if not t or t in out or any(t in p for p in out):
+            return
+        for p in out:
+            if len(p) >= 30 and p in t:
+                t = t.replace(p, " ")
+        t = re.sub(r"\s+", " ", t).strip()
+        if len(t) >= 15 or (len(t) >= 5 and _MAT_LINE.search(t)):
+            out.append(t)
 
     def _collect(el, out: list[str], depth: int = 0) -> None:
         """정책 문단만 걷어낸다. 예전엔 정책 낱말이 하나라도 있으면 요소 전체를 버렸는데, badblood 의 Details·Size Guide·
@@ -3797,8 +3831,7 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
         if len(t) < 15 and not (len(t) >= 5 and _MAT_LINE.search(t)):
             return
         if not POLICY.search(t):
-            if t not in out and not any(t in p for p in out):
-                out.append(t)
+            _add_part(out, t)
             return
         # 정책 낱말이 섞인 칸에 상품 글이 요소 없이 <br> 줄로만 들어 있으면 자식으로 내려가도 글을 못 줍는다.
         # nomanual 은 설명 칸에 「COTTON 100%」「16S 1-PLY FABRIC」과 「… 교환이나 환불 사유가 되지 않습니다」를
