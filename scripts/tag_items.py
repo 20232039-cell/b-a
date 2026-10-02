@@ -40,6 +40,7 @@ DATA = ROOT / "data"
 CRAWL = DATA / "crawl"
 OCR = CRAWL / "ocr"
 BROWSER = CRAWL / "browser"
+SIZEGUIDE = CRAWL / "sizeguide"
 VOCAB = DATA / "vocab_aliases.json"
 OUT = DATA / "product_tags_full.json"
 
@@ -545,7 +546,9 @@ _ABBR = {"C": "코튼", "CO": "코튼", "P": "폴리에스터", "PE": "폴리에
          "SI": "실크", "SK": "실크", "TE": "텐셀", "LY": "텐셀"}
 # 「겉감 : P 70% C 30%」(포스센스티브 패딩 셔츠) · 「FABRIC\n- C 100%」(포스센스티브 상세 그림 글 19벌) —
 # 이름표 뒤에 목록 기호 「- 」가 먼저 오면 첫 칸을 못 잡아 통째로 버렸다(2026-09-24).
-_ABBR_LABEL = re.compile(r"(?i)(?:혼용률|혼용|composition|fabric|겉감)\s*[:：]?\s*(?:[-–•·*]\s*)?")
+# 「MATERIAL : P 80% / R 20%」(not4nerd 상세 그림 글 — 527 · 580 · 1167 · 342 …) — 이름표가 material 이라
+# 못 읽고 있었다(2026-10-01). 합 90~110 검산은 그대로라 품번 같은 「MATERIAL SS26」은 안 걸린다.
+_ABBR_LABEL = re.compile(r"(?i)(?:혼용률|혼용|composition|fabric|material|겉감)\s*[:：]?\s*(?:[-–•·*]\s*)?")
 _ABBR_HEAD = re.compile(r"(?i)^\s*(?:fabric|composition)\s*[:：]?\s*$")
 _ABBR_ONE = re.compile(r"\b([A-Z]{1,2})\s*-?\s*(\d{1,3})(?![\d.])")
 
@@ -576,6 +579,66 @@ def _abbr_hits(text: str) -> list[tuple[int, int, str, float]]:
             out.extend(got)
             break
     return out
+
+
+# 「%」가 빠진 혼용률 — o-oi 상세 그림의 FABRIC 칸은 「겉감 면 100%」인데 판독기가 %를 자주 놓친다
+# (「겉감 면 100」, o-oi 2673 · 2674 잔디와펜 크롭 후드집업, 2026-10-01). 이름표 **바로 뒤**에 섬유 이름 + 숫자가
+# 오고, 첫 부위의 합이 90~110 일 때만 받는다 — 「겉감 면 100」은 받고 「FABRIC cm 총장 어깨 … 면100」처럼
+# 표 머리가 끼면 안 받는다(거기 숫자는 치수일 수 있다).
+_NOPCT_ONE = re.compile(r"[ \t]*[-–•·*]?[ \t]*([A-Za-z가-힣]+)[ \t]*[:：]?[ \t]*(\d{1,3})(?![\d.])(?![ \t]*(?:cm|mm|kg|g\b|수|s\b))[ \t]*%?[ \t,/+]*",
+                        re.I)
+
+
+# 겉감 뒤의 안감 · 배색 · 충전재도 같은 꼴로 적는다(「겉감 : COTTON 63 NYLON 37 안감 : POLYESTER 100」, ostkaka).
+# 겉감만 읽으면 퍼센트가 붙은 혼용률(blend_fibers 는 부위를 다 읽는다)과 달리 안감 섬유를 잃는다 — 첫 이름표가
+# 혼용률 이름표일 때 그 뒤 부위 이름표의 덩이도 합 90~110 이면 함께 받는다.
+_NOPCT_PART = re.compile(r"(?i)(?:안감|배색|충전재|충전|lining|trim|contrast)\s*[:：]?\s*(?:[-–•·*]\s*)?")
+
+
+def _nopct_run(text: str, pos: int, product_desc) -> list[tuple[int, int, str, float]]:
+    got = []
+    while True:
+        m = _NOPCT_ONE.match(text, pos)
+        if not m:
+            break
+        f = product_desc._fiber(m.group(1))
+        if f not in FIBERS:
+            break
+        got.append((m.start(1), m.end(2), f, float(m.group(2))))
+        pos = m.end()
+    return got if got and 90 <= sum(g[3] for g in got) <= 110 else []
+
+
+def _nopct_hits(text: str, product_desc) -> list[tuple[int, int, str, float]]:
+    text = text or ""
+    for lab in _ABBR_LABEL.finditer(text):
+        got = _nopct_run(text, lab.end(), product_desc)
+        if not got:
+            continue
+        # 같은 덩이 바로 뒤(200자 안)의 부위 이름표
+        end = got[-1][1]
+        for part in _NOPCT_PART.finditer(text, end, min(len(text), end + 200)):
+            more = _nopct_run(text, part.end(), product_desc)
+            if more:
+                got.extend(more)
+        return got
+    return []
+
+
+# 두 단 그림(왼쪽 SIZE GUIDE 표 · 오른쪽 FABRIC 칸)을 판독기가 줄 단위로 섞어 읽으면 「SIZE GUIDE FABRIC」
+# 다음 줄이 「cm 총장 어깨 가슴 암홀 소매 밑단 면 100」이 된다 — 표 머리 끝에 붙은 「면 100」이 FABRIC 칸이다
+# (o-oi 판매중 의류 빈칸 67벌 중 47벌이 이 꼴, 3126 · 2788 · 3206 …, 2026-10-01 그림으로 확인: 「겉감 면100」).
+# 「밑단 면」은 「단면」 띄어 읽기 규칙(OCR_SPLIT_DANMYEON)에 걸려 면이 지워지므로 낱말 사전으로는 못 읽는다.
+# FABRIC 으로 끝나는 줄 **바로 다음 줄의 끝**에 섬유 + 100 이 올 때만 받는다.
+_FABRIC_COL = re.compile(r"(?im)fabric[ \t]*\n[^\n]*?(?<![가-힣A-Za-z])([가-힣A-Za-z]+)[ \t]?(100)[ \t]*%?[ \t]*$")
+
+
+def _fabric_col_hits(text: str, product_desc) -> list[tuple[int, int, str, float]]:
+    for m in _FABRIC_COL.finditer(text or ""):
+        f = product_desc._fiber(m.group(1))
+        if f in FIBERS:
+            return [(m.start(1), m.end(2), f, 100.0)]
+    return []
 
 
 def blend_fibers(body: str, name: str = "") -> tuple[list[str], bool]:
@@ -619,6 +682,10 @@ def blend_fibers(body: str, name: str = "") -> tuple[list[str], bool]:
     if not hits:
         hits = _abbr_hits(text)
     if not hits:
+        hits = _nopct_hits(text, product_desc)
+    if not hits:
+        hits = _fabric_col_hits(text, product_desc)
+    if not hits:
         return [], False
     runs: list[list[tuple[str, float]]] = [[]]
     last = None
@@ -654,9 +721,53 @@ DENIM_FABRIC = re.compile(r"데님\s*(?:원단|소재|fabric)|denim\s*(?:fabric|
 NAME_PART = re.compile(r"[A-Za-z가-힣]+\s*[-_ ]?\s*(?:collar|trim|trimmed|patch|piping|pocket|strap|카라|칼라|트림|패치|배색|파이핑|포켓|스트랩|장식)", re.I)
 
 
+# 색마다 혼용률이 다른 옷 — waviness 「OUTSHELL Blue Stripe : Cotton 100% Navy Stripe : Cotton 98% Poly 2% Black Stripe :
+# Cotton 76% Nylon 21% Span 3%」를 통째로 읽으면 「… - Black Stripe」에 네이비의 폴리에스터까지 붙는다(waviness 673,
+# 2026-10-01 — 수집기가 ProductGroup 요약을 읽게 되면서 드러났다). siyazu 「LIGHT BEIGE : POLYESTER 58% … RED : ACRYLIC 75% …」,
+# generalidea 「Fabric navy : acrylic 69% + … grey : acrylic 73% + …」도 같은 꼴이다.
+# 「이름 : 혼용률」의 이름이 **색 낱말**(수집기 색 사전)을 담은 덩이가 둘 넘고, 그 가운데 꼭 하나가 상품 이름에 있으면
+# 그 덩이(다음 색 이름표 앞까지)만 혼용률로 읽는다. 색 낱말이 아닌 이름표는 안 본다 — 「퍼카라 : 폴리에스터 100%」를
+# 색으로 보았더니 「퍼카라 체크 하프 울 코트」가 퍼카라의 소재만 남았다(generalidea, 2026-10-01 첫 판).
+_COLOR_LABEL = re.compile(r"(?<![A-Za-z가-힣])((?:[A-Za-z]+ ){0,3}[A-Za-z]+|(?:[가-힣]+ ){0,2}[가-힣]+)\s*[:：]\s*"
+                          r"(?=[A-Za-z가-힣]+(?:[ \t][A-Za-z가-힣]+)?\s*\d{1,3}(?:\.\d+)?\s*%)")
+_PART_HEAD = re.compile(r"(?i)^(?:(?:outshell|outer\s*shell|shell|fabric|material|composition|겉감|소재|혼용률)\s+)+")
+_COLOR_WORDS: set | None = None
+
+
+def _color_words() -> set:
+    global _COLOR_WORDS
+    if _COLOR_WORDS is None:
+        try:
+            import crawl_cafe24 as _cc
+            _COLOR_WORDS = {a.lower() for k, vs in _cc.COLOR_VOCAB.items() for a in [k, *vs] if " " not in a}
+        except Exception:
+            _COLOR_WORDS = set()
+    return _COLOR_WORDS
+
+
+def color_blend(body: str, name: str) -> str:
+    words = _color_words()
+    if not words:
+        return ""
+    labs = []
+    for m in _COLOR_LABEL.finditer(body or ""):
+        lab = _PART_HEAD.sub("", m.group(1)).strip().lower()
+        if lab and any(w in words for w in lab.split()):
+            labs.append((m.start(), m.end(), lab))
+    if len({l for _, _, l in labs}) < 2:
+        return ""
+    low = (name or "").lower()
+    hit = [(i, l) for i, (_, _, l) in enumerate(labs) if re.search(rf"(?<![a-z가-힣]){re.escape(l)}(?![a-z가-힣])", low)]
+    if len({l for _, l in hit}) != 1:
+        return ""
+    i = hit[0][0]
+    end = labs[i + 1][0] if i + 1 < len(labs) else labs[i][1] + 200
+    return (body or "")[labs[i][1]:min(end, labs[i][1] + 200)]
+
+
 def order_materials(found: set[str], body: str, name: str, subtype: str = "",
                     name_mats: list[str] | None = None) -> list[str]:
-    fib, has_blend = blend_fibers(body, name)
+    fib, has_blend = blend_fibers(color_blend(body, name) or body, name)
     found = set(found) | set(name_mats or ())
     if subtype == "Denim":          # 매장이 데님 칸에 넣은 옷 — 글에 그 말이 없어도 데님이다
         found.add("데님")
@@ -1051,9 +1162,15 @@ _TOK_ALPHA = re.compile(r"^[A-Za-z]{3,}$")
 _TOK_HAN = re.compile(r"^[가-힣]{2,}$")
 
 
+# 「겉감 면 100」(%를 놓친 혼용률) — 같은 줄에 표 머리 찌꺼기(「On 7S Anh」)가 섞이면 쓰레기 줄로 보여 한글이
+# 다 지워졌다(o-oi 2673 「cm 종장 On 7S 밑단 Anh tes 겉감 면 100」, 2026-10-01). 이름표 + 섬유 + 숫자가 붙은 줄은 남긴다.
+_LABEL_FIBER_NUM = re.compile(r"(?:겉감|안감|혼용률|혼용|소재)\s*[:：]?\s*(?:면|코튼|폴리에스터|폴리|나일론|레이온|울|린넨|"
+                              r"아크릴|스판덱스|스판|모달|텐셀|캐시미어|실크)\s*\d{1,3}(?![\d.])")
+
+
 def _gibberish(line: str) -> bool:
     """사진 위를 판독기가 훑어 만든 쓰레기 줄인가."""
-    if _HAN_RUN.search(line) or _HAS_PCT.search(line):
+    if _HAN_RUN.search(line) or _HAS_PCT.search(line) or _LABEL_FIBER_NUM.search(line):
         return False                      # 세 글자 이상 이어진 한글이나 「면 100%」는 진짜 글
     junk = 0
     for t in line.split():
@@ -1236,6 +1353,33 @@ _SHELL_W = 8      # 낱말 몇 개 묶음으로 「같은 글」을 셀지
 _JS_CSS = re.compile(r"\bvar\s+\w+\s*=|\{\s*margin\s*:|font-family\s*:", re.I)
 
 
+_MAT_LABEL_TOK = re.compile(r"(?i)^(?:fabric|material|materials|composition|소재|혼용률|혼용|겉감|shell|outshell)[:：|]?$")
+
+
+def _material_spans(toks: list[str]) -> list[tuple[int, int]]:
+    """낱말 목록에서 소재를 적은 구간(「FABRIC Cotton 100%」「소재 : 면 95% 스판 5%」) → [(시작, 끝)]."""
+    starts, pos = [], 0
+    for t in toks:
+        starts.append(pos)
+        pos += len(t) + 1
+    text = " ".join(toks)
+    spans: list[tuple[int, int]] = []
+    for m in _SG_FIBER_PCT.finditer(text):
+        i = max(k for k, s0 in enumerate(starts) if s0 <= m.start())
+        j = max(k for k, s0 in enumerate(starts) if s0 < m.end()) + 1
+        # 앞의 이름표(「FABRIC」「소재 :」) 하나를 같이 남긴다
+        b = i - 1
+        while b >= 0 and toks[b] in (":", "：", "|", "-"):
+            b -= 1
+        if b >= 0 and _MAT_LABEL_TOK.match(toks[b]):
+            i = b
+        if spans and i <= spans[-1][1]:
+            spans[-1] = (spans[-1][0], max(j, spans[-1][1]))
+        else:
+            spans.append((i, j))
+    return spans
+
+
 def strip_shell(brw: dict[str, str], items: list[dict]) -> tuple[int, int]:
     """브라우저 글에서 매장 껍데기를 낱말 묶음 단위로 걷어낸다.
 
@@ -1276,6 +1420,22 @@ def strip_shell(brw: dict[str, str], items: list[dict]) -> tuple[int, int]:
         shell.add(w)
     if not shell:
         return 0, dropped
+    # 껍데기 가장자리에 소재 줄이 끼어 있으면 그 줄은 남긴다. badblood 는 상품 글 끝이
+    # 「두께감 보통 / 비침 없음 / 신축성 없음 / 안감 없음 FABRIC Cotton 100% CARE * 반드시 찬물에 …」인데,
+    # 두께감 줄 · 세탁 안내가 상품마다 똑같아 그 사이의 「FABRIC Cotton 100%」까지 꼬리 껍데기로 잘려 나갔다
+    # (badblood 13723 · 13790 · 13820, 2026-10-01 — 살아 있는 페이지에도 FABRIC COTTON 100% 가 있다).
+    # 다만 그 매장 기록 60% 넘게(10벌 넘게) 똑같이 붙은 소재 줄은 매장 공용 안내로 보고 지키지 않는다.
+    keep_spans: dict[str, list[tuple[int, int]]] = {}
+    seen_stmt: Counter = Counter()
+    for u, toks in toks_of.items():
+        spans = _material_spans(toks)
+        if spans:
+            keep_spans[u] = spans
+            seen_stmt.update({" ".join(toks[i:j]).lower() for i, j in spans})
+    if len(brw) >= 10:
+        common = {t for t, c in seen_stmt.items() if c >= 0.6 * len(brw)}
+        for u in list(keep_spans):
+            keep_spans[u] = [(i, j) for i, j in keep_spans[u] if " ".join(toks_of[u][i:j]).lower() not in common]
     removed = 0
     for u, toks in toks_of.items():
         mark = [False] * len(toks)
@@ -1291,6 +1451,9 @@ def strip_shell(brw: dict[str, str], items: list[dict]) -> tuple[int, int]:
         while b > a and mark[b - 1]:
             b -= 1
         mark = [i < a or i >= b for i in range(len(toks))]
+        for i, j in keep_spans.get(u, ()):
+            for k in range(i, j):
+                mark[k] = False
         if any(mark):
             removed += sum(mark)
             kept = " ".join(t for t, m in zip(toks, mark) if not m)
@@ -1339,6 +1502,108 @@ def drop_boilerplate(brw: dict[str, str], items: list[dict]) -> int:
     return n
 
 
+# 사이즈가이드 창(/product/sizeguide.html?product_no=N, fetch_sizeguide.py 가 받는다)에 소재를 적는 매장이 있다.
+# saintpain 은 상품 설명글이 결제 · 배송 안내뿐이고(판매중 의류 444벌 중 소재 84벌, 18.9%), 소재는
+# 이 창의 맨 끝, 매장 공용 환산표(KR/US/JP …)와 그 상품 실측 뒤에 「MATERIAL / 면 92% / 폴리에스터 8%」로
+# 적혀 있다 — 빈칸 360벌 중 111벌이 받아 둔 창 글에 소재가 있었다(2026-10-01, saintpain 4642 「COTTON 100%」
+# · 4083 「나일론 100%」를 살아 있는 창으로도 확인). 태거는 이 글을 안 읽고 있었다.
+# 창 글을 통째로 붙이지 않는다 — 앞머리가 매장 공용 환산표 · 「측정기준 … 유의하시기 바랍니다」라서 다른
+# 축(기장 · 핏)에 엉뚱한 낱말이 붙을 수 있다. 섬유 + 퍼센트 줄과 바로 앞 이름표 줄(MATERIAL · FABRIC · 소재 …)만
+# 가져온다. 같은 소재 줄이 그 매장 창 글 대부분(60% · 10벌 넘게)에 똑같이 나오면 상품 글이 아니라 매장 공용
+# 안내로 보고 버린다(창 글에 소재를 적는 매장 넷 — saintpain · freckle · lememe · shirter — 중 그런 곳은 아직 없다).
+_SG_FIBER_PCT = re.compile(
+    r"(?<![가-힣A-Za-z])(?:면|코튼|cotton|폴리에스[터테]르?|폴리|polyester|poly|나일론|nylon|polyamide|레이온|rayon|"
+    r"비스코스|viscose|울|wool|양모|아크릴|acrylic|린넨|linen|마|실크|silk|캐시미어|cashmere|스판덱스|스판|spandex|"
+    r"elastane|폴리우레탄|polyurethane|텐셀|tencel|모달|modal|아세테이트|acetate|리오셀|lyocell|큐프라|cupro|"
+    r"알파카|alpaca|모헤어|mohair|앙고라|angora|가죽|leather|소가죽|양가죽|cow\s*leather|lamb\s*leather|"
+    r"오리털|거위털|덕다운|구스다운|duck\s*down|goose\s*down|다운|down|페더|feather)"
+    r"\s*[:：]?\s*\d{1,3}(?:\.\d+)?\s*%"
+    r"|\d{1,3}(?:\.\d+)?\s*%\s*(?:cotton|polyester|poly|nylon|rayon|wool|acrylic|linen|silk|cashmere|spandex|"
+    r"elastane|polyurethane|tencel|modal|acetate|lyocell|cupro|leather|면|코튼|폴리에스터|나일론|레이온|울|린넨|스판)", re.I)
+_SG_LABEL = re.compile(r"(?i)^\s*(?:material|fabric|composition|소재|혼용률|혼용|원단|겉감|안감|배색|shell|lining)\s*[:：|]?\s*$")
+
+
+def sizeguide_materials(sg: dict[str, dict]) -> dict[str, str]:
+    """product_no → 사이즈가이드 창 글에서 뽑은 소재 줄(위 주석)."""
+    out: dict[str, str] = {}
+    for no, d in sg.items():
+        lines = [ln.strip() for ln in (d.get("size_text") or "").splitlines()]
+        keep = []
+        for i, ln in enumerate(lines):
+            if ln and len(ln) <= 120 and _SG_FIBER_PCT.search(ln):
+                if i and _SG_LABEL.match(lines[i - 1]) and lines[i - 1] not in keep:
+                    keep.append(lines[i - 1])
+                keep.append(ln)
+        if keep:
+            out[str(no)] = "\n".join(keep)
+    if len(out) >= 10:
+        cnt = Counter(out.values())
+        common = {t for t, c in cnt.items() if c >= 0.6 * len(sg)}
+        out = {k: v for k, v in out.items() if v not in common}
+    return out
+
+
+def prepare_brand(slug: str, items: list[dict]) -> tuple[list[tuple], frozenset]:
+    """한 매장 상품마다 태거가 읽을 글을 모은다 → ([(행, 본문, 출처, 품질, 색 글)], 매장 되풀이 문장).
+    main 과 시험 도구(전후 대조)가 같은 글을 보게 따로 뺐다(2026-10-01)."""
+    crawl = load_latest(CRAWL / f"{slug}.jsonl")
+    ocr = load_latest(OCR / f"{slug}.jsonl")
+    # 브라우저로 거둔 설명글 — 탭 안에 있어 requests 로는 빈 껍데기만 오는 매장이 있다.
+    # perenn 은 설명글이 8자였는데 탭을 누르고 내려서 받으니 40벌이 치수·소재까지 들어
+    # 있었다(2026-09-04). 주소로 맞춘다 — product_no 는 브라우저 기록에 없을 수 있다.
+    brw: dict[str, str] = {}
+    bp = BROWSER / f"{slug}.jsonl"
+    if bp.exists():
+        for l in bp.read_text(encoding="utf-8").splitlines():
+            if l.strip():
+                b = json.loads(l)
+                t = (b.get("description") or "").strip()
+                if b.get("source_url") and len(t) > len(brw.get(b["source_url"], "")):
+                    brw[b["source_url"]] = t
+    # strip_shell 을 먼저 — 껍데기 빈도는 메뉴만 담긴 기록까지 세어야 문턱(10%)을 넘는다. 그 기록들은
+    # drop_boilerplate 가 버릴 것들인데, 먼저 버리면 메뉴가 섞인 나머지 기록이 문턱 아래로 떨어져
+    # 후디의 메뉴가 그대로 남았다(after6b 에서 확인, 2026-09-08).
+    strip_shell(brw, items)
+    drop_boilerplate(brw, items)
+    sgmat = sizeguide_materials(load_latest(SIZEGUIDE / f"{slug}.jsonl"))
+    prepared = []
+    for r in items:
+        d = crawl.get(str(r["product_no"]), {})
+        o = ocr.get(str(r["product_no"]), {})
+        desc = d.get("description") or ""
+        dt = d.get("detail_text") or ""
+        if dt and dt[:200] != desc[:200]:
+            desc = desc + "\n" + dt   # JSON-LD 요약과 본문 글이 다르면 둘 다 읽는다(2026-09-03)
+        sbody, scolor = spec_texts(d.get("spec"))
+        # 글자 상한(12,000자)에 걸려 잘린 기록은 그림별 글을 따로 남긴다(ocr_detail_images).
+        # 태거가 그걸 안 보고 잘린 ocr_text 만 읽고 있었다 — 상세 그림은 대개
+        # 「착장 → 사이즈 표 → 소재·세탁」 차례라, 잘리는 자리가 바로 소재다.
+        # 지금은 잘린 기록이 137건뿐이지만(소재를 잃는 것 5벌), 빈 축을 채우는 판이
+        # 표를 찾아도 안 멈추게 바뀌어 글이 길어진다. 그 판을 돌리기 전에 막는다.
+        _raw = o.get("ocr_text") or ""
+        _per = "\n".join(t for t in ((i or {}).get("text") or "" for i in (o.get("images") or [])) if t)
+        otext = denoise_ocr(_per if len(_per) > len(_raw) else _raw)
+        btext = brw.get(r["source_url"], "")
+        if btext and btext[:200] != desc[:200]:
+            pass          # 브라우저 글은 따로 붙인다 — 원래 글과 겹치면 아래에서 무시된다
+        else:
+            btext = ""
+        gtext = sgmat.get(str(r["product_no"]), "")
+        body = "\n".join(t for t in (desc, sbody, otext, btext, gtext) if t)
+        sources = [s for s, t in (("json-ld" if d.get("description_source") == "json-ld" else "html", desc), ("spec", sbody), ("ocr", otext), ("browser", btext), ("sizeguide", gtext)) if t]
+        quality = quality_of(body)
+        # 상품 이름은 색을 고르는 데 쓰지 않는다. 수집기의 pick_color 가 이미 이름을
+        # 읽되 「끝 괄호 → 이름 → 설명 → 스펙」 순서를 지켜 representative_color 를
+        # 정해 두었다. 이름을 다시 통째로 훑으면 그 순서가 무너진다 — 수집기 어휘로
+        # 갈아탄 뒤 kirsh 「CHERRY」 상품이 전부 레드가 되어 75 → 602 로 뛰었다
+        # (체리는 이 브랜드의 마스코트지 옷 색이 아니다, 2026-09-05).
+        color_text = " ".join(t for t in (r.get("representative_color", ""), scolor) if t)
+        prepared.append((r, body, sources, quality, color_text))
+    # 매장이 되풀이하는 문장은 소재의 근거로 안 쓴다 — store_repeats 주석
+    store_lines = store_repeats([p[1] for p in prepared])
+    return prepared, store_lines
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--brands", nargs="*")
@@ -1360,59 +1625,7 @@ def main():
     q_count, src_count = Counter(), Counter()
     ax_count, cat_count = Counter(), Counter()
     for slug, items in sorted(by_brand.items()):
-        crawl = load_latest(CRAWL / f"{slug}.jsonl")
-        ocr = load_latest(OCR / f"{slug}.jsonl")
-        # 브라우저로 거둔 설명글 — 탭 안에 있어 requests 로는 빈 껍데기만 오는 매장이 있다.
-        # perenn 은 설명글이 8자였는데 탭을 누르고 내려서 받으니 40벌이 치수·소재까지 들어
-        # 있었다(2026-09-04). 주소로 맞춘다 — product_no 는 브라우저 기록에 없을 수 있다.
-        brw: dict[str, str] = {}
-        bp = BROWSER / f"{slug}.jsonl"
-        if bp.exists():
-            for l in bp.read_text(encoding="utf-8").splitlines():
-                if l.strip():
-                    b = json.loads(l)
-                    t = (b.get("description") or "").strip()
-                    if b.get("source_url") and len(t) > len(brw.get(b["source_url"], "")):
-                        brw[b["source_url"]] = t
-        # strip_shell 을 먼저 — 껍데기 빈도는 메뉴만 담긴 기록까지 세어야 문턱(10%)을 넘는다. 그 기록들은
-        # drop_boilerplate 가 버릴 것들인데, 먼저 버리면 메뉴가 섞인 나머지 기록이 문턱 아래로 떨어져
-        # 후디의 메뉴가 그대로 남았다(after6b 에서 확인, 2026-09-08).
-        strip_shell(brw, items)
-        drop_boilerplate(brw, items)
-        prepared = []
-        for r in items:
-            d = crawl.get(str(r["product_no"]), {})
-            o = ocr.get(str(r["product_no"]), {})
-            desc = d.get("description") or ""
-            dt = d.get("detail_text") or ""
-            if dt and dt[:200] != desc[:200]:
-                desc = desc + "\n" + dt   # JSON-LD 요약과 본문 글이 다르면 둘 다 읽는다(2026-09-03)
-            sbody, scolor = spec_texts(d.get("spec"))
-            # 글자 상한(12,000자)에 걸려 잘린 기록은 그림별 글을 따로 남긴다(ocr_detail_images).
-            # 태거가 그걸 안 보고 잘린 ocr_text 만 읽고 있었다 — 상세 그림은 대개
-            # 「착장 → 사이즈 표 → 소재·세탁」 차례라, 잘리는 자리가 바로 소재다.
-            # 지금은 잘린 기록이 137건뿐이지만(소재를 잃는 것 5벌), 빈 축을 채우는 판이
-            # 표를 찾아도 안 멈추게 바뀌어 글이 길어진다. 그 판을 돌리기 전에 막는다.
-            _raw = o.get("ocr_text") or ""
-            _per = "\n".join(t for t in ((i or {}).get("text") or "" for i in (o.get("images") or [])) if t)
-            otext = denoise_ocr(_per if len(_per) > len(_raw) else _raw)
-            btext = brw.get(r["source_url"], "")
-            if btext and btext[:200] != desc[:200]:
-                pass          # 브라우저 글은 따로 붙인다 — 원래 글과 겹치면 아래에서 무시된다
-            else:
-                btext = ""
-            body = "\n".join(t for t in (desc, sbody, otext, btext) if t)
-            sources = [s for s, t in (("json-ld" if d.get("description_source") == "json-ld" else "html", desc), ("spec", sbody), ("ocr", otext), ("browser", btext)) if t]
-            quality = quality_of(body)
-            # 상품 이름은 색을 고르는 데 쓰지 않는다. 수집기의 pick_color 가 이미 이름을
-            # 읽되 「끝 괄호 → 이름 → 설명 → 스펙」 순서를 지켜 representative_color 를
-            # 정해 두었다. 이름을 다시 통째로 훑으면 그 순서가 무너진다 — 수집기 어휘로
-            # 갈아탄 뒤 kirsh 「CHERRY」 상품이 전부 레드가 되어 75 → 602 로 뛰었다
-            # (체리는 이 브랜드의 마스코트지 옷 색이 아니다, 2026-09-05).
-            color_text = " ".join(t for t in (r.get("representative_color", ""), scolor) if t)
-            prepared.append((r, body, sources, quality, color_text))
-        # 매장이 되풀이하는 문장은 소재의 근거로 안 쓴다 — store_repeats 주석
-        store_lines = store_repeats([p[1] for p in prepared])
+        prepared, store_lines = prepare_brand(slug, items)
         for r, body, sources, quality, color_text in prepared:
             tags = tagger.tag(r["category"], r["name"], body, color_text, quality,
                               sleeve_cm=sleeve_of(r["source_url"]), store_lines=store_lines)

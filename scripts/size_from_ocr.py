@@ -1811,6 +1811,13 @@ def parse_slots(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] | 
         known = [c for c in slots if c]
         if len(known) < 2 or len(set(known)) != len(known):
             continue
+        last_known = max(x for x, c in enumerate(slots) if c)
+        # 꼬리 토막을 떼는 갈래(아래 o-oi 3152)는 머리줄이 깨끗할 때만 — 꼬리는 글자 낱말뿐이고, 아는 라벨 사이의
+        # 못 읽은 칸도 글자 낱말이어야 한다. 「종기장 ： 가슴단면 Bis」(cayl 2506)의 「：」 같은 기호 토막이 칸으로 세어지면
+        # 값 하나가 거기 빠져 가슴에 팔기장 79.5 가 붙었다(전수 대조 2026-10-01).
+        tail_words = (last_known + 1 < len(toks)
+                      and all(re.fullmatch(r"[A-Za-z가-힣]{2,}", t) for t in toks[last_known + 1:])
+                      and all(re.search(r"[A-Za-z가-힣]{2,}", toks[x]) for x in range(last_known) if not slots[x]))
         names, cols = [], {c: [] for c in known}
         for row in lines[i + 1:i + 12]:
             # 숫자 사이에 낀 콜론은 소수점이다 — siyazu 「One 58 64.5 72:3 25:5」의 72:3 은 72.3 이지
@@ -1830,6 +1837,16 @@ def parse_slots(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] | 
             if len(tok) == len(slots) + 1:
                 nm, cells = tok[0], tok[1:]
                 cslots = slots
+            elif (len(tok) == len(slots[:last_known + 1]) + 1 and slots[0] is not None and tail_words
+                  and not canon_label(tok[0])):
+                # 마지막 아는 라벨 **뒤**의 못 읽은 토막은 값이 없을 수 있다 — 옆에 붙은 다른 표의 제목이
+                # 머리줄에 얹힌 것이다. o-oi 3152 「cm 종장. orl 힙 허벅지 밑단 겉감 / XS 101.5 33.5 46.5 30.5 25」의
+                # 「겉감」은 옆 FABRIC 표 제목이라 값이 다섯뿐이다. 그 토막을 떼면 자리가 맞는다(orl=허리 자리는 버린다).
+                # 첫 칸이 아는 라벨일 때만 — 첫 칸이 이름 칸 제목일 수 있는 꼴은 아래 갈래가 본다(2026-10-01).
+                # 떼는 토막은 글자 낱말뿐이어야 하고(수가 든 「Thigh 31.5 32.5」는 머리줄이 아니라 값 줄이다 —
+                # siyazu 2018 이 「Hip 48.5 50.5」를 사이즈 HIP 로 읽었다), 줄 머리가 치수 이름이면 안 된다.
+                nm, cells = tok[0], tok[1:]
+                cslots = slots[:last_known + 1]
             elif len(tok) == len(slots) and slots[0] is None:
                 # **머리줄 첫 칸이 아는 라벨이면 이름 칸 제목일 리 없다.** 그 갈래는 첫
                 # 자리를 버리고 한 칸씩 당겨 짝짓는데, 머리줄이 깨져 토막만 하나 늘어난
@@ -1895,6 +1912,41 @@ def parse_slots(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] | 
 
 
 _UNIT_CELL = re.compile(r"^[(\[]?\s*(?:cm|size|사이즈|단위|inch|in)\s*[)\]]?$", re.I)
+
+
+# 머리줄에 흔히 붙는 제목 낱말 — 라벨이 깨진 것이 아니다.
+_HEAD_TITLE = re.compile(r"(?i)^(?:size|sizes|사이즈|guide|chart|info|information|단위|unit|cm|inch|실측|측정|부위|구분|호수|"
+                         r"item|option|옵션|color|컬러|색상|spec|measurements?|표|단면|기준)$")
+
+
+def _missing_side(head_line: str) -> str | None:
+    """값 줄이 라벨보다 한 칸 많을 때, 머리줄의 맨 앞 라벨이 깨졌다는 표지가 있으면 "front".
+
+    표지는 **칸 번호 표식**이다. ronron 은 도식에 ①②③을 달고 머리줄에도 칸마다 붙인다 —
+    「Size 0) ad @ 엉덩이 @ 밑단 @ 총기장」. 아는 라벨 둘 이상이 표식 뒤에 서 있고, 첫 아는 라벨 앞에도
+    「표식 + 못 읽은 낱말」이 있으면 그 낱말은 깨진 라벨 칸이다(여기서는 허리).
+    표식 없이 앞에 낱말만 있는 것은 표지로 치지 않는다 — 「사이즈(00) 어깨넓이 …」 「SIZE Se 어깨너비 …」
+    「SIZE SAS 어깨넓이 …」(beyond-closet 10823 · easy-no-easy 313 · crump 4699)처럼 사이즈 이름 칸의
+    제목이 깨진 것이라, 이것까지 「앞이 빠졌다」로 보면 맞게 읽던 표가 한 칸씩 밀렸다(함수 대조 2026-10-01).
+    """
+    toks = [t for t in join_multiword(re.sub(r"[|ㅣ]", " ", head_line)).split() if t]
+    slots = [canon_label(t) for t in toks]
+    known = [i for i, c in enumerate(slots) if c]
+    if len(known) < 2:
+        return None
+    mark = lambda j: j >= 0 and bool(_MARK_TOK.match(toks[j]))
+    if sum(1 for i in known if mark(i - 1)) < 2:
+        return None
+
+    def junk(t):
+        t2 = re.sub(r"[^\w가-힣]", "", t)
+        return (len(t2) >= 2 and not t2.isdigit() and not _MARK_TOK.match(t) and not _FAKE_UNIT.match(t)
+                and not _UNIT_CELL.match(t) and not _HEAD_TITLE.match(t2))
+
+    front = [j for j in range(known[0]) if junk(toks[j]) and mark(j - 1)]
+    after = any(junk(t) for t in toks[known[-1] + 1:])
+    inner = any(junk(toks[i]) for i in range(known[0], known[-1] + 1) if not slots[i])
+    return "front" if front and not after and not inner else None
 
 
 def parse_matrix(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] | None:
@@ -1975,13 +2027,39 @@ def parse_matrix(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] |
         labels = pick_labels(ln, labels, lines[i + 1:i + 6])
         names, cols = [], {c: [] for c in labels}
         pending: list[tuple[int, list, list]] = []
+        plus1: list[tuple[int, list, list]] = []   # 칸이 라벨보다 하나 많았던 줄(_missing_side 주석)
         for row in lines[i + 1:i + 12]:
+            # 값 줄을 하나도 못 받았는데 라벨이 더 많은 머리줄이 또 나오면 그 아래 값은 그 머리줄의 것이다.
+            # till-i-die 8498 은 도식의 화살표 글자 「(Chest Width) 총기장」(라벨 둘)을 머리줄로 잡고,
+            # 세 줄 아래 진짜 머리줄 「사이즈 총기장 어깨단면 가슴단면 소매길이 소매단면」을 건너뛰어
+            # 「FREE 53 = 44.5 - =」를 가슴 53 · 총장 44.5 로 읽었다(진짜 총장 53 · 가슴 44.5, 2026-10-01).
+            if not names:
+                _more = {ALIAS.get(re.sub(r"\s+", "", m2.group(0)).lower()) for m2 in LABEL_RX.finditer(row)}
+                _more.discard(None)
+                if len(_more) > len(labels):
+                    break
             # 세로선(|)은 칸 구분(frizmworks). 콜론·세미콜론은 OCR 이 세로선이나 점을 잘못 읽은 것이다
             # — 「M 49 55 58: 60」(dnsr, 2026-09-04) 처럼 한 글자 때문에 표 한 장을 통째로 버리고 있었다.
             # 숫자 사이에 낀 콜론은 소수점이다 — siyazu 「One 58 64.5 72:3 25:5」의 72:3 은 72.3 이지
             # 두 칸이 아니다. 칸 구분으로 보면 네 칸짜리 표가 여섯 칸이 되어 통째로 버려지고,
             # 「36:5」는 36 으로 읽혀 값이 조용히 틀어졌다(2026-09-05). 뒤에 빈칸이 오면 구분이다.
             row = re.sub(r"(?<=\d):(?=\d)", ".", row)
+            # 홀로 선 「=」는 빈 칸 표시 「—」를 OCR 이 잘못 읽은 것일 수 있다(till-i-die 8498 「FREE 53 = 44.5 - =」 ·
+            # kirsh 10827 「OOF 58 = 56 84」 — 민소매 · 래글런이라 어깨가 빈칸). 아래에서 구분자로 지우면 칸이 모자라
+            # 줄을 버린다. 지우면 칸 수가 안 맞고 빈칸으로 보면 **꼭 맞을 때만** 빈칸으로 바꾼다(2026-10-01).
+            if re.search(r"(?<!\S)=(?!\S)", row):
+                _cnt = lambda x: len(re.sub(r"[|ㅣ:;=]", " ", x).split())
+                _eq = re.sub(r"(?<!\S)=(?!\S)", "-", row)
+                # 빈칸으로 본 자리에 맞춰 놓은 수가 제 라벨의 범위를 **둘 이상** 벗어나면 자리가 틀린 것이다 — loeuvre 1902
+                # 「01 58 108 = 40.8 = 50.6 = 99.5」는 앞의 부스러기 58 때문에 칸 수만 우연히 맞아 어깨 108 · 밑단 99.5 가 범위 밖,
+                # 허리 40.8 · 소매장 50.6 은 남의 값이 됐다. 하나는 봐준다 — loeuvre 1614 「OO_FREE 04.5 = 57.9 84 25:5 42」의
+                # 04.5(64.5 를 잘못 읽음)는 그 칸만 비고 나머지는 제자리다.
+                _cells = re.sub(r"[|ㅣ:;]", " ", _eq).split()[1:]
+                _off = sum(1 for lab, c in zip(labels, _cells)
+                           if re.fullmatch(NUM_CELL, re.sub(r"(?i)c?m$", "", c))
+                           and fix_value(lab, re.sub(r"(?i)c?m$", "", c)) is None)
+                if _cnt(row) != len(labels) + 1 and _cnt(_eq) == len(labels) + 1 and _off <= 1:
+                    row = _eq
             # 「_」는 빈 칸 표시다 — 지우면 칸이 밀린다(parse_slots 의 같은 자리 주석 참고).
             r = re.sub(r"[|ㅣ:;=]", " ", row).strip()
             r = re.sub(r"(?<!\S)_+(?!\S)", "-", r)
@@ -2010,6 +2088,7 @@ def parse_matrix(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] |
                 # 값이 제 라벨의 상식 범위에 더 많이 들어맞는 쪽을 쓴다.
                 if len(cells) == len(labels) + 1:
                     head, tail = cells[:len(labels)], cells[1:]
+                    plus1.append((len(names), head, tail))
 
                     def _fit(cs):
                         return sum(1 for c, v in zip(labels, cs) if fix_value(c, v) is not None)
@@ -2133,6 +2212,18 @@ def parse_matrix(lines: list[str]) -> tuple[list[str], dict[str, list[float]]] |
             if pick is not None:
                 for c, raw in zip(labels, pick):
                     cols[c][row_i] = None if raw in ("-", "–", "—") else fix_value(c, raw)
+        # **모든** 값 줄이 라벨보다 한 칸 많으면 머리줄에서 라벨 하나가 깨져 빠진 것이다. 줄마다
+        # 앞/뒤를 따로 고르는 위 잣대(윗줄과 닮은 쪽)는 이때 쓸모가 없다 — 모든 줄이 같은 쪽으로
+        # 밀려 서로 닮기 때문이다. 그래서 늘 앞 칸부터 받았고, 빠진 라벨이 **맨 앞**이면 표 전체가
+        # 한 칸씩 밀렸다: ronron 2202 「Size 0) ad @ 엉덩이 @ 밑단 @ 총기장 / S 33cm 44cm 51cm 56cm」
+        # (「ad」가 허리) 가 엉덩이 33 · 밑단 44 · 총장 51 이 됐다(진짜 총장 56, 2026-10-01 그림 대조).
+        # 머리줄이 어느 쪽에 못 읽은 낱말을 품고 있는지로만 고친다(_missing_side). 표지가 없으면
+        # 예전대로 둔다 — 남는 칸은 대개 맨 뒤다(아래 2026-09-23 주석).
+        if names and plus1 and len(plus1) == len(names):
+            if _missing_side(ln) == "front":
+                for row_i, head, tail in plus1:
+                    for c, raw in zip(labels, tail):
+                        cols[c][row_i] = None if raw in ("-", "–", "—") else fix_value(c, raw)
         # 라벨 수를 먼저 본다. 행 수만 보면 설명 문장이 진짜 머리줄을 이긴다 —
         # kirsh 「ㆍ 암홀, 밑단 뒷부분 밴딩」(라벨 2)이 「(cm) 총장 어깨 가슴」(라벨 3)을
         # 눌러서 {'밑단': [41, 43]} 한 칸만 남았다(2026-09-04, 100건이 이 꼴이었다).
@@ -2567,6 +2658,85 @@ def drop_inches(st: dict[str, list]) -> dict[str, list]:
 
 
 _INCH_BODY = re.compile(r"(?i)\b(?:waist|hips?|chest|bust|허리|힙|엉덩이|가슴)\s*[:：]?\s*\d{2}(?:[.,]\d)?\s*(?:inch(?:es)?|in\b|인치)")
+# 모델 몸 치수 줄 — 옷 표가 아니다. 위 _INCH_BODY 는 「숫자 바로 뒤 inch」만 잡아서 이런 꼴이 그대로 읽혔다
+# (창고 전수 2026-10-01, 칸 밀림 조사):
+#   till-i-die  「가슴 28 허리 23 엉덩이 34 (Inch)」        → 가슴 28 · 허리 23 · 엉덩이 34 (진짜 가슴너비 51 은 같은 라벨이라 밀려남)
+#   lartisan    「177cm Bust 78cm Waist 58cm Hip 89cm_S Size」 → 니트에 허리 58
+#   known-better 「HEIGHT 168 cm / BUST 81cm / WAIST 58cm / HIP 83cm」(한 줄에 하나씩) → 가슴 81 · 허리 58 · 엉덩이 83
+# 줄 하나: 몸 낱말(가슴·허리·엉덩이·bust·waist·hip) 둘 이상에 수가 붙고, 키(1[4-9]x) 나 inch 가 같은 줄에 있고,
+#   옷에만 있는 낱말(어깨·총장·소매·밑위·허벅지·밑단·너비·단면 …)이 없을 때.
+# 여러 줄: 키 줄(OCR 이 「nIGHT179」로 흘린 것 포함) 위 네 줄 · 아래 열 줄 안에서, 옷 낱말 없이 몸 둘레로만
+#   나올 값이나 인치 표시가 붙은 몸 낱말 줄(_mb_bodyish)이 서로 다른 몸 낱말로 둘 이상일 때.
+# 둘 다 그 줄을 지우고 읽는다 — 뒤에서 값만 빼면(drop_model_body) 진짜 가슴 칸이 이미 밀려 있다.
+_MB_PAIR = re.compile(r"(?i)(?<![가-힣A-Za-z])(bust|chest|waist|hips?|가슴|허리|엉덩이|힙)\s*[:：\-]?\s*(\d{2,3}(?:\.\d)?)")
+_MB_GARMENT = re.compile(r"(?i)어깨|총장|총기장|기장|소매|밑위|허벅지|밑단|암홀|너비|단면|length|shoulder|sleeve|rise|thigh|hem|armhole|width")
+_MB_HEIGHT = re.compile(r"(?i)(?:height|ight|키|신장)\s*[:：\-]?\s*1[4-9]\d|(?<![\d.])1[4-9]\d(?:\.\d)?\s*cm")
+_MB_INCH = re.compile(r"(?i)inch|인치")
+
+
+def _mb_bodyish(ln: str) -> bool:
+    """키 줄 곁의 부스러기 섞인 몸 치수 줄 — 「가슴 8457 82.5」 「허리 WAIST 61」(margarin-fingers 3433).
+    옷 낱말이 없고, 몸 둘레로만 나올 값(가슴 · 엉덩이 70 넘게 · 허리 52 넘게)이나 인치로만 나올 값이 붙어 있을 때만.
+    옷 단면은 그 사이에 있으니 바로 아래 붙은 진짜 표(「허리 35 엉덩이 50」)는 걸리지 않는다."""
+    if _MB_GARMENT.search(ln) or not _MB_PAIR.search(ln):
+        return False
+    # 인치 표시(「BUST 27”」 「Waist 23 inch」)가 붙은 몸 낱말 줄은 값 크기와 상관없이 몸 치수다
+    if _MB_INCH.search(ln) or re.search(r"\d\s*[\"”]", ln):
+        return True
+    for w, v in _MB_PAIR.findall(ln):
+        x = float(v)
+        waist = w.lower().startswith(("wa", "허"))
+        if (waist and x >= 52) or (not waist and x >= 70):
+            return True
+        # 인치 표시 없이 적은 인치 몸 치수 — lartisan 4039 「HEIGHT 177 / WAIST23 ~ / HIPS 35」. 옷 단면으로는
+        # 어른 옷에 거의 없는 작은 값(허리 30 · 엉덩이 40 · 가슴 38 이하)이라, 키 줄 곁에서만 몸 치수로 본다.
+        if (waist and x <= 30) or (w.lower().startswith(("hip", "엉", "힙")) and x <= 40) or \
+                (w.lower().startswith(("bu", "ch", "가")) and x <= 38):
+            return True
+    return False
+
+
+def _mb_pairs_only(ln: str) -> bool:
+    """모델 여럿을 나란히 적은 줄 — **같은** 몸 낱말이 두 번 넘게 서고 그 짝 말고는 부스러기뿐(옷 낱말 없음).
+    다른 낱말끼리의 짝(「가슴 52 허리 40」)은 진짜 FREE 표 줄일 수 있어 건드리지 않는다."""
+    if _MB_GARMENT.search(ln):
+        return False
+    ws = [w.lower()[:3] for w, _ in _MB_PAIR.findall(ln)]
+    if not ws or max(ws.count(w) for w in ws) < 2:
+        return False
+    rest = re.sub(r"(?i)\b(?:cm|inch|in)\b", " ", _MB_PAIR.sub(" ", ln))
+    return not re.search(r"\d{2}", rest) and len(re.findall(r"[A-Za-z가-힣]", rest)) <= 6
+
+
+def blank_model_lines(text: str) -> str:
+    if not text:
+        return text or ""
+    lines = text.splitlines()
+    gone = set()
+    for i, ln in enumerate(lines):
+        if _MB_GARMENT.search(ln):
+            continue
+        words = {w.lower()[:3] for w, _ in _MB_PAIR.findall(ln)}
+        if len(words) >= 2 and (_MB_HEIGHT.search(ln) or _MB_INCH.search(ln)):
+            gone.add(i)
+        elif _MB_HEIGHT.search(ln) and len(words) <= 1:
+            # 둘째 모델이 키 줄을 OCR 이 뭉갠 채 여덟 줄쯤 아래에 오기도 한다(margarin-fingers 4639) — 아래로는 열 줄까지.
+            near = [j for j in range(max(0, i - 4), min(len(lines), i + 11))
+                    if j != i and _mb_bodyish(lines[j])]
+            if len({_MB_PAIR.search(lines[j]).group(1).lower()[:3] for j in near}) >= 2:
+                gone.update(near)
+                if words:
+                    gone.add(i)
+                # 모델 덩어리로 확인된 곳에서는 값이 작아도(인치 표시 없는 「WAIST 23 = WAIST 23」) 모델을 나란히 적은
+                # 줄도 지운다 — grove 4124(양말)의 둘째 모델 줄이 허리 23 으로 남아 잡화에 실측이 섰다(2026-10-01).
+                for j in range(max(0, i - 4), min(len(lines), i + 11)):
+                    if j not in gone and _mb_pairs_only(lines[j]):
+                        gone.add(j)
+    if not gone:
+        return text
+    return "\n".join("" if i in gone else ln for i, ln in enumerate(lines))
+
+
 _FULLWIDTH = {c: c - 0xFEE0 for c in range(0xFF10, 0xFF5B) if chr(c - 0xFEE0).isalnum()}
 
 
@@ -2577,7 +2747,7 @@ def from_ocr(text: str) -> tuple[list[str] | None, dict[str, list[float]]]:
     # 인치로 적은 몸 치수(「Waist 25.5inch」 「HIP 34.4 inch」)는 모델 정보다 — 옷 치수로 읽혀 허리 · 엉덩이 한 칸짜리
     # 가짜 실측이 373벌 섰다(beyond-closet 223 · till-i-die 122 …, 조사 2026-09-29). 읽기 전에 지운다. 옷 표가 인치여도
     # cm 로 읽으면 틀린 값이라 잃을 것이 없다.
-    text = _INCH_BODY.sub(" ", text or "")
+    text = _INCH_BODY.sub(" ", blank_model_lines(text or ""))
     half = text.translate(_FULLWIDTH)
     if half == text:
         return _from_ocr_one(text)
@@ -2994,6 +3164,16 @@ def _from_ocr(text: str) -> tuple[list[str] | None, dict[str, list[float]]]:
         # 무조건 새 갈래를 쓰게 했더니 siyazu 「Length) | Hip 50cm 52cm」처럼 한 줄에
         # 두 칸이 얹힌 표에서 엉덩이가 빠졌다(2026-09-15, 107벌).
         if len(tclean) >= 2 and len(tclean) > len(rows_out):
+            # 두 갈래가 같은 표를 나눠 읽었으면 합친다 — 겹치는 라벨 값이 똑같고 칸 수가 같을 때만.
+            # known-better 2481 은 「총장 108 109.2 vv]」를 parse_rows 만, 「허벅지너비 27 28」 「밑단너비 …」를
+            # 이 갈래만 읽었다. 모델 몸 치수 줄을 지우자(blank_model_lines) parse_rows 쪽 라벨 수가 줄어
+            # 이 갈래가 이기면서 총장이 빠졌다(2026-10-01).
+            n_t = len(next(iter(tclean.values())))
+            shared = set(tclean) & set(rows_out)
+            if shared and all(tclean[c] == rows_out[c] for c in shared):
+                for c, v in rows_out.items():
+                    if c not in tclean and len(v) == n_t:
+                        tclean[c] = v
             return trans[0], tclean
     return None, rows_out
 
@@ -4810,7 +4990,8 @@ def main():
     ocr: dict[tuple, str] = {}
     for p in OCR.glob("*.jsonl"):
         for d in iter_jsonl(p):
-            ocr[(d["brand_slug"], str(d["product_no"]))] = d.get("ocr_text") or ""
+            # 모델 몸 치수 줄은 읽기 전에 지운다(blank_model_lines 주석) — 매장 틀 · 느슨한 읽기 · 둘레 표 갈래도 이 글을 본다.
+            ocr[(d["brand_slug"], str(d["product_no"]))] = blank_model_lines(d.get("ocr_text") or "")
     # 브라우저로 거둔 것 — 자바스크립트가 그리는 표는 여기밖에 없다(diafvine).
     brw: dict[str, dict] = {}
     if BROWSER.exists():

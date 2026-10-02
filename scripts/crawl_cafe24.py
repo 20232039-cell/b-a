@@ -2652,6 +2652,28 @@ def parse_json_ld_product(html_text: str) -> dict:
     return {}
 
 
+def json_ld_group_description(html_text: str) -> str:
+    """<script type="application/ld+json"> 이 Product 가 아니라 ProductGroup(옵션 묶음)인 매장의 설명글.
+    설명은 묶음에 없고 hasVariant 의 각 Product 에 똑같이 들어 있다. parse_json_ld_product 는 Product 만 찾아
+    이 글을 통째로 놓쳤다 — studiojkoo 「Chief Material: Cotton81% Tencel14% Span5%」, waviness 「OUTSHELL Cotton 100%」,
+    saintpain 4322 「면 100% 제조국 : 방글라데시」(2026-10-01, 받아 본 페이지로 확인). 가격 · 재고는 그대로 HTML 에서 읽게
+    두고(옵션마다 다를 수 있다) 설명만 가져온다."""
+    for raw in re.findall(r'<script type="application/ld\+json">(.*?)</script>', html_text, re.S):
+        try:
+            j = json.loads(raw)
+        except Exception:
+            continue
+        for it in (j if isinstance(j, list) else [j]):
+            if not isinstance(it, dict) or it.get("@type") != "ProductGroup":
+                continue
+            if (it.get("description") or "").strip():
+                return it["description"]
+            for v in it.get("hasVariant") or []:
+                if isinstance(v, dict) and (v.get("description") or "").strip():
+                    return v["description"]
+    return ""
+
+
 # 「사이즈마다 라벨을 다시 적는」 표 — 한 줄에 라벨과 값이 번갈아 나오고 그 줄이 사이즈 수만큼 되풀이된다.
 #   [1] Length 64 / Shoulder 34 / Chest 40  [2] Length 66 / Shoulder 37 / Chest 43   (divein)
 #   SIZE M 어깨 52 가슴 63 총장 64  L 어깨 54 가슴 65 총장 65                          (nick-nicole)
@@ -3228,6 +3250,17 @@ def is_skin_asset(url: str, max_stem: int = 24) -> bool:
 _CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
+# 소재를 적은 줄 — 「COTTON 100%」「· 100% poly」「겉감 : 폴리에스터 100%」. 상세 글을 모을 때 짧거나 정책 칸에 섞인
+# 줄이라도 이것만은 줍는다(parse_detail 의 _collect 주석). 섬유 낱말 + 퍼센트가 붙어 있어야 한다.
+_FIBER_WORDS = (r"면|코튼|cotton|폴리에스[터테]르?|폴리|polyester|poly|나일론|nylon|polyamide|레이온|rayon|비스코스|viscose|"
+                r"울|wool|양모|아크릴|acrylic|린넨|linen|실크|silk|캐시미어|cashmere|스판덱스|스판|spandex|span|elastane|"
+                r"폴리우레탄|polyurethane|텐셀|tencel|모달|modal|아세테이트|acetate|리오셀|lyocell|큐프라|cupro|"
+                r"알파카|alpaca|모헤어|mohair|앙고라|angora|가죽|leather|오리털|거위털|down|feather")
+_MAT_LINE = re.compile(rf"(?<![가-힣A-Za-z])(?:{_FIBER_WORDS})\s*[:：]?\s*\d{{1,3}}(?:\.\d+)?\s*%"
+                       rf"|\d{{1,3}}(?:\.\d+)?\s*%\s*(?:{_FIBER_WORDS})(?![가-힣A-Za-z])", re.I)
+_MAT_KEY = re.compile(r"소재|혼용|원단|fabric|material|composition", re.I)
+
+
 def _strip_tags(s: str) -> str:
     return re.sub(r"\s+", " ", _CTRL.sub("", htmlmod.unescape(re.sub(r"<[^>]+>", " ", s or "")))).strip()
 
@@ -3543,14 +3576,19 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
             continue
         k = re.sub(r"\s+", " ", cells[0].get_text(" ", strip=True)).strip(" :：|")
         v = re.sub(r"\s+", " ", cells[1].get_text(" ", strip=True))
-        if not k or not v or len(k) > 16 or len(v) > 300 or NOISE_KEY.search(k) or NOISE_VAL.search(v) or k == v:
+        # 열쇠가 16자를 넘으면 버리는데, coor 의 소재 칸 이름이 「Fabric Description」(18자)이라 177벌의
+        # 「COTTON 95% POLYURETHANE 5%」가 다 버려졌다(coor 3839 · 3793, 2026-10-01). 소재 칸 이름은 30자까지 받는다.
+        if not k or not v or (len(k) > 16 and not (len(k) <= 30 and _MAT_KEY.search(k))) or len(v) > 300 \
+                or NOISE_KEY.search(k) or NOISE_VAL.search(v) or k == v:
             continue
         spec.setdefault(k, v)
 
     # 본문 글 — 표·스크립트·안내 블록을 뺀 나머지. 기본정보 표(.xans-product-detaildesign)는
     # 글이 아니라 표라 spec 으로만 간다. 결제·배송·교환 안내(dunst 「고액결제의 경우…」 4,000자)와
     # 탭 이름 나열(kirsh 「상품상세정보 상품구매안내 상품사용후기」)은 설명이 아니다.
-    POLICY = re.compile(r"교환\s*및\s*반품|반품\s*주소|환불|배송\s*(안내|기간|비|방법)|고액결제|무통장|카드사|주문\s*(취소|보류)|"
+    # 「교환&반품 안내」「교환 / 반품의 경우」도 정책 글이다 — sinoon 상세 탭(.prdDescription)을 읽게 되자 반품 절차가
+    # 설명으로 들어왔고, nomanual 은 반품 안내가 아예 설명 자리를 차지하고 있었다(2026-10-01).
+    POLICY = re.compile(r"교환\s*및\s*반품|교환\s*[&/]\s*반품|반품\s*주소|환불|배송\s*(안내|기간|비|방법)|고액결제|무통장|카드사|주문\s*(취소|보류)|"
                         r"상품구매안내|상품사용후기|상품Q&A|관련상품|RETURN|EXCHANGE|SHIPPING|DELIVERY|월 렌탈|게시물이 없습니다|View All|"
                         r"리뷰 작성|글읽기 권한|성인인증|Related Items|Out of stock|게시글 신고|신고사유|상품결제정보")
 
@@ -3571,17 +3609,51 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
         Delivery 가 한 아코디언에, rough-side 의 제품 설명·사이즈 가이드·배송&반품이 #prdInfo 탭에 함께 있어 설명과
         사이즈 표까지 통째로 사라졌다(2026-09-04 사람 발견). 정책이 섞인 요소는 자식으로 내려가 정책 없는 가지만 남긴다."""
         t = _clean_text(el)
-        if len(t) < 15:
+        # 소재 한 줄은 15자가 안 된다 — vibrate 는 「· 100% poly」「· 100% cotton」을 DELIVERY 와 한 칸에 두어, 칸을
+        # 내려가 줄마다 보면 11자라 버려졌다(vibrate 4184 · 3228, 2026-10-01). 소재를 적은 짧은 줄은 받는다.
+        if len(t) < 15 and not (len(t) >= 5 and _MAT_LINE.search(t)):
             return
         if not POLICY.search(t):
             if t not in out and not any(t in p for p in out):
                 out.append(t)
             return
+        # 정책 낱말이 섞인 칸에 상품 글이 요소 없이 <br> 줄로만 들어 있으면 자식으로 내려가도 글을 못 줍는다.
+        # nomanual 은 설명 칸에 「COTTON 100%」「16S 1-PLY FABRIC」과 「… 교환이나 환불 사유가 되지 않습니다」를
+        # <br> 로만 나눠 적어, 그 칸 전체가 버려지고 반품 안내만 설명으로 남았다(nomanual 4343 · 4420, 2026-10-01).
+        # 그런 맨 글 줄 가운데 **소재를 적은 줄**만 줍는다 — 다른 줄까지 주우면 반품 안내 칸의 맨 글이 새어 든다.
+        for ln in _bare_lines(el):
+            if 5 <= len(ln) <= 160 and _MAT_LINE.search(ln) and not POLICY.search(ln) \
+                    and ln not in out and not any(ln in p for p in out):
+                out.append(ln)
         kids = [k for k in el.find_all(recursive=False) if k.name]
         if depth >= 8 or not kids:
+            # 여덟 겹에서 멈출 때 그 아래 소재 줄만은 줍는다. badblood 상세는 .xans-product-additional 아래 div 가
+            # 서른 겹 넘게 하나씩 싸여 있어 「FABRIC COTTON 100%」에 닿지 못했다(badblood 14751 · 14630, 2026-10-01).
+            # 깊이 제한 자체를 풀면 펀딩 틀(「펀딩예정 D- 펀딩종료 원 목표금액 …」) 같은 숨은 껍데기까지 딸려 와서
+            # (받아 둔 205쪽 중 40쪽) 소재 줄로만 좁힌다.
+            if depth >= 8:
+                for ln in el.get_text("\n").split("\n"):
+                    ln = re.sub(r"\s+", " ", ln).strip()
+                    if 5 <= len(ln) <= 160 and _MAT_LINE.search(ln) and not POLICY.search(ln) \
+                            and ln not in out and not any(ln in p for p in out):
+                        out.append(ln)
             return
         for k in kids:
             _collect(k, out, depth + 1)
+
+    def _bare_lines(el) -> list[str]:
+        """요소 바로 아래의 맨 글(과 그 사이의 인라인 요소)을 <br> · 블록 요소 자리에서 끊은 줄들."""
+        lines, cur = [], []
+        for c in el.children:
+            nm = getattr(c, "name", None)
+            if nm is None:
+                cur.append(str(c))
+            elif nm in ("span", "b", "strong", "em", "i", "u", "font", "a", "small", "sup", "sub"):
+                cur.append(c.get_text(" "))
+            else:
+                lines.append(" ".join(cur)); cur = []
+        lines.append(" ".join(cur))
+        return [re.sub(r"\s+", " ", x).strip() for x in lines if x.strip()]
 
     parts: list[str] = []
     # 매장마다 상세를 담는 그릇이 다르다. 아코디언·탭이라도 글은 HTML 에 이미 있어 브라우저가 필요 없다
@@ -3593,8 +3665,13 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
                 ".prd-detail-desc-list", ".size-guide",       # rough-side: 제품 설명 탭 + 사이즈 가이드 탭
                 ".detailArea",                                # coor: 상품간략설명 + Detail 실측
                 "details.fa", ".ffw-simple-desc",             # far-from-what: 상품간략설명 안의 <details> 아코디언
-                ".Guide_wrap", ".tab_wrap"):                  # kamien: Size·Details 아코디언 (&nbsp; 로 칸을 맞춘 글)
+                ".Guide_wrap", ".tab_wrap",                   # kamien: Size·Details 아코디언 (&nbsp; 로 칸을 맞춘 글)
                                                               #   (Size & Fit Guide 가 <table> 이 아니라 div 격자다)
+                ".prdDescription .tab-panel#tab1", ".prdDescription .tab-panel#tab2",
+                ".prdDescription .tab-panel#tab3"):           # sinoon: DETAIL · CARE(SHELL COTTON 100%) · SIZE 탭 (2026-10-01).
+                                                              #   넷째 탭은 SHIPPING & RETURN 이라 뺀다. .prdDescription 통째로는
+                                                              #   안 된다 — 흔한 스킨 이름이라 숨은 펀딩 틀(「펀딩예정 D- 펀딩종료 …」)
+                                                              #   까지 딸려 왔다(받아 둔 205쪽 중 40쪽)
         for el in soup.select(sel):
             _collect(el, parts)
     # 기본정보 표의 「상품간략설명」 칸은 표가 아니라 글이다. coor 는 DETAIL·SIZE 를 통째로 여기에 넣는데,
@@ -3610,9 +3687,13 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
             parts.append(t)
     # 본문 조각은 태그를 벗기지 않고 모아서 _strip_tags 를 안 탄다 — 여기서 제어문자를 걷는다.
     body_text = _CTRL.sub("", " ".join(parts))
-    ld_text = _strip_tags(ld.get("description", ""))
-    if POLICY.search(ld_text):
-        ld_text = ""
+    ld_text = _strip_tags(ld.get("description", "") or ("" if ld else json_ld_group_description(html_text)))
+    # 정책 글이 섞인 요약은 버리되, 정책 글이 **뒤에** 붙은 것이면 앞의 상품 글은 살린다. waviness 는 요약에
+    # 「DETAILS … OUTSHELL Cotton 100% … SIZE & FIT … DESCRIPTION [ 교환 / 환불 공통사항 ]」을 다 넣어, 끝의
+    # 환불 한 낱말 때문에 소재 · 실측이 든 앞 1,000자가 통째로 버려졌다(waviness 673 · 632, 2026-10-01).
+    _pm = POLICY.search(ld_text)
+    if _pm:
+        ld_text = ld_text[:_pm.start()].strip() if _pm.start() >= 100 else ""
     # JSON-LD 설명이 100자 넘으면 그게 본문이다 — 매장이 상품마다 써 넣은 글이라서. HTML 본문은
     # 매장 공용 안내(lmood 「제품관리… 캐시미어」 592자)가 섞여 더 길어도 본문이 아닐 수 있다.
     # 2026-09-03 표본(12 브랜드): JSON-LD 가 100~280자 요약일 때 본문 글은 600~5,700자였다(dunst 209→5,713,
@@ -3624,6 +3705,12 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
         description = (ld_text if len(ld_text) >= 100 or len(ld_text) >= len(body_text) else body_text)[:4000]
     description_source = "json-ld" if description == ld_text[:4000] and ld_text else ("html" if body_text else "")
     detail_text = body_text[:4000]
+    # 본문 글을 설명으로 골랐을 때 짧은 JSON-LD 요약이 어디에도 안 남았다. saintpain 은 본문 글이 결제 · 입금 안내
+    # (270자)이고 요약이 「• 드라이 저지 원단 … 면 100% 제조국 : 방글라데시」(90자)라, 100자에 못 미친 요약이 져서
+    # 소재가 사라졌다(판매중 의류 444벌 중 소재 84벌, 2026-10-01 — 4259 · 4319 받아 보고 확인). 요약이 본문에
+    # 없으면 상세 글 **앞**에 붙인다(태거는 상세 글 앞 200자가 설명과 다를 때만 상세 글을 읽는다).
+    if len(ld_text) >= 20 and description != ld_text[:4000] and ld_text not in body_text:
+        detail_text = (ld_text[:1000] + "\n" + body_text[:4000 - min(len(ld_text), 1000) - 1]).strip()
     # 값 칸이 폭(「65~67」)인 실측표는 size_table 로 못 가고 본문에서도 지워진다 — 줄 그대로 상세 글 끝에
     # 붙인다(size_tables_as_text 주석, horlisun). 4,000자에 잘리지 않게 본문 쪽을 줄인다.
     rng_text = size_tables_as_text(soup)[:1500]
@@ -4344,7 +4431,7 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
     rows = []
     gender_meta: dict[tuple[str, str], tuple[bool, str | None]] = {}
     per_brand: dict[str, int] = {}
-    seen_images: set[str] = set()
+    seen_images: dict[str, list[tuple[str, set]]] = {}   # 대표컷 → [(매장, 이름 · 옵션의 색)]
     dropped_dupe = 0
     dropped_noimg = 0
     dropped_junk = 0
@@ -4461,11 +4548,25 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
                 # (lecyto 「○○ 실장님 팀」 217건, insilence 「셀럽 테스트」 44건). jsonl 에는 남는다.
                 dropped_noimg += 1
                 continue
-            if img in seen_images:
-                dropped_dupe += 1     # 색만 다른 같은 옷이 같은 대표컷을 쓰는 경우 — 첫 행만(build_products_seed 와 같은 판단)
+            # 대표컷이 같아도 **매장이 이름에 서로 다른 색을 적었으면** 다른 상품이다 — rough-side
+            # 「24FW 울 필드 팬츠 차콜」 1150 과 「… 다크 네이비」 1149, 「24FW 인슐레이션 팬츠 블랙」 1200 과
+            # 「… 차콜」 1199 는 대표컷 한 장을 나눠 쓰는 두 색이라 뒤의 색이 목록에서 사라졌다
+            # (창고 전수 대표컷 중복 1,263행 가운데 색이 갈리는 것은 이 둘뿐, 2026-10-01). 색을 모르면
+            # (빈칸) 예전처럼 중복으로 본다. 여러 색(「블랙·차콜」)은 **하나라도 겹치면** 같은 옷으로 본다 —
+            # nilby-p 「[라스트피스] 23SN basic pullover [PK]」(핑크)는 「23SN basic pullover [3colors]」
+            # (옐로우·핑크·블랙)의 남은 한 벌이다. 글자로만 견줬더니 이런 마지막 한 벌 · B품 · 세트 판매
+            # 46행이 되살아나 같은 옷이 둘 섰다. 옵션에 적힌 색도 그 옷의 색으로 친다 — legacy 「풀밴딩 이지
+            # 팬츠 … 4 color 리퍼브 상품」 389 는 대표색이 설명에서 읽힌 베이지 하나지만 옵션으로 블랙도 팔아,
+            # 「S/S 풀밴딩 이지 팬츠 - 블랙」 395 와 같은 옷이다(표 · 사진이 같다). 다른 매장끼리는 색을 안
+            # 본다 — 겹치는 것은 imweb 의 「thumb_error.png」 같은 자리표시 그림이다.
+            c_img = {c for c in pick_color(d["name"], d.get("description", ""), d.get("spec"),
+                                           d.get("options")).split("·") if c}
+            c_img |= {c for c in (field_color(str(o)) for o in d.get("options") or [] if "선택" not in str(o)) if c}
+            prior = seen_images.get(img)
+            if prior is not None and any(ps != slug or not pc or not c_img or pc & c_img for ps, pc in prior):
+                dropped_dupe += 1     # 같은 옷이 같은 대표컷을 쓰는 경우 — 첫 행만(build_products_seed 와 같은 판단)
                 continue
-            else:
-                seen_images.add(img)
+            seen_images.setdefault(img, []).append((slug, c_img))
             # 옛 창고 줄에는 이름에 태그가 남아 있다 — 이름 파서에 _strip_tags 가 붙기 전에
             # 받은 것이고, 상세 보정은 설명·사이즈만 갱신하고 이름은 손대지 않는다
             # (lmood 「<span>화란 세미오버 가디건</span> <span>BLACK</span>」, 2026-09-07).
@@ -4598,7 +4699,7 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
     opt_of = {(r["brand_slug"], str(r["product_no"])): tuple(o.strip() for o in (r.get("options") or "").split("|") if o.strip())
               for r in rows}
     dropped_kidline = drop_kids_line(rows)
-    dropped_rerun = fold_reruns(rows, gal_of, tbl_of, url_of, opt_of)
+    dropped_rerun = fold_reruns(rows, gal_of, tbl_of, url_of, opt_of, meas=_measurer(tbl_of))
     n_size = size_set_gender(rows, gender_meta)
     if n_size:
         print(f"치수 조합(매장 안에서 배운 것)으로 성별 {n_size}벌을 정했다", file=sys.stderr)
@@ -4617,6 +4718,46 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
         w.writerows(rows)
     return len(rows), {"per_brand": per_brand, "dropped_dupe_image": dropped_dupe, "dropped_no_image": dropped_noimg, "dropped_junk_name": dropped_junk, "dropped_kids_pet": dropped_kidpet, "dropped_demo_shop": dropped_demo, "dropped_gone": dropped_gone, "dropped_rerun": dropped_rerun,
             "dropped_alias_shop": dropped_alias}
+
+
+def _measurer(tbl: dict):
+    """fold_reruns 의 meas — 크롤 표가 있으면 그것을, 없으면 그 상품 그림의 OCR 글을 size_from_ocr 로 읽는다.
+
+    OCR 글은 묶음 후보에 든 매장 것만, 처음 물을 때 한 번 읽는다(창고 전체는 500MB 가 넘는다).
+    읽다 넘어지면 None — 실측을 모르면 접기를 막지 않는 쪽(지금까지와 같은 판단)으로 간다.
+    """
+    cache: dict[str, dict[str, str]] = {}
+
+    def get(key):
+        slug, no = key
+        try:
+            import size_from_ocr as so
+            t = tbl.get(key)
+            if t:
+                st = json.loads(t)
+                out: dict[str, list] = {}
+                for lab, vs in st.items():
+                    c = so.canon_label(str(lab)) if not str(lab).startswith("_") else None
+                    if c and isinstance(vs, list) and c not in out:
+                        out[c] = [x if isinstance(x, (int, float)) else None for x in vs]
+                return out or None
+            if slug not in cache:
+                cache[slug] = {}
+                p = CRAWL_DIR / "ocr" / f"{slug}.jsonl"
+                if p.exists():
+                    for ln in p.read_text(encoding="utf-8").splitlines():
+                        try:
+                            d = json.loads(ln)
+                        except Exception:
+                            continue
+                        cache[slug][str(d.get("product_no"))] = d.get("ocr_text") or ""
+            text = cache[slug].get(no)
+            if not text:
+                return None
+            return so.from_ocr(so.halve_girth_lines(text))[1] or None
+        except Exception:
+            return None
+    return get
 
 
 _URL_STEM = re.compile(r"^https?://[^/]+(/.*?)/?(\d+)/?$")
@@ -4668,6 +4809,121 @@ def _tables_conflict(tables: list[str], tol: float = 1.0) -> bool:
         if len(vals) >= 2 and max(vals) - min(vals) > tol:
             return True
     return False
+
+
+# ── 접기 전에 「다른 색 · 다른 옷」을 가르는 두 증거 (2026-10-01) ──────────────────────
+#
+# 이름 · 대표색 · 값이 같은 두 줄을 접는 잣대(fold_reruns)는 대표색을 이름에서 읽는다. 그런데
+# 매장이 이름에 색을 안 적거나 같은 색 낱말로 뭉뚱그리면(「DARK BLUE」·「BLUE」 둘 다 블루)
+# **옵션에 적힌 색이 다른 두 상품**이 한 벌로 접혔다. 창고 전수(접힌 1,720행)에서 21행이 걸렸고,
+# 색끼리 다시 모아 접으면 20행이 되살아난다(generalidea BROWN 두 줄은 서로 접힌다):
+#   bmuette  「사운즈 크롭 배색 후드」        옵션 BLACK/LIME 대 BLACK          (넷)
+#   diagonal 「WAIST CONSECUTIVE BOOTSCUT DENIM」 DARK BLUE 대 BLUE · MIX1 대 MIX2 …  (여덟)
+#   generalidea 「UNISEX 보스턴백 [BLACK]」 BLACK 대 BROWN — 이름의 색은 첫 벌 것이다 (여섯)
+#   xlim     「EP.7 04 TROUSERS」            MATTE BLACK 대 GLOSSY BLACK · 컵 맛 셋 (셋)
+# 옵션의 색 칸은 매장이 그 상품으로 파는 것을 적은 자리라, 서로 상대에게 없는 색을 팔면 다른 상품이다.
+# 한쪽이 다른 쪽을 품기만 하면(CHARCOAL 대 CHARCOAL · MELANGE GREY) 다른 상품이라 하지 않는다 —
+# 같은 옷을 남성 · 여성 칸에 따로 올리며 색을 하나 덜 적은 것이고(generalidea 5054 · 5050),
+# 품절된 색을 목록에서 내린 것과도 못 가른다.
+# 「S 44(28)」(legacy)처럼 사이즈 뒤에 호수를 붙여 쓰는 곳이 있어 뒤의 숫자 하나는 받는다.
+_SIZE_PART = re.compile(
+    r"^(?:SIZE\s*)?(?:\d{1,3}(?:\.5)?|X{0,3}S|X{0,4}L|M|[2-6]X?L|[2-6]XS|FREE|F|OS|O\.S|ONE\s?SIZE|SMALL|MEDIUM|LARGE|"
+    r"XSMALL|XLARGE|(?:WOMEN|MEN|UNISEX)\s*(?:FREE|F)?|FREE\s*SIZE|SIZE|프리)(?:\s*SIZE)?(?:\s+\d{2,3})?$", re.I)
+_OPT_HEAD_PART = re.compile(r"^(?:COLOU?RS?|SIZES?|색상?|컬러|사이즈|OPTIONS?|옵션|DELIVERY|배송)$", re.I)
+
+
+def _option_parts(o: str) -> tuple[list[str], list[str]]:
+    """옵션 한 줄을 (사이즈 조각, 그 밖의 조각)으로 가른다. 「BLACK-S」·「네이비_M」·「DARK BLUE-SMALL」."""
+    o = str(o or "").strip()
+    if not o or OPTION_PROMPT.match(o) or OPTION_HEADER.match(o):
+        return [], []
+    o = OPTION_PRICE.sub("", _OPT_STOCK_TAIL.sub("", o)).strip()
+    o = re.sub(r"(?i)\bX-(LARGE|SMALL)\b", lambda g: "X" + g.group(1), o)
+    sizes, other = [], []
+    for p in re.split(r"\s*[-_]\s*", o):
+        q = re.sub(r"\s*[\(\[][^)\]]*[\)\]]", "", p).strip()
+        if not q or _OPT_HEAD_PART.match(q):
+            continue
+        (sizes if _SIZE_PART.match(q) else other).append(q.upper())
+    return sizes, other
+
+
+def _variant_set(opts) -> frozenset:
+    """옵션에서 사이즈 · 머리말을 뺀 나머지(대개 색) — 「BLACK/LIME」은 한 덩이로 둔다."""
+    out = set()
+    for o in opts or ():
+        _, other = _option_parts(o)
+        if other:
+            out.add("-".join(other))
+    return frozenset(out)
+
+
+def _variants_differ(a: frozenset, b: frozenset) -> bool:
+    return bool(a and b and (a - b) and (b - a))
+
+
+# 실측이 그림에만 있는 매장에서는 크롤 표(size_table)가 비어 「실측이 다르면 안 접는다」 거부권이
+# 서지 못했다. drawfit 「미니멀 푸퍼 다운 점퍼 [BLACK]」 2473(여성 · S M) 과 2498(남성 · M L XL)은
+# 주소 조각만 같아 접혔는데, 그림 속 표를 읽으면 총장 58 · 59.5 대 67.5 · 69 · 70.5,
+# 어깨 56 · 57.5 대 63 · 65 · 67 로 다른 옷이다(2026-10-01).
+# 반대로 andersson-bell · dnsr 는 **같은 옷을 사이즈 범위만 나눠** 두 번 올린다(여성 칸 S M,
+# 남성 칸 S~XL). 그때는 한쪽 값이 다른 쪽 값의 이어진 토막이다 — 같은 표를 나눠 쓰거나
+# (andersson-bell 「HEART MESSAGE T-SHIRT」 두 줄이 일곱 칸 표 하나), 이어진다
+# (dnsr 「커브드 데님 팬츠」 허리 36.5 · 39 대 39 · 41.5 · 44). 그래서 값 줄을 밀어 가며 겹치는 자리가
+# **하나의 밀기에서 모두** 1cm 안으로 맞는 때가 있는지를 본다. 사이즈 이름으로 맞추지는 않는다 — 옵션
+# 이름과 표의 칸이 어긋나는 매장이 있다(dnsr 「울 피코트 네이비」 3246 은 옵션이 M 하나인데 그 표 한 칸은
+# 남성판 3153 의 S 칸과 글자까지 같다. 이름으로 맞추면 다른 옷이 되어 같은 코트가 둘 선다).
+# 글자 읽기(OCR)가 한두 칸을 틀리는 일이 흔해서, 견준 치수 가운데 **둘 이상 · 절반 이상**이 어긋날
+# 때만 다른 옷으로 본다.
+_MEAS_TOL = 1.0
+
+
+def _label_agrees(a: list, b: list) -> bool | None:
+    """한 치수(총장 등)의 두 값 줄이 같은 옷의 것일 수 있나. 견줄 값이 없으면 None."""
+    seen = False
+    for off in range(-(len(a) - 1), len(b)):
+        pairs = [(a[i], b[i + off]) for i in range(len(a)) if 0 <= i + off < len(b)
+                 and a[i] is not None and b[i + off] is not None]
+        if not pairs:
+            continue
+        seen = True
+        if all(abs(x - y) <= _MEAS_TOL for x, y in pairs):
+            return True
+    return False if seen else None
+
+
+def _measures_conflict(ma: dict | None, mb: dict | None) -> bool:
+    """{치수: 값 줄} 둘이 다른 옷인가. 모르면 False(접기를 막지 않는다).
+
+    두 잣대가 **모두** 다르다고 할 때만 다른 옷이다. ① 치수마다 따로 밀어 맞춰 보기(_label_agrees),
+    ② 모든 치수를 **같은 칸만큼** 밀어 맞춰 보기 — 사이즈 범위만 나눈 같은 표라면 총장 · 허리 · 밑위가
+    한꺼번에 같은 칸만큼 밀린다. ①만 쓰면 OCR 이 한 칸을 틀린 치수 둘(dnsr 「커브드 데님 팬츠」 여성판의
+    엉덩이 「50.5 · 빈칸」, 허벅지 「34.5 · 33.9」)에 표가 뒤집힐 수 있었다. ②로 보면 한 칸 밀었을 때
+    허리 · 밑위 · 밑단 · 총장이 다 맞는다.
+    """
+    if not ma or not mb:
+        return False
+    common = [k for k in ma if k in mb and ma[k] and mb[k]]
+
+    def _bad(votes) -> bool:
+        votes = [v for v in votes if v is not None]
+        bad = votes.count(False)
+        return bad >= 2 and bad * 2 >= len(votes)
+
+    if not _bad([_label_agrees(ma[k], mb[k]) for k in common]):
+        return False
+    span = max((len(ma[k]) for k in common), default=0)
+    width = max((len(mb[k]) for k in common), default=0)
+    for off in range(-(span - 1), width):
+        votes = []
+        for k in common:
+            a, b = ma[k], mb[k]
+            pairs = [(a[i], b[i + off]) for i in range(len(a)) if 0 <= i + off < len(b)
+                     and a[i] is not None and b[i + off] is not None]
+            votes.append(all(abs(x - y) <= _MEAS_TOL for x, y in pairs) if pairs else None)
+        if any(v is not None for v in votes) and not _bad(votes):
+            return False
+    return True
 
 
 def _url_stem(u: str) -> str:
@@ -4766,7 +5022,7 @@ def drop_kids_line(rows: list[dict]) -> int:
 
 
 def fold_reruns(rows: list[dict], gal: dict, tbl: dict | None = None, url: dict | None = None,
-                opt: dict | None = None) -> int:
+                opt: dict | None = None, meas=None, log: list | None = None) -> int:
     """매장이 같은 옷을 두 번 올린 것을 접는다.
 
     dunst 는 2022~23년 옷을 통째로 다시 등록해 두었다 — 이름·색·값이 같고 갤러리 열두 장이
@@ -4781,6 +5037,10 @@ def fold_reruns(rows: list[dict], gal: dict, tbl: dict | None = None, url: dict 
     (wkndrs 「draggy work pants」가 여섯 색인데 갤러리를 공유한다). 그건 접으면 안 된다.
 
     남길 쪽: 판매중을 품절보다, 그다음 번호가 큰 쪽(새로 올린 것)을 남긴다.
+
+    meas: (slug, product_no) → {정식 치수: 값 줄} | None. 크롤 표가 없는 줄의
+    실측(그림 OCR)을 꺼내 준다 — build_csv 가 만든다. log 를 주면 접은 묶음마다
+    (근거, slug, 남긴 번호, [접힌 번호]) 를 적는다(전후 대조용).
     """
     groups: dict[tuple, list[dict]] = {}
     # Shopify 매장(platforms.py)은 접지 않는다. 그쪽은 상품 주소(handle) 하나가 곧 상품 하나이고,
@@ -4794,8 +5054,34 @@ def fold_reruns(rows: list[dict], gal: dict, tbl: dict | None = None, url: dict 
         k = (r["brand_slug"], (r["name"] or "").strip().casefold(),
              (r["representative_color"] or "").strip().casefold(), r["price"])
         groups.setdefault(k, []).append(r)
-    drop: set[int] = set()
+    # 옵션의 색이 서로 다른 줄은 같은 묶음에 두지 않는다(위 _variant_set 주석). 묶음을 통째로
+    # 거부하지 않고 색끼리 다시 모은다 — generalidea 「UNISEX 보스턴백 [BLACK]」 네 줄은 BLACK 둘 ·
+    # BROWN 둘(남성 칸 · 여성 칸)이라, 색으로 갈라도 BROWN 둘은 여전히 한 벌로 접혀야 한다.
+    split: list[tuple[tuple, list[dict]]] = []
     for k, v in groups.items():
+        if len(v) < 2:
+            continue
+        subs: list[list[tuple[frozenset, dict]]] = []
+        for r in v:
+            vs = _variant_set((opt or {}).get((k[0], str(r["product_no"])), ()))
+            for sub in subs:
+                if not any(_variants_differ(vs, w) for w, _ in sub):
+                    sub.append((vs, r))
+                    break
+            else:
+                subs.append([(vs, r)])
+        split.extend((k, [r for _, r in sub]) for sub in subs)
+    drop: set[int] = set()
+
+    def _fold(k, v, why):
+        keep = max(v, key=lambda r: (r["status"] == "ON_SALE", int(r["product_no"] or 0)))
+        for r in v:
+            if r is not keep:
+                drop.add(id(r))
+        if log is not None:
+            log.append((why, k[0], str(keep["product_no"]), [str(r["product_no"]) for r in v if r is not keep]))
+
+    for k, v in split:
         if len(v) < 2:
             continue
         sets = [gal.get((k[0], str(r["product_no"])), set()) for r in v]
@@ -4823,10 +5109,7 @@ def fold_reruns(rows: list[dict], gal: dict, tbl: dict | None = None, url: dict 
                 continue
             # 글자까지 같으면 같은 사이즈를 파는 같은 옷이다 — 실측 차이는 매장이 다시 잰 것이다.
             if len(set(have_opt)) == 1:
-                keep = max(v, key=lambda r: (r["status"] == "ON_SALE", int(r["product_no"] or 0)))
-                for r in v:
-                    if r is not keep:
-                        drop.add(id(r))
+                _fold(k, v, "opt_equal")
                 continue
             # 겹치기는 하는데 같지는 않다 — 재고가 빠지고 들어오며 목록이 흔들린 것일 수도,
             #   {S,M,L,XL,XXL} 대 {XXS,XS,S,M,L} 처럼 사이즈 갈래가 다른 것일 수도 있다.
@@ -4845,10 +5128,15 @@ def fold_reruns(rows: list[dict], gal: dict, tbl: dict | None = None, url: dict 
         # 2026-09-07 실측: 값이 같은 중복 175묶음 중 접을 수 있는 것 82 · 거부 93.
         if _tables_conflict([t for t in ts if t]):
             continue
-        keep = max(v, key=lambda r: (r["status"] == "ON_SALE", int(r["product_no"] or 0)))
-        for r in v:
-            if r is not keep:
-                drop.add(id(r))
+        # 거부권 둘: 크롤 표가 없는 줄은 그림에서 읽은 실측으로 견준다(위 _measures_conflict 주석,
+        # drawfit 2473 · 2498). 옵션이 글자까지 같은 묶음은 위에서 이미 접었다 — 그쪽은 매장이 다시
+        # 잰 것으로 보는 판단을 그대로 둔다.
+        if meas is not None and not all(ts):
+            ms = [meas((k[0], str(r["product_no"]))) for r in v]
+            if any(_measures_conflict(ms[i], ms[j]) for i in range(len(v)) for j in range(i + 1, len(v))):
+                continue
+        why = "+".join(n for n, b in (("photo", shared), ("table", same_table), ("url", same_url)) if b)
+        _fold(k, v, ("opt_overlap:" if len(have_opt) >= 2 else "") + why)
     if drop:
         rows[:] = [r for r in rows if id(r) not in drop]
     return len(drop)
