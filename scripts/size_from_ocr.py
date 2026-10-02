@@ -3637,6 +3637,36 @@ def html_low_part(parts: list, brand: str, girth_keys: set | None, label_med: di
     return None
 
 
+def _wide_hem(st: dict, vals: list, fv: list) -> list:
+    """밑단 단면 상한(size_labels 60)을 넘는 값을, 같은 표의 가슴이 그만큼 넓을 때만 받는다.
+
+    오버핏 상의는 밑단이 가슴만큼 넓다 — we11done 「볼트 테디 티셔츠」 가슴 57.5~70 · 밑단 55.5~68 에서 60 넘는 넷이
+    범위 밖으로 비고, 칸 수가 모자라 밑단 줄이 통째로 빠졌다(코덱스 019 — 30벌 중 11벌, 매장 밑단 1,052벌 중 469벌).
+    전역 범위를 넓혔다가 표 단위로 다시 자르는 길은 원피스 · 치마의 「밑단 84 · 96」(다른 길로 들어오던 값)까지 잘라
+    247벌이 밑단을 잃었다(창고 전수 대조 2026-10-02). 그래서 이 HTML 표의 이 칸에서 **버려질 값만** 되살린다 — 줄지 않는다.
+    """
+    if all(v is not None for v in fv):
+        return fv
+    chest = []
+    for k, xs in st.items():
+        if k != "_names" and canon_label(k) == "가슴" and isinstance(xs, list) and not ("둘레" in k or "circum" in str(k).lower()):
+            chest += [y for y in (fix_value("가슴", str(x)) for x in xs) if y is not None]
+    if not chest:
+        return fv
+    lo, hi = RANGES.get("밑단", (8, 60))
+    cap = max(hi, max(chest) + 8)
+    out = []
+    for x, y in zip(vals, fv):
+        if y is None:
+            try:
+                v = float(str(x).replace(",", "."))
+            except ValueError:
+                v = None
+            y = round(v, 1) if v is not None and hi < v <= cap else None
+        out.append(y)
+    return out
+
+
 def normalize_html(st: dict, brand: str = "", girth_keys: set | None = None,
                    med: dict | None = None) -> dict[str, list[float]]:
     if sweep_all(st):
@@ -3694,6 +3724,8 @@ def normalize_html(st: dict, brand: str = "", girth_keys: set | None = None,
             continue
         girth = "둘레" in k or "circum" in k.lower() or (girth_keys is not None and (brand, c) in girth_keys)
         _fv = [fix_value(c, str(x), girth) for x in vals]
+        if c == "밑단" and not girth:
+            _fv = _wide_hem(st, vals, _fv)
         # 한 열의 값이 거의 다 상식 범위 밖이면, 값이 이상한 게 아니라 **별칭이 틀린** 것이다.
         # 멀쩡한 라벨은 버림률이 0~5%인데 「shoulder*1/2+arm → 어깨」는 82%였다 —
         # 그건 어깨가 아니라 화장(어깨→소매끝)이었고, 83~92cm 를 어깨라고 적고 있었다
