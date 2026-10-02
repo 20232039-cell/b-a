@@ -123,11 +123,12 @@ def fold_finish(t: dict) -> dict:
 # 다만 창고 어휘가 14낱말이고 앱 어휘가 9낱말이다. 남는 다섯을 그냥 버리면 10곳이
 # 무드 없는 채로 남아 **고치려던 구멍이 작아질 뿐 그대로다.** 그래서 접는다.
 # 접는 자리는 브랜드가 아니라 **낱말**이다 — 매장 이름을 코드에 적지 않는다.
-MOOD_APP = ["스트릿", "미니멀", "빈티지", "캐주얼", "걸리시", "시크", "클래식", "워크웨어", "Y2K"]
-# 창고에만 있는 말 → 앱 말. 페미닌·로맨틱은 앱의 아홉 중 여성스러움을 말하는 유일한
-# 낱말인 걸리시로 간다. 이 접기가 닿는 곳은 상품표에 있는 195곳 중 **10곳**이다.
-MOOD_FOLD = {"페미닌": "걸리시", "로맨틱": "걸리시", "아방가르드": "시크",
-             "스포티": "캐주얼", "고프코어": "캐주얼"}
+# 2026-10-02 코덱스 050 리뷰: 앱 어휘가 그새 14낱말이 됐다(layer-web src/app/lib/quickTagOptions.ts QUICK_TAG_STYLES,
+# 2026-08-30 — AGENTS.md 「스타일 어휘 — 단일 출처」). 접으면 온보딩에서 「스포티」를 고른 사람과 스포티 매장이 안 이어진다.
+# 그래서 접지 않고 14낱말 그대로 낸다. 창고 어휘와 같다.
+MOOD_APP = ["미니멀", "스트릿", "캐주얼", "걸리시", "빈티지", "시크", "클래식", "페미닌", "아방가르드", "로맨틱",
+            "Y2K", "워크웨어", "스포티", "고프코어"]
+MOOD_FOLD: dict[str, str] = {}
 
 
 def fold_mood(raw: str) -> list[str]:
@@ -171,16 +172,18 @@ def thin_row(r: dict, tags: dict, bi: dict, ci: dict, pref: dict) -> dict:
         "i": f'{r["brand_slug"]}-{r["product_no"]}',
         "b": bi[r["brand_slug"]],
         "n": r["name"],
-        # 정가 — 할인 중이면 앱이 줄 그어 보여 줄 값(사람 2026-10-02). 재생성 전 상품표(list_price 열 없음)는 예전 값
-        "p": int(r.get("list_price") or r["price"] or 0),
+        # 지금 사는 값. 할인 중이면 할인가다 — 앱이 아직 「op」를 모르는 판에서도 매장 값과 맞게(코덱스 050 리뷰:
+        # p 를 정가로 바꾸면 앱이 sp 를 읽기 전까지 할인 상품이 모두 정가로 보인다). 줄 그을 정가는 아래 「op」.
+        # 재생성 전 상품표(list_price · sale_price 열 없음)는 예전 값 그대로.
+        "p": int(r.get("sale_price") or r.get("list_price") or r["price"] or 0),
         "m": u[len(pre):] if pre and u.startswith(pre) else u,
         "c": ci[r.get("category_code") or "other"],
         "t": r.get("subtype") or "",
         "g": GENDER_CODE.get(r.get("gender_target"), "U"),
         "s": 1 if r.get("status") == "ON_SALE" else 0,
     }
-    if r.get("sale_price"):
-        row["sp"] = int(r["sale_price"])
+    if r.get("sale_price") and r.get("list_price"):
+        row["op"] = int(r["list_price"])          # 할인 전 정가 — 할인 중일 때만(사람 2026-10-02 「정가 줄긋고 할인가 표시」)
     # 빈 값은 아예 안 적는다 — 11만 번 반복되면 그것만으로 수백 KB다
     for k, v in (("co", (t.get("color") or [""])[0]),
                  ("ma", (t.get("material") or [""])[0]),
@@ -609,7 +612,7 @@ def main() -> int:
         # 줄의 열쇠가 무슨 뜻인가 — 앱이 여기서 읽게 해 두면 열쇠가 늘어도 안 어긋난다
         "fields": {
             "i": "상품 id (<slug>-<product_no>)", "b": "brands 번호", "n": "이름",
-            "p": "정가(원) — 할인 중이면 줄 그을 값", "sp": "할인가(원) — 지금 파는 값이 정가보다 쌀 때만(없으면 안 적힘)",
+            "p": "지금 사는 값(원) — 할인 중이면 할인가", "op": "할인 전 정가(원) — 할인 중일 때만, 줄 그어 보여 줄 값(없으면 안 적힘)",
             "m": "사진 — brands[b].p 를 앞에 붙인다",
             "c": "cats 번호", "t": "품목(subtype)", "g": "W 여성 · M 남성 · U 남녀공용",
             "s": "1 판매중 · 0 품절", "co": "대표색", "ma": "대표소재", "se": "시즌",

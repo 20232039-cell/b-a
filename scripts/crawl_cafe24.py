@@ -5071,10 +5071,12 @@ def drop_kids_line(rows: list[dict]) -> int:
     keep_paired = set(paired)
     drop = sorted({i for i in mid if i in keep_paired or rows[i]["brand_slug"] in proven}
                   | set(glued))
+    # 통계는 지우기 **전에** 센다 — 지운 뒤 옛 번호로 rows[i] 를 읽으면 IndexError 로 상품표 만들기가 통째로 멈춘다
+    # (코덱스 050 리뷰: 같은 매장의 「BEADED CAP」 · 「BEADED CAP KIDS」 두 줄이면 재현).
+    n_glue = len(set(glued) - keep_paired - {i for i in mid if rows[i]["brand_slug"] in proven})
     for i in reversed(drop):
         rows.pop(i)
     if drop:
-        n_glue = len(set(glued) - keep_paired - {i for i in mid if rows[i]["brand_slug"] in proven})
         print(f"아동 라인 제외 {len(drop)}벌 — 어른 짝 {len(paired)} + "
               f"증명된 매장({', '.join(sorted(proven)) or '없음'})의 나머지 "
               f"{len(drop) - len(paired) - n_glue} + 붙은 이름 {n_glue}")
