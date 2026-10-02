@@ -3151,24 +3151,15 @@ def blank_model_lines(text: str) -> str:
             gone.add(i)
         elif (_MB_HEIGHT.search(ln) or _MB_MODEL_HEAD.search(ln)) and len(words) <= 1:
             # 둘째 모델이 키 줄을 OCR 이 뭉갠 채 여덟 줄쯤 아래에 오기도 한다(margarin-fingers 4639) — 아래로는 열 줄까지.
-            # 다만 키 줄 곁에 옷 실측표가 붙은 그림도 있다 — 「HEIGHT 170 / SIZE CHART / S M L / 허리 70 74 78 / 엉덩이 100 …」.
-            # 둘레로 적은 옷 표는 몸 치수와 값이 겹쳐 예전에는 표 줄까지 모델로 지웠다(코덱스 리뷰 d4443a5 P1 · 067).
-            # 위 · 아래로 훑되 사이즈표 머리줄(SIZE · 사이즈 · 실측 · 단위)이나 사이즈 이름으로 시작하는 줄에서 멈춘다.
-            win: list[int] = []
-            for step, limit in ((-1, 4), (1, 10)):
-                for dist in range(1, limit + 1):
-                    j = i + step * dist
-                    if j < 0 or j >= len(lines) or _MB_TABLE_HEAD.search(lines[j]) or _MB_SIZE_ROW.match(lines[j]):
-                        break
-                    win.append(j)
-            near = [j for j in sorted(win) if _mb_bodyish(lines[j])]
+            near = [j for j in range(max(0, i - 4), min(len(lines), i + 11))
+                    if j != i and _mb_bodyish(lines[j])]
             if len({_MB_PAIR.search(lines[j]).group(1).lower()[:3] for j in near}) >= 2:
                 gone.update(near)
                 if words:
                     gone.add(i)
                 # 모델 덩어리로 확인된 곳에서는 값이 작아도(인치 표시 없는 「WAIST 23 = WAIST 23」) 모델을 나란히 적은
                 # 줄도 지운다 — grove 4124(양말)의 둘째 모델 줄이 허리 23 으로 남아 잡화에 실측이 섰다(2026-10-01).
-                for j in win:
+                for j in range(max(0, i - 4), min(len(lines), i + 11)):
                     if j not in gone and _mb_pairs_only(lines[j]):
                         gone.add(j)
     # 「MODEL SIZE (CM)」 · 「모델 사이즈」 머리말 바로 아래의 몸 낱말 줄은 모델 몸이다 — 키 줄을 OCR 이 「7| HEIGHT 75」 ·
