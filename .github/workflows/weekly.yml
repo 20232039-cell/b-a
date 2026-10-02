@@ -138,7 +138,7 @@ jobs:
     defaults:
       run:
         working-directory: work
-    timeout-minutes: 200
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
       - name: 데이터 저장소(비공개) 받기
