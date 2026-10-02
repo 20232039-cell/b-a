@@ -3091,6 +3091,11 @@ _MB_PAIR = re.compile(r"(?i)(?<![가-힣A-Za-z])(bust|chest|waist|hips?|가슴|�
 _MB_GARMENT = re.compile(r"(?i)어깨|총장|총기장|기장|소매|밑위|허벅지|밑단|암홀|너비|단면|length|shoulder|sleeve|rise|thigh|hem|armhole|width")
 _MB_HEIGHT = re.compile(r"(?i)(?:height|ight|키|신장)\s*[:：\-]?\s*1[4-9]\d|(?<![\d.])1[4-9]\d(?:\.\d)?\s*cm")
 _MB_INCH = re.compile(r"(?i)inch|인치")
+# 모델 칸 머리줄(「MODEL SIZE (CM)」 「모델 정보」 「MODEL : 168cm」)도 키 줄처럼 닻이 된다. margarin-fingers 4517 캉캉 스커트는
+# 키 줄이 「키 HEIGHT 71」(171 의 1 을 OCR 이 흘림)로 읽혀 _MB_HEIGHT 가 못 잡았고, 둘째 모델은 키 줄이 아예 없었다 —
+# 그래서 「허리 WAIST 53 · 가슴 BUST 79 …」 다섯 줄이 남아 스커트에 「허리 53 · 가슴 79」가 섰다(코덱스 감사 023 11번,
+# 2026-10-02). 닻 곁에서도 지우는 것은 _mb_bodyish 줄(옷 낱말 없이 몸 둘레로만 나올 값)뿐이라 진짜 표 줄은 안 걸린다.
+_MB_MODEL_HEAD = re.compile(r"(?i)(?<![a-z])model(?![a-z])|모델")
 
 
 def _mb_bodyish(ln: str) -> bool:
@@ -3138,7 +3143,7 @@ def blank_model_lines(text: str) -> str:
         words = {w.lower()[:3] for w, _ in _MB_PAIR.findall(ln)}
         if len(words) >= 2 and (_MB_HEIGHT.search(ln) or _MB_INCH.search(ln)):
             gone.add(i)
-        elif _MB_HEIGHT.search(ln) and len(words) <= 1:
+        elif (_MB_HEIGHT.search(ln) or _MB_MODEL_HEAD.search(ln)) and len(words) <= 1:
             # 둘째 모델이 키 줄을 OCR 이 뭉갠 채 여덟 줄쯤 아래에 오기도 한다(margarin-fingers 4639) — 아래로는 열 줄까지.
             near = [j for j in range(max(0, i - 4), min(len(lines), i + 11))
                     if j != i and _mb_bodyish(lines[j])]
@@ -4868,6 +4873,118 @@ _COLOR_NAME = re.compile(
     r"베이지|크림|멜란지|와인|민트|카멜|모카|실버|골드)\s*$")
 
 
+# 매장이 **팔지 않는** 사이즈 칸 — 표는 매장 공용 치수표라 XS~XL 다섯 칸인데 그 옷은 S · M · L 만 판다. 지금까지 옵션으로
+# 칸을 자르는 것은 느슨한 줄 읽기(_lz_table)뿐이라, 서버 HTML 표 · 사이즈가이드 창 · 매장 틀 OCR 로 들어온 표는 팔지 않는 칸을
+# 그대로 냈다. we11done 1000002079 「빈티지 코듀로이 집업 후디」: 옵션 S | M | L, 사이즈가이드 표 XS/S/M/L/XL(코덱스 019 15번,
+# 2026-10-02 — 살아 있는 페이지에서 칩 세 개 · 표 다섯 칸을 확인). names_from_options 는 「옵션 수 = 칸 수」일 때만 이름을
+# 붙이니 여기는 건드리지 않는다.
+# 자르는 것은 이름이 **글자 그대로** 맞을 때만이다:
+#   · 옵션이 전부 사이즈 이름이다(색 · 동의 칸은 상품표에서 이미 빠졌다 — crawl_cafe24.app_options). 옵션이 30개(수집 상한)면
+#     뒤가 잘렸을 수 있어 안 본다.
+#   · 표의 이름이 모두 사이즈로 읽히고 겹치지 않으며, 옵션 이름이 표 이름에 **모두** 있고, 표 안에서 **이어진 토막**이다.
+#     가운데가 빠진 옵션(foeto 「S | L」 · 표 S/M/L)은 매장이 품절 옵션을 목록에서 내린 것일 수 있어 자르지 않는다.
+#   · 사람이 옮겨 적은 표(manual)와 세트 표(size_parts)는 손대지 않는다.
+def trim_unsold_sizes(out: dict, rows_by_url: dict) -> Counter:
+    n: Counter = Counter()
+    for u, e in out.items():
+        r = rows_by_url.get(u)
+        # 품절 상품은 안 자른다 — 카페24 매장 다수가 품절된 옵션을 목록에서 **숨긴다**(option_stock_data 의 is_display F).
+        # frizmworks 2144 는 옵션이 「L」 하나인데 M · XL 은 숨긴 품절 옵션이었다(살아 있는 페이지 2026-10-02). 판매중 상품에서
+        # 숨긴 품절 칸이 빠지는 것은 「지금 살 수 있는 칸」만 남기는 것이라 받지만, 다 팔린 상품은 남은 칸이 우연이다.
+        if not r or r.get("status") != "ON_SALE" or e.get("source") == "manual" or e.get("size_parts") or e.get("axis") == "head":
+            continue
+        names = [str(x).strip() for x in (e.get("size_names") or [])]
+        sizes = e.get("sizes") or {}
+        if len(names) < 2 or not sizes or any(len(v) != len(names) for v in sizes.values()):
+            continue
+        opts = [o.strip() for o in (r.get("options") or "").split("|") if o.strip()]
+        if not opts or len(opts) >= 30:
+            continue
+        sold = []
+        for o in opts:
+            o = _OPT_STOCK.sub("", _OPT_SOLDOUT.sub("", o)).strip()
+            if not _SIZE_OPT.match(o):
+                sold = []
+                break
+            sold.append(o.upper().replace(" ", ""))
+        up = [x.upper().replace(" ", "") for x in names]
+        if not sold or len(set(up)) != len(up) or any(_opt_rank(x) is None for x in up):
+            continue
+        if not set(sold) <= set(up) or len(set(sold)) >= len(up):
+            continue
+        keep = sorted(up.index(x) for x in set(sold))
+        if keep != list(range(keep[0], keep[-1] + 1)):
+            continue
+        # 형제에게 물려준 표는 사전을 함께 쓴다 — 새 사전으로 바꿔 끼운다(제자리에서 고치면 형제 표까지 잘린다)
+        e["sizes"] = {k: [v[i] for i in keep] for k, v in sizes.items()}
+        e["size_names"] = [names[i] for i in keep]
+        if e.get("ranges"):
+            e["ranges"] = {k: [v[i] for i in keep] if len(v) == len(names) else v for k, v in e["ranges"].items()}
+        n[e.get("brand_slug") or ""] += 1
+    return n
+
+
+# 하의(바지 · 스커트)에 선 가슴 — 하의 표에 가슴 칸은 없다. 이 칸이 서면 거의 모델 몸 치수다(코덱스 023 11번 margarin-fingers
+# 4517 「허리 53 · 가슴 79」). 창고 전수(2026-10-02, 판 전 결과): 하의 갈래에 가슴 · 어깨가 선 표 377벌, 그중 한 칸 · 이름 없음
+# 144벌. 셋업 · 오버롤 · 투웨이 · 품목이 빈 옷(다운 · 데님 재킷이 하의 칸에 든 것)에는 진짜 가슴 칸이 있어 안 본다.
+#   · 가슴이 모두 70~100 — 옷 단면이 아니라 몸 둘레다(lartisan 4088 팬츠 「… 총장 99.5 · 가슴 79」, ostkaka 치노 「가슴 80」).
+#     가슴만 지우고, 이름 없는 표면 같은 모델 줄의 허리(52 넘게 · 28 아래) · 엉덩이(78 넘게 · 40 아래)도 지운다.
+#   · 한 칸 · 이름 없는 표의 가슴은 값과 상관없이 지운다. 가슴 38 아래 · 허리 21~28 · 엉덩이 30~40(없어도 됨)이면 인치 몸 치수
+#     셋이라 허리 · 엉덩이도 지운다(rolarola 「가슴 30 · 허리 23 · 엉덩이 34.5」, till-i-die 778 와이드 팬츠). 어른 하의 단면
+#     허리가 28 아래일 수는 없다. 엉덩이가 그 밖이면(lartisan 4694 「허리 28 · 엉덩이 44」) 옷 치수로 보고 가슴만 지운다.
+_BOTTOM_ITEMS = {"팬츠", "스커트", "숏팬츠", "스웨트팬츠", "치노", "카고팬츠", "트랙팬츠", "레깅스", "카펜터팬츠",
+                 "파티그팬츠", "파라슈트팬츠", "조거팬츠", "버뮤다"}
+_NOT_PLAIN_BOTTOM = re.compile(r"(?i)(?<![a-z])set(?![a-z])|set-?up|세트|셋업|투피스|two[- ]?piece|&|\+|overall|오버롤|멜빵|"
+                               r"점프|jump\s?suit|romper|롬퍼|(?<![a-z])bib(?![a-z])|2[- ]?way|투웨이|원피스|dress|브라|(?<![a-z])bra(?![a-z])")
+
+
+def blank_bottom_model(out: dict, rows_by_url: dict) -> Counter:
+    n: Counter = Counter()
+    gone = []
+    for u, e in out.items():
+        r = rows_by_url.get(u)
+        if not r or e.get("source") == "manual" or e.get("size_parts") or e.get("axis") == "head":
+            continue
+        if r.get("category_code") not in ("bottoms", "skirt") or r.get("subtype") not in _BOTTOM_ITEMS \
+                or _NOT_PLAIN_BOTTOM.search(r.get("name") or ""):
+            continue
+        s = e.get("sizes") or {}
+        ch = [v for v in (s.get("가슴") or []) if isinstance(v, (int, float))]
+        if not ch:
+            continue
+        unnamed = not any(str(x).strip() for x in (e.get("size_names") or []))
+        one = unnamed and max(len(v) for v in s.values()) == 1
+        num = lambda lab: [v for v in (s.get(lab) or []) if isinstance(v, (int, float))]
+        drop = set()
+        hz, hp = num("허리"), num("엉덩이")
+        if all(70 <= v <= 100 for v in ch):
+            drop.add("가슴")
+            if unnamed:
+                if hz and all(v >= 52 or v <= 28 for v in hz):
+                    drop.add("허리")
+                if hp and all(v >= 78 or v <= 40 for v in hp):
+                    drop.add("엉덩이")
+        elif one and not ({"어깨", "소매길이", "암홀", "소매통"} & set(s)):
+            # 한 칸 · 이름 없는 하의 표의 가슴은 값이 얼마든 그 옷 치수가 아니다(lartisan 「… 총장 64 · 가슴 31」 — 모델 가슴 31 인치).
+            # 어깨 · 소매가 함께 선 표는 아예 다른 옷의 표이거나 갈래가 틀린 옷이라(years-ago 「… Jacket, Bermuda」) 여기서 안 본다.
+            drop.add("가슴")
+            if ch[0] <= 38 and hz and 21 <= hz[0] <= 28 and (not hp or 30 <= hp[0] <= 40):
+                drop.add("허리")            # 인치 몸 치수 셋(가슴 · 허리 · 엉덩이)
+                if hp:
+                    drop.add("엉덩이")
+        if not drop:
+            continue
+        e["sizes"] = {k: v for k, v in s.items() if k not in drop}     # 형제와 함께 쓰는 사전 — 바꿔 끼운다
+        if e.get("ranges"):
+            e["ranges"] = {k: v for k, v in e["ranges"].items() if k not in drop}
+        n[e.get("brand_slug") or ""] += 1
+        if not e["sizes"]:
+            gone.append(u)
+    for u in gone:
+        del out[u]
+    return n
+
+
 def drop_piece_tables(out: dict) -> tuple[int, int]:
     """칸 이름이 사이즈가 아닌 표를 뺀다. (옷 이름 = 세트·팩, 색 이름 = 색깔별 실측)
 
@@ -5929,6 +6046,12 @@ def main():
     rep = repair_names(out, {r["source_url"]: r for r in rows.values()})
     if rep:
         print("읽다 만 사이즈 이름: " + " · ".join(f"{k} {v}" for k, v in sorted(rep.items())))
+    trimmed = trim_unsold_sizes(out, {r["source_url"]: r for r in rows.values()})
+    if trimmed:
+        print(f"매장이 팔지 않는 사이즈 칸을 뺀 표 {sum(trimmed.values())}벌: {dict(trimmed.most_common(15))}")
+    model_b = blank_bottom_model(out, {r["source_url"]: r for r in rows.values()})
+    if model_b:
+        print(f"하의에 선 모델 몸 치수(가슴 …)를 비운 표 {sum(model_b.values())}벌: {dict(model_b.most_common(15))}")
     if fixed:
         print("사이즈 이름 정리: " + " · ".join(f"{k} {v}" for k, v in sorted(fixed.items())))
     # 모자는 옷 표를 다 정리한 **뒤에** 따로 넣는다 — 옷 표 정리(칸 수 맞추기 · 뒤집힌 라벨 빼기 …)는 옷 칸을 전제로 한다.

@@ -710,7 +710,21 @@ def blend_fibers(body: str, name: str = "") -> tuple[list[str], bool]:
 # 좋은」. 첫 소재가 데님인 티셔츠가 1,057벌 · 니트가 881벌이었다(2026-09-23). 이름·품목이 데님이거나
 # 원단으로 적은 것(「데님 원단」「12oz」「selvedge」)만 받는다.
 DENIM_NAME = re.compile(r"데님|denim|jean|청바지|\b진\b|트러커|trucker|샴브레이|chambray", re.I)
-DENIM_FABRIC = re.compile(r"데님\s*(?:원단|소재|fabric)|denim\s*(?:fabric|cloth)|\d+(?:\.\d+)?\s*oz|selvedge|셀비지|셀비지|워싱\s*데님|로우\s*데님|raw\s*denim", re.I)
+DENIM_FABRIC = re.compile(r"데님\s*(?:원단|소재|fabric)|denim\s*(?:fabric|cloth)|\d+(?:\.\d+)?\s*oz(?!\s*(?:충전|패딩|웰론|솜))|"
+                          r"selvedge|셀비지|셀비지|워싱\s*데님|로우\s*데님|raw\s*denim", re.I)
+# DENIM_FABRIC 은 **그 옷 이야기**에서만 찾는다. 원문 통째로 보다가 세 갈래가 근거가 됐다(코덱스 감사 023 37번, 2026-10-02):
+#   · 세탁 · 이염 안내 — goodlifeworks 1936 「이지 와이드 스웨트 쇼츠」(면 70% 폴리 30%)의 상세 그림 끝 「데님 원단 특성상 이염이
+#     발생할 수 있으니 …」 「워싱된데님 원단의 경우 …」가 매장 공용 안내라 소재가 「코튼, 폴리에스터, 데님」이 됐다.
+#     arend 「스웨이드, 데님 원단 특성 상 약간의 물빠짐이 …」 · and-you 「데님 원단 특성상 동일 사이즈내 기장 편차」도 같은 꼴.
+#   · 다른 상품 추천 — and-you 「RECOMMEND ITEM … 나이보더 워싱 데님팬츠」(태그를 읽는 쪽은 strip_other_products 로 이미 거른다).
+#   · 충전재 무게 — ava-molli 「3oz 충전재 안감」 코트.
+# 태그를 읽는 _text 와 같은 씻기를 거치고, 안내 문장(특성상 · 이염 · 물빠짐 · 단독 세탁 · 편차 · 주의 …)은 지우고 본다.
+_DENIM_NOTICE = re.compile(r"특성\s?상|이염|물\s?빠짐|색\s?빠짐|단독\s*세탁|냄새|편차|주의|참고\s*부탁|환불|교환|반품|수선")
+
+
+def denim_evidence_text(body: str) -> str:
+    t = strip_negated(strip_other_products(strip_scale_bar(strip_styling_suggestion(strip_reviews(body or "")))))
+    return "".join("" if _DENIM_NOTICE.search(p) else p for p in re.split(r"(?<=[.!?\n·•*])", t))
 
 
 # 상품 이름에 적힌 소재는 정확하다(사람 2026-09-23 「제목에 소재 있으면 정확도 높음」). 혼용률이 있는
@@ -771,7 +785,7 @@ def order_materials(found: set[str], body: str, name: str, subtype: str = "",
     found = set(found) | set(name_mats or ())
     if subtype == "Denim":          # 매장이 데님 칸에 넣은 옷 — 글에 그 말이 없어도 데님이다
         found.add("데님")
-    if "데님" in found and not (DENIM_NAME.search(f"{name} {subtype}") or DENIM_FABRIC.search(body or "")):
+    if "데님" in found and not (DENIM_NAME.search(f"{name} {subtype}") or DENIM_FABRIC.search(denim_evidence_text(body))):
         found.discard("데님")
     if has_blend:
         # 다운은 충전재라 겉감 혼용률에 안 나온다 — 「Outshell 100% Polyamide … Filled with Goose down 90/10」.

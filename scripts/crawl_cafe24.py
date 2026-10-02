@@ -1312,6 +1312,31 @@ MATERIAL_OUTER = (
 )
 
 
+# 「라이더」 「바이커」가 홀로 선 것은 **무늬 · 그래픽 · 핏 이름**일 때가 많다 — 품목 낱말이 따로 있으면 그쪽이 이긴다.
+# match_head 는 가장 뒤에서 끝나는 낱말을 고르는데, 그래픽 이름은 괄호 안 · 뒤쪽에 붙는다:
+#   outstanding 「MOT SERIES TEE(HOONING BIKER)」 · 「… TEE(BORN AGAIN BIKER)」 6벌이 레더자켓(아우터)으로 섰다
+#   (코덱스 감사 023 26번, 2026-10-02). 창고 전수로 이름에 TEE 가 있는데 아우터인 것은 이 6벌뿐이다.
+# 품목 낱말이 아예 없으면(modnine 「Rider Morrison - MOD1w」 「Night Rider - MOD8sb」 「[Digital Print] Biker Haeran - MOD1」
+# — 청바지 · vunque 「Toque Rider Cover」 — 지갑 칸) 매장 칸 이름이 아우터가 아닌 다른 갈래를 말할 때 그쪽을 따른다
+# (classify_category). 「biker jacket」 「라이더 자켓」처럼 겉옷 낱말이 붙은 꼴은 그대로 레더자켓이다.
+WEAK_RIDER = re.compile(r"(?<![a-z가-힣])(?:riders?|bikers?|라이더|바이커)(?![a-z가-힣])", re.I)
+
+
+def garment_head(name: str) -> str:
+    """ITEM_TYPE_VOCAB 의 match_head — 홀로 선 「라이더 · 바이커」가 다른 품목 낱말을 이기지 않게(WEAK_RIDER 주석)."""
+    item = match_head(name, ITEM_TYPE_VOCAB)
+    if item == "레더자켓" and WEAK_RIDER.search(name or ""):
+        alt = match_head(WEAK_RIDER.sub(" ", name), ITEM_TYPE_VOCAB)
+        if alt and ITEM_TO_CATEGORY.get(alt) not in (None, "outer"):
+            return alt
+    return item
+
+
+def bare_rider(name: str) -> bool:
+    """레더자켓의 근거가 홀로 선 「라이더 · 바이커」뿐인가(다른 품목 낱말 · 겉옷 낱말이 없다)."""
+    return bool(WEAK_RIDER.search(name or "")) and not match_head(WEAK_RIDER.sub(" ", name), ITEM_TYPE_VOCAB)
+
+
 def material_outer(head_name: str, item: str) -> str:
     """겉옷 이름에 소재 갈래가 적혀 있으면 그쪽이 품목이다."""
     if item not in OUTER_SHAPE_ITEMS:
@@ -1604,6 +1629,22 @@ def acc_of(name: str) -> str:
     return match_acc(clean_name_for_kind(name))
 
 
+def category_code_of(category_names: list[str]) -> str | None:
+    """매장 칸 이름으로 정한 갈래(못 정하면 None) — classify_category 의 칸 이름 차례를 따로 뗀 것."""
+    for cat in category_names:
+        low = cat.lower()
+        if any(n in low for n in NOISE_CATEGORY) or RANK_CATEGORY.match(low):
+            continue
+        # 칸 이름이 「Book」 하나인 것 — horlisun 「KINFOLK TRAVEL」·「Supreme」 같은 책 8벌(2026-10-01).
+        # 부분 일치로 넣으면 「LOOKBOOK」 칸이 걸려서 통째로만 받는다.
+        if BOOK_CATEGORY.match(low):
+            return "lifestyle"
+        for code, keys in CATEGORY_NAME_RULES:
+            if any(k in low for k in keys):
+                return code
+    return None
+
+
 def classify_category(name: str, category_names: list[str], description: str = "",
                       options: list | None = None) -> str:
     if any(PET_CATEGORY.match(c or "") for c in category_names):
@@ -1636,8 +1677,13 @@ def classify_category(name: str, category_names: list[str], description: str = "
         return "bags" if declared.group(1) in DECLARED_BAG else "shoes"
     if BAG_CAPACITY.search(name):
         return "bags"
-    item = match_head(name, ITEM_TYPE_VOCAB)
+    item = garment_head(name)
     if item in ITEM_TO_CATEGORY:
+        # 홀로 선 「라이더 · 바이커」뿐이면 매장 칸 이름이 먼저다 — 칸이 아우터가 아닌 갈래를 말하면 그쪽(WEAK_RIDER 주석)
+        if item == "레더자켓" and bare_rider(name):
+            by_cat = category_code_of(category_names)
+            if by_cat and by_cat != "outer":
+                return by_cat
         return ITEM_TO_CATEGORY[item]
     # 이름에 옷 낱말이 없고 설명글이 「…버킷 햇입니다」 · 「…스크런치입니다」라고 못박으면 그 물건이다(misu-a-barbe 「AMULET STRAW」 ·
     # 「BIG EARS BLUE」). 옷 낱말 뒤에 둔다 — 티셔츠 설명의 「…신체일부와 같은 모자입니다」(horlisun)가 모자가 되지 않게.
@@ -1656,17 +1702,9 @@ def classify_category(name: str, category_names: list[str], description: str = "
     # 굿즈 낱말은 옷 낱말 뒤에 본다 — 「Toy Puff T-Shirt」는 장난감이 아니라 티셔츠다.
     if HEAD_MISC.search(name):
         return "other"
-    for cat in category_names:
-        low = cat.lower()
-        if any(n in low for n in NOISE_CATEGORY) or RANK_CATEGORY.match(low):
-            continue
-        # 칸 이름이 「Book」 하나인 것 — horlisun 「KINFOLK TRAVEL」·「Supreme」 같은 책 8벌(2026-10-01).
-        # 부분 일치로 넣으면 「LOOKBOOK」 칸이 걸려서 통째로만 받는다.
-        if BOOK_CATEGORY.match(low):
-            return "lifestyle"
-        for code, keys in CATEGORY_NAME_RULES:
-            if any(k in low for k in keys):
-                return code
+    by_cat = category_code_of(category_names)
+    if by_cat:
+        return by_cat
     # 설명글의 「22.5(W) X 12.5(H)」 — 가로×세로로 재는 것은 가방·지갑이다. ostkaka 「Kadel Mini Baguette」·「Numer Mesh」,
     # lememe 「삭 마티네」 15벌이 이름에 가방 낱말이 없어 기타(=옷)로 셌다(2026-10-01). 창고 전수로 이 꼴이 든 설명
     # 334벌 가운데 옷은 0벌이다. 칸 이름이 이미 정한 것은 건드리지 않게 칸 이름 다음에 본다.
@@ -3334,6 +3372,67 @@ def split_option(v: str) -> tuple[str, bool]:
 OPTION_SIZE_TITLE = re.compile(r"size|사이즈|사이스|치수", re.I)
 
 
+# ── 상품표(products_full.csv)의 options 칸 — 앱이 「옵션」으로 그대로 내는 자리 ──────────────
+# 수집기(parse_detail)는 옵션을 **넓게** 받는다. 사이즈 칸을 앞에 세우고 색 칸도 받는 것은 일부러다 — pick_color 가
+# 색을 읽고, fold_reruns 가 「서로 상대에게 없는 색을 팔면 다른 상품」을 가르는 근거다. 그래서 원본(jsonl)은 두고
+# 상품표 칸만 씻는다(build_csv 가 다 쓴 다음, 파일에 쓰기 직전에). 코덱스 공개 매장 감사 023(2026-10-02)이 짚었다:
+#   curetty 1613 「RED | S」 · s-e-o 1060 「1 | 2 | 에크루」 — 사이즈 칸이 있는데 색이 사이즈처럼 섰다
+#   salondeju 4248 「S (26-마른27) | M (27-28) | 동의 | 동의」 — 개인정보 · 주문제작 동의 칸
+#   juntae-kim 153 「SIZE | XS | S …」 — 선택창 제목 줄(제목 줄을 빼는 코드가 수집기에 들어오기 전에 담긴 줄)
+# 창고 전수(137,547행): 사이즈+색 22,197행 · 제목/안내 줄 6,051행 · 동의 757행.
+# size_from_ocr 도 이 칸을 읽는다 — 사이즈 이름은 그대로 남으니 이름 붙이기(names_from_options)는 같고,
+# 「옵션이 전부 사이즈일 때만」 쓰는 _lz_opt_names 는 색 · 제목이 빠져 이제 사이즈 이름을 받는다.
+_APP_OPT_TAG = re.compile(r"^\s*[-–*\s]*\[\s*(?:필수|선택|required|optional)\s*\]\s*", re.I)
+# 동의 · 교환 불가 · 제작 기간 · 배송 고르기 — 사이즈도 색도 아니다. 앞에 사이즈 · 색이 붙은 꼴(「M (교환 및 반품 불가
+# 동의)」 「39(260)교환/취소/반품불가동의」 「Black (리퍼브 교환 환불 불가 동의)」)은 앞 토막을 살린다.
+# 「1차 · 2차」는 예약 판매 차수다(gongdreen 「스몰 | 미디움 | … | 1차」) — 사이즈 「1」로 읽히면 안 된다.
+_APP_OPT_NOTICE = re.compile(r"동의|불가|환불|교환|반품|소요|주문\s*제작|제작\s*기간|공지|당일\s*도착|배송|delivery|"
+                             r"확인\s*후|확인하였|확인했|(?<![\d.])\d{1,2}\s*차(?![가-힣])", re.I)
+_APP_OPT_ONE = re.compile(r"^(?:one|os|o/s|free|f|프리|원사이즈)$", re.I)
+
+
+def _app_opt_is_size(o: str) -> bool:
+    import size_from_ocr as so          # 사이즈 판정은 이름 붙이기와 같은 정규식으로(잣대가 둘이면 어긋난다)
+    u = so._OPT_STOCK.sub("", so._OPT_SOLDOUT.sub("", o)).strip()
+    if so._SIZE_OPT.match(u) or so._combo_rank(u) is not None or so._SIZE_HEAD.match(u):
+        return True
+    sizes, other = _option_parts(o)
+    return bool(sizes) and not other
+
+
+def _app_opt_is_color(o: str) -> bool:
+    """색 이름**뿐**인 옵션. 「BLACK / 1」 「BLACK-ONE」 「(19)Black」처럼 사이즈 · 번호가 낀 것은 색이 아니다(남긴다)."""
+    if _app_opt_is_size(o):
+        return False
+    toks = [t for t in re.split(r"[\s/,+&()\[\]\-_]+", o) if t]
+    if any(re.search(r"\d", t) or _SIZE_PART.match(t) or _APP_OPT_ONE.match(t) for t in toks):   # 「217bis(BEIGE)」 같은 번호 붙은 색도 남긴다
+        return False
+    return bool(field_color(o))
+
+
+def app_options(opts: str) -> str:
+    out: list[str] = []
+    for o in (opts or "").split(" | "):
+        o = _APP_OPT_TAG.sub("", o.strip()).strip()
+        if not o or OPTION_PROMPT.match(o) or OPTION_HEADER.match(o) or \
+                all(_OPT_HEAD_PART.match(p.strip()) for p in re.split(r"[-_/]", o)):
+            continue                    # 제목 줄 · 안내 문구(「SIZE」 「- [필수] SELECT SIZE -」 「COLOR-SIZE」)
+        if _APP_OPT_NOTICE.search(o):
+            o = re.sub(r"\s*[(\[（][^)\]）]*[)\]）]", lambda m: "" if _APP_OPT_NOTICE.search(m.group(0)) else m.group(0), o)
+            m = _APP_OPT_NOTICE.search(o)
+            if m:
+                o = o[:m.start()]
+            o = o.strip(" -/:,·")
+            if not o or not (_app_opt_is_size(o) or field_color(o)):
+                continue                # 남은 앞 토막이 사이즈도 색도 아니면(「상세 설명」 「서울/경기」) 통째로 뺀다
+        if o not in out:
+            out.append(o)
+    # 사이즈 칸이 있는 상품은 색만 적은 옵션을 뺀다 — 색은 대표색 칸(representative_color)이 따로 낸다.
+    if any(_app_opt_is_size(o) for o in out):
+        out = [o for o in out if not _app_opt_is_color(o)]
+    return " | ".join(out)
+
+
 def _known_label(lab: str) -> bool:
     """「뒷총장」·「앞밑위」처럼 앞뒤를 붙인 라벨도 받는다 — 칸 이름은 size_from_ocr 가 다시 맞춘다."""
     return bool(_KNOWN.match(lab) or _KNOWN.match(re.sub(r"^(?:뒷|뒤|앞)", "", lab)))
@@ -4649,7 +4748,10 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
             # 여섯 벌이 하의 통에서 「부츠」로 서 있었다(앱 쪽 지적 2026-09-20). 낱말을 지우고
             # 다시 고른다 — 지우기만 하면 「데님」·「팬츠」가 제 차례에 걸린다.
             item_name = SHOE_FALSE.sub(" ", head_name)
-            item = acc or match_head(item_name, ITEM_TYPE_VOCAB)
+            item = acc or garment_head(item_name)
+            # 홀로 선 「라이더 · 바이커」로 레더자켓이 됐는데 갈래가 아우터가 아니면(칸 이름이 하의 · 지갑이라 했다) 품목도 비운다
+            if item == "레더자켓" and code != "outer" and bare_rider(item_name):
+                item = ""
             item = material_outer(item_name, item)
             if fix and fix.get("품목"):
                 item, acc = fix["품목"], fix["품목"]
@@ -4769,6 +4871,10 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
         s = " · ".join(f"{k} {v:,}" for k, v in sorted(dropped_unseeded.items(), key=lambda x: -x[1]))
         print(f"씨앗에 없는 매장 {len(dropped_unseeded)}곳을 상품표에서 뺀다 — {s} "
               f"(원본은 그대로 둔다. 씨앗에 줄을 되돌리면 다음 판에 돌아온다)", file=sys.stderr)
+    # 옵션 칸은 다 쓴 뒤 파일에 쓰기 직전에 씻는다 — 위의 fold_reruns · size_set_gender 는 색까지 든 원래 옵션을
+    # 봐야 한다(app_options 주석).
+    for r in rows:
+        r["options"] = app_options(r.get("options") or "")
     with OUT_CSV.open("w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=CSV_FIELDS)
         w.writeheader()
