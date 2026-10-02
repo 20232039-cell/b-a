@@ -4889,8 +4889,9 @@ _COLOR_NAME = re.compile(
 # 남는 칸이 표 안에서 이어진 토막일 때만(가운데가 빠지면 이름을 잘못 읽었을 수 있다). 사람이 옮겨 적은 표(manual)와 세트 표
 # (size_parts)는 손대지 않는다.
 # 고도몰(we11done 해석기)은 품절 칩도 class soldout 으로 그대로 그려 그 상품의 사이즈 칩이 전부 나온다(stores/we11done.py 머리말 ·
-# 1000002398 「XS · XL 품절」). Shopify 는 products.json 의 variants 가 품절(available false)까지 전부다(crawl_shopify).
-FULL_OPTION_PLATFORMS = {"godomall", "shopify"}
+# 1000002398 「XS · XL 품절」). Shopify 는 넣지 않는다 — 품절된 variant 를 지우는 매장이 있다(post-archive-faction 「Souvenir Tee 14」
+# 흰색은 variant 가 L 하나뿐인데 표는 XS~XL, 2026-10-02 살아 있는 페이지). 그대로 자르면 재입고될 칸의 실측을 잃는다(조정 지시).
+FULL_OPTION_PLATFORMS = {"godomall"}
 
 
 def _opt_keys(o: str) -> set[str]:
