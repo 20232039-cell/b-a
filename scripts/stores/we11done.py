@@ -40,8 +40,7 @@ _GENDER_OF: dict[int, list[str]] = {}
 def list_urls(http, log=print) -> list[str] | None:
     seen: dict[int, list[str]] = {}
     for cate, label in GENDER_CATES.items():
-        total = None
-        got = 0
+        cate_seen: set[int] = set()
         for page in range(1, 60):
             u = f"{BASE}/goods/goods_list.php?mode=data&cateCd={cate}&cateType=cate&page={page}&pageNum=100"
             r = cs.get_patient(http, u, log)
@@ -53,19 +52,25 @@ def list_urls(http, log=print) -> list[str] | None:
                                                                  r.text, re.S)))
             if not nos:
                 break
-            for no in nos:
+            # 겹친 쪽을 다시 주는 고도몰 더보기가 있다. 쪽마다 받은 수를 더하면 같은 100벌을 열 번 받아도 1,000벌로 보여
+            # TOTAL 검사를 통과한다. 성별 칸마다 고유 번호만 세고, 새 번호가 없는 쪽에서 멈춘다(코덱스 리뷰 d4443a5 · 067).
+            new = [no for no in nos if no not in cate_seen]
+            if not new:
+                log(f"  [we11done] 목록 {cate} {page}쪽에 새 상품이 없어 멈춘다")
+                break
+            cate_seen.update(new)
+            for no in new:
                 seen.setdefault(no, [])
                 if label not in seen[no]:
                     seen[no].append(label)
-            got += len(nos)
             if len(nos) < 100:
                 break
         # 첫 화면의 TOTAL 과 대 본다 — 목록이 갑자기 줄면(틀이 바뀜) 판을 버리는 게 낫다
         r0 = cs.get_patient(http, f"{BASE}/goods/goods_list.php?cateCd={cate}", log)
         m = re.search(r'id="totals">([\d,]+)', r0.text) if r0 is not None and r0.status_code == 200 else None
         total = int(m.group(1).replace(",", "")) if m else None
-        log(f"  [we11done] {label}({cate}) 목록 {got}벌 / 화면 TOTAL {total}")
-        if total and got < total * 0.9:
+        log(f"  [we11done] {label}({cate}) 목록 {len(cate_seen)}벌 / 화면 TOTAL {total}")
+        if total and len(cate_seen) < total * 0.9:
             log(f"  [we11done] 목록이 TOTAL 보다 많이 적다 — 판을 버린다")
             return None
     if not seen:

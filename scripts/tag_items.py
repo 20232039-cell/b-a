@@ -1740,7 +1740,24 @@ def blend_of_brand(slug: str, items: list[dict], why: dict | None = None) -> dic
     seen: Counter = Counter()
     for cs in cands.values():
         seen.update({(c["src"], c["ctx"]) for c in cs})
-    common = {key for key, n in seen.items() if have[key[0]] >= 10 and n >= 0.6 * have[key[0]]}
+    frequent = {key for key, n in seen.items() if have[key[0]] >= 10 and n >= 0.6 * have[key[0]]}
+    # 한 가지 옷감만 쓰는 매장은 열 벌 모두 「COTTON 100%」라 반복만으로 공용 줄이 된다 — 검산을 통과한 진짜 혼용률이
+    # 매장째 사라졌다(코덱스 리뷰 c47ea38 P2 · 067, 영향 33벌). 다른 출처(그림 글 · 사이즈가이드 창 …)가 있는 상품을 셋 넘게
+    # 대 보아 절반 넘게 같은 혼용률을 말하면 공용 안내가 아니라 매장의 진짜 옷감으로 본다. 근거가 없거나 어긋나면 예전처럼 뺀다.
+    common = set()
+    for key in frequent:
+        checked = agree = 0
+        for cs in cands.values():
+            shop = [c for c in cs if (c["src"], c["ctx"]) == key]
+            other = [c for c in cs if c["src"] != key[0]]
+            if not shop or not other:
+                continue
+            checked += 1
+            a = shop[0]["m"]
+            if any(product_desc._mix_sub(a, c["m"]) or product_desc._mix_sub(c["m"], a) for c in other):
+                agree += 1
+        if not (checked >= 3 and agree > 0.5 * checked):
+            common.add(key)
     # ② 베껴 붙인 매장 글
     groups: dict[tuple, list[str]] = defaultdict(list)
     for u, cs in cands.items():

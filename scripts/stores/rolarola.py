@@ -68,7 +68,15 @@ def list_urls(http, log=print) -> list[str] | None:
         g = _walk(http, cno, log)
         if g is None:
             return None
-        for p in g[0]:
+        cpnos, ctotal = g
+        log(f"  [rolarola] {name}({cno}) 목록 {len(cpnos)}벌 / 화면 {ctotal}")
+        # 상품 페이지에는 칸 이름이 없어 이 목록이 유일한 근거다. 틀이 바뀌어 ([], 100)이 돌아와도 받으면 그 칸의 상품이
+        # 조용히 분류를 잃는다 — VIEW ALL 과 같은 90% 문으로 판을 버린다(코덱스 리뷰 d4443a5 · 067). 화면 수가 0 이거나
+        # 없는 빈 칸(철 지난 기획전)은 그대로 둔다.
+        if ctotal and len(cpnos) < ctotal * 0.9:
+            log(f"  [rolarola] {name} 목록이 TOTAL 보다 많이 적다 — 판을 버린다")
+            return None
+        for p in cpnos:
             cats.setdefault(p, []).append(name)
     _CATS_OF.clear()
     _CATS_OF.update(cats)
