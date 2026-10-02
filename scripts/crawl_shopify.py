@@ -178,6 +178,18 @@ def _sz_guide_table(block: str) -> str:
     return f"<table>{out}</table>"
 
 
+def _height_is_length(size_html: str) -> str:
+    """옷 표의 「Height」는 총장이다 — thug-club 은 Length 대신 Height 를 쓰는 표가 있다(alpha-cwu-45 · 코덱스 018).
+    가방 표(Width · Height · Depth)의 높이와 가르려고, Length 칸이 없고 몸 치수 칸(어깨 · 가슴 · 허리 …)이 같이
+    있을 때만 바꾼다. 오타 「Lengh」도 Length 로."""
+    heads = [h.strip().lower() for h in re.findall(r"(?is)<th[^>]*>(.*?)</th>", size_html)]
+    size_html = re.sub(r"(?i)(<th[^>]*>\s*)lengh(\s*</th>)", r"\1Length\2", size_html)
+    body = {"shoulder", "chest", "waist", "sleeve", "arm", "thigh", "hip"}
+    if "height" in heads and not {"length", "lengh"} & set(heads) and body & set(heads):
+        size_html = re.sub(r"(?i)(<th[^>]*>\s*)height(\s*</th>)", r"\1Length\2", size_html)
+    return size_html
+
+
 def page_size_html(html_text: str) -> str:
     """상품 페이지에 틀로 그린 실측표 — 위 두 꼴. 없으면 빈 글. 줄의 page_extras 에 남으므로 빈칸을 접는다."""
     m = _SIZE_TABLE.search(html_text or "")
@@ -263,7 +275,7 @@ def enrich(d: dict, old: dict | None, updated_at: str, http: cc.PoliteSession) -
     if ex.get("size_html"):
         width = max((len(v) for k, v in (d.get("size_table") or {}).items()
                      if not k.startswith("_") and isinstance(v, list)), default=0)
-        t = cc.extract_size_any(ex["size_html"])
+        t = cc.extract_size_any(_height_is_length(ex["size_html"]))
         n = max((len(v) for k, v in t.items() if not k.startswith("_") and isinstance(v, list)), default=0)
         if len([k for k in t if not k.startswith("_")]) >= 2 and n > width:
             d["size_table"] = t
