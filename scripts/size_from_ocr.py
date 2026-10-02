@@ -3089,7 +3089,10 @@ _INCH_BODY = re.compile(r"(?i)\b(?:waist|hips?|chest|bust|허리|힙|엉덩이|�
 # 둘 다 그 줄을 지우고 읽는다 — 뒤에서 값만 빼면(drop_model_body) 진짜 가슴 칸이 이미 밀려 있다.
 _MB_PAIR = re.compile(r"(?i)(?<![가-힣A-Za-z])(bust|chest|waist|hips?|가슴|허리|엉덩이|힙)\s*[:：\-]?\s*(\d{2,3}(?:\.\d)?)")
 _MB_GARMENT = re.compile(r"(?i)어깨|총장|총기장|기장|소매|밑위|허벅지|밑단|암홀|너비|단면|length|shoulder|sleeve|rise|thigh|hem|armhole|width")
-_MB_HEIGHT = re.compile(r"(?i)(?:height|ight|키|신장)\s*[:：\-]?\s*1[4-9]\d|(?<![\d.])1[4-9]\d(?:\.\d)?\s*cm")
+_MB_HEIGHT = re.compile(r"(?i)(?:height|ight|키|신장)\s*[:：\-]?\s*1[4-9]\d|(?<![\d.])1[4-9]\d(?:\.\d)?\s*cm"
+                        # OCR 이 뭉갠 키 줄 — 「키버티아 175」 · 「7| HEIGHT 75」(175 의 1 이 빠짐) · 「. | 172」 · 「2 7| 169」
+                        # (margarin-fingers 3252 · 4208 · 2516 · 2519, 2026-10-02). 몸 낱말 줄이 둘 넘게 곁에 있을 때만 쓰인다.
+                        r"|키[^\d\n]{1,4}1[4-9]\d|\bheight\s+[4-9]\d\b|^\W{0,4}(?:[\w|]{1,2}\W{1,3}){0,2}1[5-8]\d(?:\.\d)?\W*$")
 _MB_INCH = re.compile(r"(?i)inch|인치")
 # 모델 칸 머리줄(「MODEL SIZE (CM)」 「모델 정보」 「MODEL : 168cm」)도 키 줄처럼 닻이 된다. margarin-fingers 4517 캉캉 스커트는
 # 키 줄이 「키 HEIGHT 71」(171 의 1 을 OCR 이 흘림)로 읽혀 _MB_HEIGHT 가 못 잡았고, 둘째 모델은 키 줄이 아예 없었다 —
@@ -3159,9 +3162,45 @@ def blank_model_lines(text: str) -> str:
                 for j in range(max(0, i - 4), min(len(lines), i + 11)):
                     if j not in gone and _mb_pairs_only(lines[j]):
                         gone.add(j)
+    # 「MODEL SIZE (CM)」 · 「모델 사이즈」 머리말 바로 아래의 몸 낱말 줄은 모델 몸이다 — 키 줄을 OCR 이 「7| HEIGHT 75」 ·
+    # 「키버티아 175」 · 「2 7| 169」로 뭉개면 위 갈래(키 줄 곁)가 못 잡아, margarin-fingers 스커트 · 블라우스 38벌에
+    # 「가슴 81 · 허리 66」 같은 모델 치수가 실측으로 섰다(2519 · 2516 · 3858 · 4208 · 3252 …, 2026-10-02 lowcov 갈래).
+    # 머리말 뒤 열네 줄 안(모델 둘을 잇달아 적는다 — 3992), 옷 낱말 · 사이즈 표 머리말이 나오기 전까지만 지운다.
+    for i, ln in enumerate(lines):
+        if not _MB_HEAD.search(ln):
+            continue
+        for j in range(i + 1, min(len(lines), i + 15)):
+            lj = lines[j]
+            if _MB_GARMENT.search(lj) or _MB_TABLE_HEAD.search(lj) or _MB_SIZE_ROW.match(lj):
+                break
+            # 낱말 하나에 값이 여럿(「Chest 108 113 118」 · 「Hip 94 94」)이면 사이즈별 옷 표 줄이다 — 지우지 않는다(tibaeg 1701).
+            ws = [w.lower()[:3] for w, _ in _MB_PAIR.findall(lj)]
+            if len(set(ws)) == 1 and len(re.findall(r"\d{2,3}(?:\.\d)?", lj)) >= 2:
+                continue
+            if _MB_PAIR.search(lj) or _MB_BODY_TYPO.search(lj):
+                gone.add(j)
+    # 어두운 띠 판독(ocr_dark_bands)이 같은 몸 치수 줄을 글 맨 앞에 한 번 더 싣는다 — 「4 가슴8057 76」(4797). 지운 줄과
+    # 몸 낱말 · 값 짝이 똑같은 줄은 어디 있든 함께 지운다.
+    # 값이 낱말마다 하나인 줄끼리만 맞춘다 — 「Chest 108 113 118」 같은 사이즈별 줄은 옮겨 지우지 않는다(tibaeg 1701).
+    def _one_each(ln: str) -> bool:
+        return bool(_MB_PAIR.search(ln)) and len(re.findall(r"\d{2,3}(?:\.\d)?", ln)) == len(_MB_PAIR.findall(ln))
+    sigs = {tuple(sorted(_MB_PAIR.findall(lines[j]))) for j in gone if _one_each(lines[j])}
+    if sigs:
+        for j, lj in enumerate(lines):
+            if j not in gone and not _MB_GARMENT.search(lj) and _one_each(lj) \
+                    and tuple(sorted(_MB_PAIR.findall(lj))) in sigs:
+                gone.add(j)
     if not gone:
         return text
     return "\n".join("" if i in gone else ln for i, ln in enumerate(lines))
+
+
+# 「가즘 81」(2574) — 몸 낱말의 OCR 오자. 모델 머리말 아래에서만 본다.
+_MB_BODY_TYPO = re.compile(r"(?:가즘|가숨|가승|허라|엉덩0)\s*\d{2,3}")
+# 사이즈 이름으로 시작하는 줄(「S BUST 46cm」 — drawfit 2794)은 옷 표다. 거기서 멈춘다.
+_MB_SIZE_ROW = re.compile(r"(?i)^\W*(?:XXS|XS|S|M|L|XL|XXL|2XL|FREE|F|ONE\s?SIZE)\b(?!\s*[:：])")
+_MB_HEAD = re.compile(r"(?i)model\s*size|모델\s*사이즈|모델\s*정보|model\s*info")
+_MB_TABLE_HEAD = re.compile(r"(?i)^\W*(?:size|사이즈|실측)(?!\s*\(?\s*cm\s*\)?\s*$)\b|단위|단면")
 
 
 _FULLWIDTH = {c: c - 0xFEE0 for c in range(0xFF10, 0xFF5B) if chr(c - 0xFEE0).isalnum()}
@@ -5467,9 +5506,86 @@ def parse_paren_slash_blank(text: str) -> tuple[list[str], dict[str, list[float]
     return parse_paren_slash("".join(out))
 
 
+# ⑦ 「SIZE INFO(CM) / Size / Shoulder / Bust / Length / 1 (Women) / 45 / 52 / 60 / 2 / 56.5 / 61 / 72」 — 칸마다 줄이 바뀐
+#    표가 상품 설명글에 그대로 실린 꼴(taille, imweb · 2026-10-02 lowcov 갈래). 판매중 의류 빈칸 142벌이 전부 이 꼴인데
+#    읽는 갈래가 없었고(parse_stack_rows 는 사이즈가이드 창 글에만 건다), 이름 칸이 「1 (Women)」 · 「2 (27-28inch)」라
+#    그 함수의 이름 검사도 못 지난다. 더 나쁜 것은 크롤러가 이 글에서 「총장 80 · 허리 28」을 뽑아 둔 상품이다 —
+#    80 은 「80년대 …」 소개글, 28 은 모델 「Waist 28inch」에서 왔다(taille 814 · 816 · 817 · 825 · 831).
+#    **칸 수가 딱 맞는 줄만 받는다.** 칸이 모자란 줄(「2 / 49 / 57 / 58」 — 라벨 넷에 값 셋)은 어느 칸이 빠진 것인지
+#    글로는 모르므로 그 줄부터 버린다(taille 1291 · 1369 · 1621 …). 칸이 빠진 까닭은 수집기가 겹친 줄을 지운 것이다
+#    (stores/_imweb.py _dedupe_lines — 다음 수집부터 고쳐진다). 「-」 · 「Raglan」처럼 매장이 칸에 적은
+#    낱말은 빈칸으로 센다. 사이즈 이름이 숫자면 1, 2, 3 … 차례여야 한다 — 칸이 밀리면 다음 줄의 이름(「2」)이 값으로
+#    먹혀 들어가는데, 그때 이름 차례가 깨지므로 거기서 걸린다.
+_IS_HEAD = re.compile(r"(?i)^size\s*info\b")
+_IS_SIZE = re.compile(r"(?i)^(?:size|사이즈)$")
+_IS_STOP = re.compile(r"(?i)^(?:error\s*range|model\s*size|model\b|모델|[*※])")
+_IS_NAME = re.compile(r"^(\d|XXS|XS|S|M|L|XL|XXL|2XL|F|FREE|OS|ONE\s*SIZE)"
+                      r"(?:\s*\((?:unisex|wom[ae]ns?|m[ae]ns?|\d{2}\s*[-~]\s*\d{2}\s*(?:inch|in)?)\))?$", re.I)
+_IS_VAL = re.compile(r"^(\d{1,3}(?:[.,]\d+)?)\s*(?:c?m)?\s*(?:\((?:drop)\))?$", re.I)
+_IS_BLANK = re.compile(r"(?i)^(?:-|–|—|x|raglan)$")
+
+
+def info_stack_layout(body: str) -> bool:
+    """「SIZE INFO … / Size / 라벨 / 라벨」 — 칸마다 줄이 바뀐 표가 설명글에 있는가(읽히든 안 읽히든)."""
+    L = [x.strip() for x in (body or "").splitlines() if x.strip()]
+    return any(_IS_HEAD.match(L[i]) and _IS_SIZE.match(L[i + 1]) and canon_label(L[i + 2]) and canon_label(L[i + 3])
+               for i in range(len(L) - 3))
+
+
+def parse_info_stack(body: str, min_rows: int = 2) -> tuple[list[str], dict[str, list[float]]] | None:
+    L = [x.strip() for x in (body or "").splitlines() if x.strip()]
+    for i in range(len(L) - 3):
+        if not (_IS_HEAD.match(L[i]) and _IS_SIZE.match(L[i + 1])):
+            continue
+        p = i + 2
+        labs: list[str] = []
+        while p < len(L) and canon_label(L[p]) and not _IS_NAME.match(L[p]):
+            labs.append(canon_label(L[p]))
+            p += 1
+        if len(labs) < 2 or len(set(labs)) != len(labs):
+            return None
+        names: list[str] = []
+        rows: list[list[float | None]] = []
+        whole = True
+        while p < len(L) and not _IS_STOP.match(L[p]):
+            m = _IS_NAME.match(L[p])
+            if not m:
+                return None
+            cells: list[float | None] = []
+            p += 1
+            while p < len(L) and not _IS_STOP.match(L[p]) and not _IS_NAME.match(L[p]):
+                v = _IS_VAL.match(L[p])
+                if v:
+                    cells.append(float(v.group(1).replace(",", ".")))
+                elif _IS_BLANK.match(L[p]):
+                    cells.append(None)
+                else:
+                    return None                  # 표 칸에 글이 섰다 — 꼴을 모른다
+                p += 1
+            if len(cells) != len(labs):
+                whole = False                    # 이 줄부터는 칸이 모자라다 — 앞의 온전한 줄까지만
+                break
+            names.append(re.sub(r"\s+", " ", m.group(1)).upper())
+            rows.append(cells)
+        # 칸이 모자란 줄이 나오면 그 앞의 온전한 줄들만 받는다 — 글에서 칸이 빠지는 것은 겹친 값이 지워진 것뿐이라
+        # (수집기 _imweb._dedupe_lines 주석) 칸 수가 맞는 줄은 그대로 맞다. 다만 한 줄만 남으면 받지 않는다 —
+        # 사이즈가 셋인 옷이 「1」 하나로 서면 앱이 프리사이즈처럼 보인다(select=thin-table 주석, 2026-09-13).
+        if not rows or (not whole and len(rows) < min_rows) or len(set(names)) != len(names):
+            return None
+        if all(n.isdigit() for n in names) and [int(n) for n in names] != list(range(int(names[0]), int(names[0]) + len(names))):
+            return None
+        cols = {lab: [fix_value(lab, str(r[c])) if r[c] is not None else None for r in rows] for c, lab in enumerate(labs)}
+        cols = {c: v for c, v in cols.items() if any(x is not None for x in v)}
+        return (names, cols) if len(cols) >= 2 else None
+    return None
+
+
 def parse_text_extras(body: str, row: dict, ranges: dict | None = None) -> tuple[list[str] | None, dict[str, list[float]]] | None:
-    """설명글에서 기존 갈래가 못 읽은 꼴(위 ①~③ · ⑥ · 아래 ⑤). 부르는 쪽이 「기존 갈래가 두 라벨도 못 읽었을 때」만 부른다.
+    """설명글에서 기존 갈래가 못 읽은 꼴(위 ①~③ · ⑥ · ⑦ · 아래 ⑤). 부르는 쪽이 「기존 갈래가 두 라벨도 못 읽었을 때」만 부른다.
     ranges 를 넘기면 밴딩 허리 범위(⑤)를 거기에 담는다."""
+    st = parse_info_stack(body)
+    if st:
+        return st
     pc = parse_piece_sections(body, row.get("category") or "")
     if pc:
         return pc
@@ -5816,6 +5932,33 @@ def main():
                             isinstance(a, (int, float)) and isinstance(b, (int, float)) and abs(a - b) <= 1
                             for a, b in zip(sizes[c], cs[c])) for c in sizes):
                     sizes, names = cs, sr[0]
+            # 「SIZE INFO / Size / 라벨… / 이름 / 값…」 표가 설명글에 있으면 그 글이 원본이다(parse_info_stack 주석 ⑦ — taille).
+            # 크롤러 표는 같은 글을 줄 지운 채로 읽은 것이라(stores/_imweb.py _dedupe_lines) 칸이 밀려 있다 — 814 「총장 80 ·
+            # 허리 28」(80년대 · 모델 Waist 28inch), 1762 이름 「1 · 41 · 43」, 1112 라벨 넷에 값 셋을 앞에서부터 채운 「어깨 62 ·
+            # 가슴 59 · 총장 51」. 글이 읽히면 글을 쓰고, 안 읽히면 크롤러 표도 버린다 — 다만 크롤러 표가 이름 차례(1, 2 …)를
+            # 갖춘 두 칸 넘는 표면 남긴다(846 — 셋째 줄만 칸이 빠졌고 앞 두 줄은 글과 같다). 2026-10-02 lowcov 갈래.
+            if source in (None, "html") and d.get("platform") == "imweb":
+                body_is = halve_girth_lines("\n".join(t for t in (d.get("description") or "", d.get("detail_text") or "") if t))
+                if info_stack_layout(body_is):
+                    ist = parse_info_stack(body_is)
+                    ics = clean_ocr(ist[1]) if ist else {}
+                    wide_now = max((len(v) for v in sizes.values() if isinstance(v, list)), default=0)
+                    seq = bool(names) and all(str(x).isdigit() for x in names) and \
+                        [int(x) for x in names] == list(range(int(names[0]), int(names[0]) + len(names)))
+                    if len(ics) >= 2 and not (seq and wide_now > len(ist[0])):
+                        sizes, names, source = ics, ist[0], "html"
+                    elif source == "html" and not (seq and wide_now >= 2):
+                        # 첫 줄만 온전하고 둘째 줄부터 칸이 빠진 글이면, 크롤러 표가 그 첫 줄과 값이 다 같을 때만 남긴다
+                        # (taille 1757 · 1925 「1 / 54.5 / 60 / 61 / 57 / 2 / 59 / 65.5 / 62」 — 크롤러 표 = 첫 줄, 맞는 값).
+                        # 첫 줄부터 칸이 빠졌으면(1112 「1 / 62 / 59 / 51 / 2 / 65 / 63 / 64 / 55」 — 크롤러는 51 을 총장에 넣었다)
+                        # 어느 칸이 빠졌는지 모르니 버린다.
+                        one = parse_info_stack(body_is, min_rows=1)
+                        oc = clean_ocr(one[1]) if one else {}
+                        same = bool(oc) and wide_now == 1 and all(
+                            c in oc and oc[c] and oc[c][0] is not None and isinstance(v[0], (int, float))
+                            and abs(oc[c][0] - v[0]) < 0.01 for c, v in sizes.items() if v)
+                        if not same:
+                            sizes, names, source = {}, None, None
             # 설명글의 남은 꼴(parse_text_extras 주석 — 2026-10-01 parseB). 위 갈래가 두 라벨도 못 읽었거나, 읽은 표의
             # 칸 이름이 벌 이름뿐일 때만(그 표는 끝에서 drop_piece_tables 가 통째로 뺀다 — nick-nicole 「PANTS · SKIRT」).
             # 「FREE INNER / VEST …」 트윈 세트는 크롤러가 두 벌을 두 칸으로 읽은 표가 이름 없이 서 있어도 다시 읽는다(parse_free_piece_slash).

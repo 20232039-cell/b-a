@@ -143,6 +143,28 @@ def _parse_options(h: str) -> list[tuple[str, bool]]:
 _SIZEISH = re.compile(r"(?i)^\s*(XXS|XS|S|M|L|XL|XXL|XXXL|[0-9]{1,3}|F|FREE|OS|O/S|ONE ?SIZE)\s*(\(.*\))?\s*$")
 
 
+# 칸 하나가 한 줄인 표의 값 · 짧은 표식(「60」 · 「-」 · 「2」 · 「Bust」)은 겹쳐도 지우지 않는다.
+# 요약(.goods_summary)과 본문이 같은 글을 되풀이해서 줄을 한 번씩만 남겼는데(dict.fromkeys), 그러면
+# 「SIZE INFO(CM) / Size / Shoulder / Bust / Length / 1 / 47 / 56 / 54 / 2 / 49 / 57 / 56 …」에서 앞에 이미 나온
+# 「56」이 둘째 줄에서 사라져 칸이 하나 모자랐다 — taille 판매중 의류 142벌이 이 꼴로 표를 잃었고(1291 · 1369 · 1613 …),
+# 크롤러는 남은 글에서 「80년대」의 80 을 총장으로, 모델 「Waist 28inch」를 허리로 뽑았다(814 · 825 · 2026-10-02 lowcov 갈래).
+# 열다섯 자를 넘는 글 줄만 겹침을 지운다 — 요약과 본문이 되풀이하는 것은 그런 문장 줄이다. 표의 칸(값 · 라벨 ·
+# 「2 (Unisex)」 같은 이름)과 「COLOR」 같은 머리말은 겹쳐도 그대로 둔다.
+_KEEP_DUP_LEN = 15
+
+
+def _dedupe_lines(lines: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in lines:
+        if len(t) <= _KEEP_DUP_LEN:
+            out.append(t)
+        elif t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
 def parse_page(base: str, html_text: str, url: str, slug: str, now: str, http=None) -> dict | None:
     lds = _ld(html_text)
     prod = next((d for d in lds if d.get("@type") == "Product"), None)
@@ -190,7 +212,7 @@ def parse_page(base: str, html_text: str, url: str, slug: str, now: str, http=No
             u = fix_url(im.get("src") or im.get("data-src") or "")
             if u.startswith("http") and u not in detail_imgs:
                 detail_imgs.append(u)
-    text = "\n".join(dict.fromkeys(lines))
+    text = "\n".join(_dedupe_lines(lines))
 
     table = cc.extract_size_any(detail_html) if ds is not None and ds.find("table") else {}
     if len(table) < 2:
