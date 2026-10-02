@@ -171,13 +171,16 @@ def thin_row(r: dict, tags: dict, bi: dict, ci: dict, pref: dict) -> dict:
         "i": f'{r["brand_slug"]}-{r["product_no"]}',
         "b": bi[r["brand_slug"]],
         "n": r["name"],
-        "p": int(r["price"] or 0),
+        # 정가 — 할인 중이면 앱이 줄 그어 보여 줄 값(사람 2026-10-02). 재생성 전 상품표(list_price 열 없음)는 예전 값
+        "p": int(r.get("list_price") or r["price"] or 0),
         "m": u[len(pre):] if pre and u.startswith(pre) else u,
         "c": ci[r.get("category_code") or "other"],
         "t": r.get("subtype") or "",
         "g": GENDER_CODE.get(r.get("gender_target"), "U"),
         "s": 1 if r.get("status") == "ON_SALE" else 0,
     }
+    if r.get("sale_price"):
+        row["sp"] = int(r["sale_price"])
     # 빈 값은 아예 안 적는다 — 11만 번 반복되면 그것만으로 수백 KB다
     for k, v in (("co", (t.get("color") or [""])[0]),
                  ("ma", (t.get("material") or [""])[0]),
@@ -290,6 +293,8 @@ def full(r: dict, tags: dict, sizes: dict, crawl: dict,
         "options": r.get("options") or "",
         "color_name": r.get("representative_color") or "",
         "price_log": d.get("price_log") or [],
+        # 할인가 자국 [[날짜, 할인가 또는 0(할인 없음)], …] — 바뀔 때만 한 줄(crawl_cafe24.carry_over)
+        "sale_log": d.get("sale_log") or [],
         "stock_log": d.get("stock_log") or [],
         "price_seen_at": d.get("price_seen_at") or "",
     })
@@ -594,7 +599,8 @@ def main() -> int:
         # 줄의 열쇠가 무슨 뜻인가 — 앱이 여기서 읽게 해 두면 열쇠가 늘어도 안 어긋난다
         "fields": {
             "i": "상품 id (<slug>-<product_no>)", "b": "brands 번호", "n": "이름",
-            "p": "값(원)", "m": "사진 — brands[b].p 를 앞에 붙인다",
+            "p": "정가(원) — 할인 중이면 줄 그을 값", "sp": "할인가(원) — 지금 파는 값이 정가보다 쌀 때만(없으면 안 적힘)",
+            "m": "사진 — brands[b].p 를 앞에 붙인다",
             "c": "cats 번호", "t": "품목(subtype)", "g": "W 여성 · M 남성 · U 남녀공용",
             "s": "1 판매중 · 0 품절", "co": "대표색", "ma": "대표소재", "se": "시즌",
             "cg": "색만 다른 형제 묶음(없으면 안 적힘)",

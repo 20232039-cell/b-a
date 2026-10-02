@@ -13,9 +13,10 @@ SEO URL, 둘 다 cafe24 형식). 어댑터 하나로 50곳이 붙는다.
      한 번 훑어 product_no → 카테고리 이름들을 따로 얻는다. 목록은 48개/쪽이라 싸다.
   3. 상세 페이지에서 이름·판매가·대표컷·품절·추가컷·설명·옵션.
 
-수집하지 않는 것:
-  · 할인가(product_sale_price) — 타임세일·쿠폰으로 수시로 바뀌는데 우리는 주 단위로 본다.
-    틀린 가격을 띄우는 건 표시 문제라 빈 칸조차 두지 않는다(build_products_seed.py 와 같은 판단).
+할인가(product_sale_price)도 받는다 — 2026-10-02 사람: 「할인가도 따로 받자. 앱엔 정가 줄긋고 할인가 표시」 ·
+「할인가는 우리가 시기별로 수집해서 기록해두자」. 전에는 「수시로 바뀐다」며 안 받았는데 공개 매장 무작위 40벌 중
+14벌이 할인 중이라 앱 값이 매장과 어긋났다(코덱스 023). 주간 갱신이 판매중 상품 상세를 7일마다 다시 읽으므로
+(weekly_update STALE_PRICE_DAYS) 할인가도 주마다 새로 보고, 바뀔 때마다 sale_log 에 한 줄 쌓는다(carry_over).
 
 예의:
   · 호스트당 1초 간격(+지터). 여러 호스트는 병렬이지만 한 호스트에는 동시에 하나만.
@@ -723,6 +724,26 @@ STORE_BRANCH = re.compile(r"(?:백화점|아울렛|아웃렛|면세점|스타필
 
 
 
+def price_pair(d: dict) -> tuple[int, int, int | None]:
+    """(정가, 지금 파는 값, 할인가 또는 None) — 플랫폼마다 값 칸의 뜻이 달라 여기서 한 번에 맞춘다.
+
+    - 카페24: price = 판매가, price_listed = 소비자가(판매가보다 클 때만), price_sale = 할인판매가(판매가보다 작을 때만)
+    - Shopify · 식스샵 · 매장별 해석기: price = 지금 파는 값, price_listed = 할인 전 값(compare_at 등)
+    정가는 그중 가장 큰 값(페이지가 줄 그어 보여 주는 값), 할인가는 가장 작은 값이 정가보다 작을 때만.
+    """
+    def _i(x):
+        try:
+            return int(x or 0)
+        except (TypeError, ValueError):
+            return 0
+    price, listed, sale = _i(d.get("price")), _i(d.get("price_listed")), _i(d.get("price_sale"))
+    if not price:
+        return 0, 0, None
+    lst = max(price, listed)
+    pay = min(price, sale) if sale else price
+    return lst, pay, (pay if pay < lst else None)
+
+
 def carry_over(prev: dict, d: dict, when: str) -> None:
     """옛 줄에서 잃으면 안 되는 것을 새 줄로 옮기고, 값·재고가 바뀐 자국을 남긴다.
 
@@ -757,6 +778,18 @@ def carry_over(prev: dict, d: dict, when: str) -> None:
     if d.get("price") and (not plog or plog[-1][1] != d["price"]):
         plog.append([when[:10], d["price"]])
     d["price_log"] = plog[-20:]
+    # 할인가 자국(사람 2026-10-02 「할인가는 시기별로 수집해서 기록해두자」). 값을 못 읽어 옛 값을 물려받은 판은
+    # 할인가도 물려받는다 — 페이지를 못 본 날을 「할인 끝」으로 적으면 안 된다.
+    if d.get("price_kept") and prev.get("price_sale") and "price_sale" not in d:
+        d["price_sale"] = prev["price_sale"]
+    lst, pay, sale = price_pair(d)
+    if lst:
+        sl = list(prev.get("sale_log") or [])
+        now_sale = sale or 0                     # 0 = 할인 없음(정가에 판다)
+        if (sl and sl[-1][1] != now_sale) or (not sl and now_sale):
+            sl.append([when[:10], now_sale])
+        if sl:
+            d["sale_log"] = sl[-40:]
     slog = list(prev.get("stock_log") or [])
     now_stock = "품절" if is_soldout(d) else "판매중"
     if not slog or slog[-1][1] != now_stock:
@@ -2597,6 +2630,12 @@ def _crawl_one_list(http: PoliteSession, shop: Shop, cate_no: int, list_path: st
 
 # ─── 상세 파싱 ───
 
+def _js_num(html_text: str, var: str) -> str | None:
+    """「var product_sale_price = 117000;」처럼 따옴표 없이 적힌 수 — _js_str 는 따옴표 값만 읽는다."""
+    m = re.search(rf"var\s+{var}\s*=\s*'?([\d.,]+)'?\s*;", html_text)
+    return m.group(1) if m else None
+
+
 def _js_str(html_text: str, var: str) -> str | None:
     m = re.search(rf"var\s+{var}\s*=\s*'((?:[^'\\]|\\.)*)'", html_text)
     if not m:
@@ -3456,6 +3495,18 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
     # 21,272벌(52%)의 값이 열흘 묵어 있었다(사람 지적: 「우리가 업데이트를 매일 하는 게 아니잖아」).
     # 정가 자리(#span_product_price_custom)가 파는 값보다 클 때만 정가로 본다.
     listed = _won("#span_product_price_custom")
+    # 할인가 — 카페24 「할인 혜택」으로 정해진 기간 할인판매가(쿠폰 아님). JS 변수가 정본이고 og 메타가 같은 값을 든다.
+    # 할인이 없으면 판매가와 같은 값이 온다(ae-ae 1398 · 119000 = 119000) — 판매가보다 작을 때만 할인가로 본다.
+    sale = None
+    for raw in (_js_num(html_text, "product_sale_price"),
+                (soup.select_one('meta[property="product:sale_price:amount"]') or {}).get("content") if soup else None):
+        try:
+            v = int(float(str(raw).replace(",", ""))) if raw not in (None, "") else 0
+        except ValueError:
+            v = 0
+        if v > 0:
+            sale = v
+            break
 
     soldout = False
     m = re.search(r"(?:is_)?soldout_icon\s*=\s*'(\w)'", html_text)
@@ -3810,6 +3861,7 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
         "name": name,
         "price": price,
         **({"price_listed": listed} if listed and price and listed > price else {}),
+        **({"price_sale": sale} if sale and price and sale < price else {}),
         "soldout": soldout,
         "image_url": image,
         "gallery": gallery[:12],
@@ -4116,6 +4168,9 @@ CSV_FIELDS = [
     # (품절된 옛 상품이 대부분). 지우지 않고 표시만 한다: 앱 목록과 수집률 분모에서 빼고 레코드는 남긴다
     # — 지워도 다음 주간 갱신이 목록에서 다시 주워 오고, 「지난 상품」 탭에는 이름·가격·대표컷이면 충분하다.
     "detail_empty",
+    # 정가 · 할인가(price_pair 주석 — 사람 2026-10-02 「할인가도 따로 받자. 앱엔 정가 줄긋고 할인가 표시」).
+    # price 열은 예전 뜻(수집기가 적은 값) 그대로 둔다 — 1,000원 아래 · 자리표시 값 거르기가 그 열을 본다.
+    "list_price", "sale_price",
 ]
 CATEGORY_LABEL = {"tops": "Tops", "outer": "Outerwear", "bottoms": "Pants", "dress": "Dresses", "skirt": "Skirts",
                   "shoes": "Shoes", "bags": "Bags", "accessories": "Accessories", "suiting": "Suiting",
@@ -4686,6 +4741,8 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
                 # 「보여 줄 설명이 없다」 — 글자 수가 아니라 **옷 이야기가 있나**로 센다.
                 # 앞서는 길이로만 봤는데, cpgn-studio 처럼 매장 푸터가 1,000자씩 들어오는
                 # 곳이 전부 「설명 있음」이었다(2026-09-20).
+                "list_price": price_pair(d)[0] or "",
+                "sale_price": price_pair(d)[2] or "",
                 "detail_empty": "" if product_desc.best(d.get("description") or "",
                                                         mined.get(str(d["product_no"])))[0] else "1",
             })
