@@ -1604,6 +1604,141 @@ def prepare_brand(slug: str, items: list[dict]) -> tuple[list[tuple], frozenset]
     return prepared, store_lines
 
 
+# ── 혼용률 칸(mat) ───────────────────────────────────────────────────────────
+# 앱 상세의 「소재」 줄은 mat(부위 구조 그대로의 혼용률)이 있으면 그걸 쓴다. 예전엔 export_app_data 가 설명글 한 칸에서만
+# 읽어(product_desc.blend) 판매중 의류 102,509벌 중 13,909벌(13.6%)뿐이었다(2026-10-02). 혼용률은 설명 · detail_text ·
+# 스펙 칸 · 사이즈가이드 창 · 브라우저 글 · 상세 그림 글(OCR)에 흩어져 있고, 그 글을 다 모으는 곳이 여기라 여기서 만든다.
+# 결과는 product_tags_full.json 의 "mat" 으로 싣고 export 가 그대로 옮긴다(앱이 받는 모양은 같다).
+#
+# 해석은 product_desc.mix_cands(합이 100 이어야 · 아는 섬유만 · 부위를 안 섞게 · % 오독은 그림 글에서만, 해석이 하나뿐일
+# 때만). 여기서는 상품 하나의 여러 출처 · 한 매장의 여러 상품을 함께 봐야 가릴 수 있는 것을 가린다:
+#   ① 매장 공용 줄 — 그 매장에서 같은 출처 글을 가진 상품의 60% 넘게(10벌 이상) 혼용률 앞뒤 글까지 똑같으면 상품 글이
+#      아니라 매장 안내다(noice 는 모든 상품 설명 끝에 영문 견본 「fabric :MERINO WOOL 50%NYLON 30%ACRYLIC 20%」를 붙인다).
+#   ② 베껴 붙인 매장 글 — 같은 혼용률 글을 5벌 넘게 나눠 쓰는데, 그림 글이 있는 상품(3벌 이상)의 절반 넘게에서 그림과
+#      어긋나면 그 글 묶음을 버린다. the-coldest-moment 「9/21 RELEASE」 77벌은 다운 재킷 · 패딩 · 시어링 코트 할 것 없이 설명이
+#      「Shell : Linen30% Rayon 20% Cotton 30% Polyester 20% Lining : Polyester 100%」였고 그림 글이 있는 49벌이 모두 달랐다.
+#   ③ 출처끼리 — 부위가 가장 많은 후보를 고르고, 나머지가 다 그 부분집합일 때만 받는다(product_desc.mix_pick). 매장 글과
+#      그림 글이 서로 다른 값을 말하면(noirer 1709 「COTTON 100%」 대 「COTTON 97% SPAN 3%」) 어느 쪽인지 모르므로 비운다.
+#   ④ 못 읽은 부위 — 검산에서 떨어진 줄기에 고른 결과에 없는 부위 이름이 적혀 있으면 비운다(아래 본문).
+#   ⑤ 떨어진 매장 글의 섬유 — 매장 글에서 검산에 떨어진 줄기의 섬유를 결과가 하나도 안 담으면 비운다(아래 본문).
+#   그리고 겉감(또는 이름 없는 부위)이 없는 결과 — 안감만 · 배색만 — 는 product_desc.mix_pick 이 버린다.
+_MAT_SRC = ("desc", "dt", "spec", "sizeguide", "browser", "ocr")
+_MAT_SHOP = {"desc", "dt", "spec"}
+
+
+def _mat_ctx(text: str, span: tuple[int, int]) -> str:
+    a, b = span
+    return re.sub(r"\s+", " ", text[max(0, a - 25):b + 25]).strip().lower()
+
+
+def blend_of_brand(slug: str, items: list[dict], why: dict | None = None) -> dict[str, list]:
+    """source_url → 혼용률(mat). 못 읽었거나 버린 상품은 없다. why 를 주면 상품마다 (까닭, 고른 출처)를 적는다(전후 대조용)."""
+    import product_desc
+    crawl = load_latest(CRAWL / f"{slug}.jsonl")
+    ocr = load_latest(OCR / f"{slug}.jsonl")
+    sg = load_latest(SIZEGUIDE / f"{slug}.jsonl")
+    brw: dict[str, str] = {}
+    bp = BROWSER / f"{slug}.jsonl"
+    if bp.exists():
+        for l in bp.read_text(encoding="utf-8").splitlines():
+            if l.strip():
+                b = json.loads(l)
+                t = (b.get("description") or "").strip()
+                if b.get("source_url") and len(t) > len(brw.get(b["source_url"], "")):
+                    brw[b["source_url"]] = t
+    strip_shell(brw, items)              # 브라우저 글의 메뉴 · 꼬리말을 걷는 것은 태거와 같다(소재 줄은 지킨다)
+    drop_boilerplate(brw, items)
+    cands: dict[str, list[dict]] = {}
+    lost_parts: dict[str, dict] = {}
+    ev: dict[str, list] = defaultdict(list)
+    ev_seen: Counter = Counter()
+    have = Counter()
+    for r in items:
+        no = str(r["product_no"])
+        d, o = crawl.get(no, {}), ocr.get(no, {})
+        desc = d.get("description") or ""
+        dt = d.get("detail_text") or ""
+        if dt[:200] == desc[:200]:
+            dt = ""
+        _raw = o.get("ocr_text") or ""
+        _per = "\n".join(t for t in ((i or {}).get("text") or "" for i in (o.get("images") or [])) if t)
+        btext = brw.get(r["source_url"], "")
+        if btext[:200] == desc[:200]:
+            btext = ""
+        # 그림 글은 denoise_ocr 를 거치지 않은 원문을 쓴다 — 쓰레기 줄 거르기가 「COTTON 100」처럼 영문 한 낱말 + 숫자인 줄을
+        # 통째로 버린다(아는 낱말이 둘 미만). 해석기의 검산(합 100 · 아는 섬유 · 이름표)이 그 거르기보다 엄격하다.
+        texts = {"desc": desc, "dt": dt, "spec": spec_texts(d.get("spec"))[0],
+                 "sizeguide": (sg.get(no) or {}).get("size_text") or "", "browser": btext,
+                 "ocr": _per if len(_per) > len(_raw) else _raw}
+        cs, lost = [], {}
+        for k in _MAT_SRC:
+            t = texts[k]
+            if not t:
+                continue
+            have[k] += 1
+            got, _, lp = product_desc.mix_cands(t, ocr=(k == "ocr"))
+            lost[k] = lp["parts"]
+            if k in _MAT_SHOP:
+                ev[r["source_url"]] += lp["ev"]
+                ev_seen.update({key for _, key in lp["ev"]})
+            for c in got:
+                c["src"], c["ctx"] = k, _mat_ctx(t, c["span"])
+                cs.append(c)
+        cands[r["source_url"]] = cs
+        lost_parts[r["source_url"]] = lost
+    # ① 매장 공용 줄
+    seen: Counter = Counter()
+    for cs in cands.values():
+        seen.update({(c["src"], c["ctx"]) for c in cs})
+    common = {key for key, n in seen.items() if have[key[0]] >= 10 and n >= 0.6 * have[key[0]]}
+    # ② 베껴 붙인 매장 글
+    groups: dict[tuple, list[str]] = defaultdict(list)
+    for u, cs in cands.items():
+        for key in {(c["src"], c["ctx"]) for c in cs if c["src"] in _MAT_SHOP}:
+            groups[key].append(u)
+    copied = set()
+    for key, us in groups.items():
+        if len(us) < 5 or key in common:
+            continue
+        checked = agree = 0
+        for u in us:
+            shop = [c for c in cands[u] if (c["src"], c["ctx"]) == key]
+            pics = [c for c in cands[u] if c["src"] == "ocr"]
+            if not shop or not pics:
+                continue
+            checked += 1
+            a = shop[0]["m"]
+            if any(product_desc._mix_sub(a, c["m"]) or product_desc._mix_sub(c["m"], a) for c in pics):
+                agree += 1
+        if checked >= 3 and agree < 0.5 * checked:
+            copied.add(key)
+    out = {}
+    for u, cs in cands.items():
+        kept = [c for c in cs if (c["src"], c["ctx"]) not in common and (c["src"], c["ctx"]) not in copied]
+        m, st = product_desc.mix_pick(kept)
+        # ④ 못 읽은 부위 — 고른 결과가 나온 출처에서 버린 줄기에 그 결과에 없는 부위 이름(안감 · 배색 …)이 있으면 그 부위를
+        # 빠뜨린 것이다(product_desc._mix_runs 의 lost_parts 주석, tillidie 2645 · known-better 60). **같은 출처만** 본다 —
+        # the-coldest-moment 티셔츠 460벌은 설명에 깨진 견본 「SHELL : COTTON 46% … CONTRAST : … POLYURETHANE 1020%」이 붙어 있고
+        # 그림 글은 「Cotton 100%」다. 출처를 가리지 않으면 견본의 부위 이름 때문에 그림 글까지 버린다.
+        src = next((c["src"] for c in kept if c["m"] == m), kept[0]["src"] if kept else "") if m else ""
+        if m and lost_parts[u].get(src, set()) - {p["p"] for p in m}:
+            m, st = [], "partial"
+        # ⑤ 매장 글이 말한(그러나 검산에서 떨어진) 섬유를 결과가 하나도 안 담으면 어긋난다 — 비운다(product_desc._mix_runs 주석,
+        # atlm 1608). 그 매장 5벌 넘게에 숫자만 바꿔 붙은 글은 견본이라 안 센다 — the-coldest-moment 티셔츠는 설명에
+        # 「SHELL : COTTON 46% … POLYURETHANE 1020%」(뒤 숫자만 상품마다 다름)이 붙어 있고 그림 글은 「Cotton 100%」다.
+        if m:
+            got = {f for p in m for f, _ in p["v"]}
+            if any(not (fib & got) for fib, key in ev[u] if ev_seen[key] < 5):
+                m, st = [], "conflict"
+        if m:
+            out[u] = m
+        if why is not None:
+            if not m and len(kept) < len(cs) and not kept:
+                st = "common" if any((c["src"], c["ctx"]) in common for c in cs) else "copied"
+            why[u] = (st, src, [(c["src"], c["m"]) for c in cs])
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--brands", nargs="*")
@@ -1623,9 +1758,11 @@ def main():
 
     out: dict[str, dict] = {}
     q_count, src_count = Counter(), Counter()
+    mat_count = 0
     ax_count, cat_count = Counter(), Counter()
     for slug, items in sorted(by_brand.items()):
         prepared, store_lines = prepare_brand(slug, items)
+        mats = blend_of_brand(slug, items)
         for r, body, sources, quality, color_text in prepared:
             tags = tagger.tag(r["category"], r["name"], body, color_text, quality,
                               sleeve_cm=sleeve_of(r["source_url"]), store_lines=store_lines)
@@ -1633,6 +1770,10 @@ def main():
                 "brand_slug": slug, "category": r["category"], "source_quality": quality,
                 "text_sources": sources, "tags": tags,
             }
+            # 혼용률 — blend_of_brand 주석. 못 읽은 것도 빈 목록으로 싣는다: export 는 열쇠가 있으면 그대로 쓰고, 없을 때만(옛 판
+            # 태그 파일) 설명글에서 읽는다 — 새 판이 버린 것이 되살아나지 않게.
+            out[r["source_url"]]["mat"] = mats.get(r["source_url"]) or []
+            mat_count += bool(mats.get(r["source_url"]))
             q_count[quality] += 1
             for s in sources:
                 src_count[s] += 1
@@ -1661,6 +1802,7 @@ def main():
     print(f"상품 {len(out)} (이번에 돌린 것 {n}) → {args.out}")
     print("품질:", dict(q_count))
     print("본문 출처:", dict(src_count))
+    print(f"혼용률(mat) {mat_count} ({mat_count / max(n, 1):5.1%})")
     print("축 커버리지:")
     for ax in AXES:
         print(f"  {ax:15s} {ax_count[ax]:6d} ({ax_count[ax] / n:5.1%})")

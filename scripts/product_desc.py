@@ -363,6 +363,663 @@ def blend(text: str) -> list[dict]:
     return []
 
 
+# ── 혼용률 2판: 출처를 넓히는 해석기(mix) ─────────────────────────────────────
+#
+# 위 blend 는 설명글(description)의 **짧은 조각** 하나에서만 읽는다. 판매중 의류 102,509벌 중 mat 이 나간 것이
+# 13,909벌(13.6%)뿐이었는데, 못 읽은 88,600벌 가운데 70,000벌 가까이가 원본 어딘가에 혼용률을 갖고 있었다
+# (2026-10-02 전수, blend 갈래). 못 읽은 까닭은 대개 출처가 아니라 **조각내기**였다:
+#     dunst      「[상품 필수 표시 정보] 제품 소재 SHELL: COTTON 100% 색상 SALT PINK 치수 …」  ← 160자 문턱
+#     insilence  「겉감 : Wool 50%, Polyester 50% 안감 : Polyester 100% 단추 : 천연 소뿔 단추 …」 ← 남은 글 > 6자
+#     ae-ae      「Alpaca 5% / Wool 20% / Nylon 45% / Acrylic 30%」  ← 빗금마다 따로 검산해 넷 다 떨어짐
+#     ader-error 「[Main] 면 73 폴리에스터 27 [Sub] 면 96 폴리우레탄 4」  ← % 를 안 쓰는 매장
+# 그리고 그림 글(OCR) · 사이즈가이드 창 · 브라우저 글은 아예 안 봤다.
+#
+# 그래서 조각이 아니라 **「섬유 + 숫자」 덩이가 잇달아 선 줄기(run)** 를 찾는다. 줄기 앞뒤에 무슨 글이 있든
+# 상관없고, 줄기 **안**은 깨끗해야 한다(덩이 사이에는 구분 기호 · 부위 이름 · 꾸밈말만). 틀린 숫자를 넣는 것이
+# 빈칸보다 나쁘므로 blend 보다 엄격하게 받는다:
+#   · 부위마다 합이 100 이어야 한다 — % 가 다 적혔으면 99~101(소수 반올림), 하나라도 % 가 없거나 깨졌으면
+#     **정확히 100** 이 되는 해석이 **하나뿐**일 때만. blend 의 90~110 은 「COTTON 92%」만 읽힌 것(폴리 8% 를
+#     놓친 것)까지 받았다 — saintpain 창 글에서 그렇게 「코튼 92」가 나갈 뻔했다.
+#   · 섬유 이름은 아는 것만(_MIX_FIBERS). 데님 · 니트 · 메쉬는 짜임이지 섬유가 아니다. 웰론(충전솜 상표) ·
+#     기타 · 메탈릭은 모르는 것으로 둔다 — 그 부위가 끼면 줄기를 통째로 버린다(아래 「남은 부위」).
+#   · 부위를 섞지 않는다. 부위 이름이 줄기 안에 서면 거기서 새 부위다. 줄기 바로 뒤에 부위 이름 + 숫자나
+#     다른 「NN%」가 남아 있으면 **덜 읽은 것**으로 보고 버린다 — 「SHELL-POLYESTER 100% / LINING-POLYESTER 100%
+#     / FILLER-WELLON 100%」(nick-nicole)에서 겉감 · 안감만 내보내면 충전재가 없는 옷이 된다.
+#   · 한 글에 서로 다른 줄기가 둘 이상 맞으면, 하나가 나머지를 다 품을 때(문장 「코튼 100% 소재」 + 표 「겉감 코튼 100%
+#     안감 폴리 100%」)나 부위 이름이 서로 겹치지 않을 때만 받고 아니면 버린다(색마다 · 세트 벌마다 다를 수 있다, mix_pick).
+#   · 검산에서 떨어진 줄기에 결과에 없는 부위 이름이 있으면 그 부위를 못 읽은 것이다 — 버린다(_mix_runs 의 lost_parts).
+#   · % 없는 숫자(「겉감 면 100」 「FABRIC Cotton100 LINING Polyester100」 「[Main] 면 73」)는 바로 앞에
+#     이름표(소재 · FABRIC · 혼용률 · 겉감 · [Main] …)가 있을 때만 받는다. 아무 데서나 「COTTON 100」을 받으면
+#     「Payment information COTTON 100 XS부터」 같은 것도 들어온다.
+#   · 그림 글(ocr=True)만 % 오독을 고친다. 판독기는 % 를 「9」 「96」 「X」 「o」로 읽는다 — 「코튼 1009」
+#     (till-i-die) · 「면 10096」(divein) · 「면 939 스판 796」(divein, 93 · 7). 꼬리 9 · 96 을 떼어 본 해석과
+#     그대로의 해석을 다 놓고 합이 정확히 100 이 되는 조합이 **하나뿐**일 때만 받는다. 이름표가 없으면 숫자 자체가
+#     100 을 넘어 오독이 확실한 것(1009 · 939)과 글자 꼬리(100X)만 받는다 — 「울 759 혼방」은 75 하나라 버려진다.
+_MIX_FIBERS = {"코튼", "폴리에스터", "나일론", "레이온", "린넨", "스판덱스", "울", "아크릴", "캐시미어", "텐셀",
+               "알파카", "모헤어", "큐프라", "아세테이트", "실크", "모달", "다운", "깃털", "앙고라", "야크",
+               "가죽", "천연가죽", "소가죽", "양가죽", "송아지가죽", "염소가죽", "말가죽", "인조가죽"}
+# vocab_aliases 에 없는 이름 — 혼용률에 실제로 적힌 꼴만(2026-10-02 전수에서 본 것).
+# 「깃털」은 vocab 이 다운으로 묶지만 「다운 80% 깃털 20%」는 둘을 갈라야 비율이 산다.
+# 「모」는 「모 100」(ader-error 의 울)처럼 한 낱말로 설 때만 덩이가 된다(낱말 단위로 보므로 「모자」는 안 걸린다).
+_MIX_ALIAS = {"모": "울", "양모": "울", "merino": "울", "lambswool": "울", "램스울": "울", "메리노울": "울",
+              "polyamide": "나일론", "폴리아미드": "나일론", "elastan": "스판덱스", "엘라스테인": "스판덱스",
+              "elasthane": "스판덱스", "pu": "스판덱스", "polyeurethane": "스판덱스", "polyurethan": "스판덱스", "쿠프로": "큐프라", "cuprammonium": "큐프라",
+              "feather": "깃털", "feathers": "깃털", "깃털": "깃털", "페더": "깃털", "duck feather": "깃털",
+              "goose feather": "깃털", "down": "다운", "솜털": "다운", "오리털": "다운", "거위털": "다운",
+              "angora": "앙고라", "앙고라": "앙고라", "yak": "야크", "야크": "야크",
+              "cow leather": "소가죽", "lamb leather": "양가죽", "sheep leather": "양가죽", "goat leather": "염소가죽",
+              "sheep skin": "양가죽", "lamb skin": "양가죽", "cow skin": "소가죽", "goat skin": "염소가죽",
+              "viscos": "레이온",       # 「Linning - Viscos 52%」(taille) · 「Viscos 26%」(eenk) — 오타
+              # 2차(2026-10-02): mat 없는 판매중 의류에서 「낱말 NN%」로 남은 낱말 상위(diag2). 뜻이 하나인 철자 · 상표만 —
+              # 매장 글에도 그대로 적힌다(etmon 「안감:POLYESRER100%」). 웰론 · 기타(other) · metal · camel · ramie 는 모르는 채로 둔다.
+              "polyesrer": "폴리에스터", "polyster": "폴리에스터", "polyeter": "폴리에스터", "polyetser": "폴리에스터",
+              "polyseter": "폴리에스터", "polyaster": "폴리에스터", "polyesier": "폴리에스터", "polyuretane": "스판덱스",
+              "polyuretan": "스판덱스", "polyurehtane": "스판덱스", "polyurethan": "스판덱스", "acylic": "아크릴",
+              "polyamid": "나일론", "elastin": "스판덱스", "엘라스틴": "스판덱스", "lycra": "스판덱스", "라이크라": "스판덱스",
+              "bemberg": "큐프라", "벰베르크": "큐프라", "라이오셀": "텐셀", "ecovero": "레이온", "coulton": "코튼",
+              "오리솜털": "다운", "거위솜털": "다운", "오리깃털": "깃털", "거위깃털": "깃털", "duckdown": "다운", "goosedown": "다운",
+              "합성가죽": "인조가죽"}
+# 그림 글에서만 쓰는 철자 맞추기 — 판독기는 글자 하나를 자주 바꾼다(「POLYESIER」 siyazu · 「ravon」 「acrvlic」 「polvester」
+# generalidea). 아래 영문 섬유 이름 가운데 **하나만** 편집 거리 1(아홉 글자 넘으면 2) 안에 있을 때만 그 섬유로 본다. 「model」은
+# modal 과 한 글자 차이지만 「MODEL 175cm」의 그 낱말이라 뺀다.
+_MIX_FUZZY = {"polyester": "폴리에스터", "polyurethane": "스판덱스", "cotton": "코튼", "nylon": "나일론", "rayon": "레이온",
+              "acrylic": "아크릴", "spandex": "스판덱스", "viscose": "레이온", "elastane": "스판덱스", "cashmere": "캐시미어",
+              "mohair": "모헤어", "alpaca": "알파카", "modal": "모달", "tencel": "텐셀", "lyocell": "텐셀", "linen": "린넨",
+              "polyamide": "나일론", "cupro": "큐프라", "acetate": "아세테이트", "angora": "앙고라"}
+_MIX_FUZZY_STOP = {"model", "models", "ramon", "angola", "nation", "lining", "liner", "lines", "modern", "motel", "crayon", "cotto", "nylons"}
+
+
+def _edit1(a: str, b: str, k: int) -> bool:
+    """a 와 b 의 편집 거리가 k 이하인가(짧은 낱말용)."""
+    if abs(len(a) - len(b)) > k:
+        return False
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i] + [0] * len(b)
+        for j, cb in enumerate(b, 1):
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb))
+        prev = cur
+        if min(prev) > k:
+            return False
+    return prev[-1] <= k
+
+
+def _mix_fuzzy(w: str) -> str | None:
+    w = w.lower()
+    if len(w) < 5 or w in _MIX_FUZZY_STOP or not w.isascii():
+        return None
+    hit = {f for name, f in _MIX_FUZZY.items() if _edit1(w, name, 2 if len(name) >= 9 else 1)}
+    return hit.pop() if len(hit) == 1 else None
+# 약자 혼용률 — 「MATERIAL : P 80% / R 20%」(not4nerd) · 「원단 혼용률: C 75 P 25」(일류). tag_items._ABBR 와 같은 표다.
+# 대문자 한두 글자가 섬유인 것은 이름표 바로 뒤의 줄기에서만 받는다(아무 데서나 받으면 「S 5%」 · 품번이 섬유가 된다).
+_MIX_ABBR = {"C": "코튼", "CO": "코튼", "P": "폴리에스터", "PE": "폴리에스터", "PL": "폴리에스터", "R": "레이온", "RA": "레이온",
+             "MD": "모달", "MO": "모달", "SP": "스판덱스", "SD": "스판덱스", "PU": "스판덱스", "N": "나일론", "NY": "나일론",
+             "W": "울", "WO": "울", "L": "린넨", "LI": "린넨", "AC": "아크릴", "CA": "캐시미어", "CS": "캐시미어",
+             "SI": "실크", "SK": "실크", "TE": "텐셀", "LY": "텐셀"}
+# 섬유 앞 꾸밈말 — 줄기 안에 서도 된다(「SUPIMA Cotton 65%」 「Recycled Polyester 50%」).
+_MIX_MOD = {"organic", "recycled", "recycle", "supima", "pima", "combed", "merino", "lambs", "virgin", "new", "pure",
+            "extra", "extrafine", "fine", "superfine", "super", "mercerized", "australian", "italian", "premium",
+            "brushed", "duck", "goose", "white", "grey", "gray", "mulberry", "baby", "cow", "lamb", "sheep", "pig", "hog",
+            "오가닉", "리사이클", "재생", "수피마", "피마", "메리노", "램스", "유기농", "친환경", "콤브", "콤드",
+            # 「구스 다운 80%, 구스 페더 20%」(we11done) — 다운 · 깃털 앞의 새 이름
+            "구스", "덕", "화이트", "그레이",
+            # 「Tasmania wool 90%」(facade-pattern) · 「KID MOHAIR 27%」(noice) · 「RE-Polyester 5%」(goen-j)
+            "tasmania", "tasmanian", "kid", "re", "geelong", "egyptian", "sea", "island", "long", "staple"}
+# 「Outer Fabric - Nylon 100% - Inner Fabric - Polyester 100%」(espionage) · 「BODY FILL : DUCK DOWN 90%」(grove) — 부위 + fabric/fill 은
+# 한 이름표로 먼저 잡는다(안 그러면 fabric 이 소재 이름표로 읽혀 줄기가 끊기고, body 가 겉감이 된다).
+_MIX_PART = (r"(?:outer|inner|main|shell|lining|body|sub)[ \t]?fabric|body[ \t]?fill|(?:panel[ \t])?colou?r[ \t]?block(?:ing)?|"
+             r"겉감|안감|배색감|배색|충전재|충전|시보리|본판|몸판|메인|주머니감|포켓감|outer\s?shell|outshell|shell|outer|upper|"
+             r"body|main|lining|linning|liner|inner|trim|contrast|colou?ring|sub|partly|filling|filler|fill|padding|wadding|"
+             r"ribbing|rib|pocketing|pocket|colou?ration|belt|벨트")
+_MIX_PART_RX = re.compile(rf"(?i)(?<![A-Za-z가-힣])({_MIX_PART})(?:[ _]?(\d))?(?![A-Za-z가-힣])")
+_MIX_PART_CANON = {"겉감": "겉감", "본판": "겉감", "몸판": "겉감", "메인": "겉감", "outer shell": "겉감",
+                   "outershell": "겉감", "outshell": "겉감", "shell": "겉감", "outer": "겉감", "body": "겉감",
+                   "main": "겉감", "안감": "안감", "lining": "안감", "inner": "안감", "배색": "배색", "배색감": "배색",
+                   "trim": "배색", "contrast": "배색", "sub": "배색", "충전재": "충전재", "충전": "충전재",
+                   "filling": "충전재", "filler": "충전재", "padding": "충전재", "wadding": "충전재",
+                   "시보리": "시보리", "rib": "시보리", "ribbing": "시보리", "pocketing": "포켓감", "주머니감": "포켓감",
+                   "포켓감": "포켓감", "upper": "겉감", "coloring": "배색", "colouring": "배색", "linning": "안감", "liner": "안감", "coloration": "배색", "colouration": "배색", "belt": "벨트", "벨트": "벨트", "partly": "부분", "pocket": "포켓감",
+                   "fill": "충전재", "body fill": "충전재", "bodyfill": "충전재", "outer fabric": "겉감", "outerfabric": "겉감",
+                   "main fabric": "겉감", "mainfabric": "겉감", "shell fabric": "겉감", "shellfabric": "겉감",
+                   "body fabric": "겉감", "bodyfabric": "겉감", "inner fabric": "안감", "innerfabric": "안감",
+                   "lining fabric": "안감", "liningfabric": "안감", "sub fabric": "배색", "subfabric": "배색",
+                   "panel color blocking": "배색", "panel colour blocking": "배색", "color blocking": "배색",
+                   "colour blocking": "배색", "color block": "배색", "colorblocking": "배색"}
+_MIX_CTX = (r"fabrics?|materials?|composition|소재\s?정보|제품\s?소재|소재|혼용률|혼용|원단|섬유\s?조성|섬유의\s?조성|"
+            r"패브릭\s?정보|패브릭")
+_MIX_CTX_END = re.compile(rf"(?i)(?<![A-Za-z가-힣])(?:{_MIX_CTX})(?:[ _]?\d)?$")
+_MIX_PART_END = re.compile(rf"(?i)(?<![A-Za-z가-힣])({_MIX_PART})(?:[ _]?(\d))?$")
+_MIX_SEP = " \t\n,/+&|;:：-–—()[].·•▪*_"
+_MIX_NUM = re.compile(r"(?<![\d.,])(\d{1,5}(?:\.\d{1,2})?)(?!\d)(?:(\s?[%％])|([XxoO○°])(?![A-Za-z가-힣]))?")
+# 숫자 뒤가 단위면 혼용률이 아니다 — 「면 30수」 「COTTON 20'S」 「나일론 66」 뒤의 숫자, 「12oz」 …
+_MIX_UNIT = re.compile(r"(?i)\s*(?:cm|mm|kg|g\b|수|s\b|['’]s|oz|d\b|gg|게이지|데니어|cc|ml|원|krw|만|ea|개|벌|장|호|년|월|일|"
+                       r"세|도|°c|x\s?\d|\*\s?\d|[.,]\d|/\s?\d|~|-\s?\d)")
+# 섬유 이름 뒤 괄호 속 다른 말 — 「폴리에스터 (Polyester) 100%」(carlyn) · 「Tencel(Lyocell) 33%」(espionage) · 「VISCOSE(RAYON) 29%」(noice)
+_MIX_WORDS_BEFORE = re.compile(r"([A-Za-z가-힣]+(?:[ \t\-(]+[A-Za-z가-힣]+){0,4})\)?[ \t]*[:：\-]?[ \t]*$")
+_MIX_WORDS_AFTER = re.compile(r"[ \t]*([A-Za-z가-힣]+(?:[ \t\-]+[A-Za-z가-힣]+){0,3})")
+
+
+def _mix_fiber(words: list[str], abbr: bool = False, ocr: bool = False) -> str | None:
+    """낱말 묶음(그대로의 차례) 하나가 통째로 아는 섬유 이름인가 → 표준 이름. abbr=True 면 대문자 약자도,
+    ocr=True 면 낱말 하나의 철자 오독도(_MIX_FUZZY)."""
+    if abbr and len(words) == 1 and words[0] in _MIX_ABBR:
+        return _MIX_ABBR[words[0]]
+    s = " ".join(w.lower() for w in words)
+    if _MIX_PART_RX.fullmatch(s):
+        return None                   # 「충전재」는 vocab 에서 다운의 별칭이지만 여기서는 부위 이름이다(「… 100% 충전재: 하스 솜」)
+    if s in _MIX_ALIAS:
+        return _MIX_ALIAS[s]
+    if not _FIBER_CANON:
+        _fiber("")                    # 사전 채우기
+    f = _FIBER_CANON.get(s)
+    if f in _MIX_FIBERS:
+        return f
+    return _mix_fuzzy(s) if ocr and len(words) == 1 else None
+
+
+def _mix_values(num: str, explicit: bool, letter: bool, ocr: bool) -> tuple[list[float], bool]:
+    """숫자 하나의 해석들 → (후보 값들, 오독이 확실한가). 확실 = 그대로는 100 을 넘어 % 오독 말고는 읽을 길이 없다."""
+    v = float(num)
+    if explicit or letter:
+        return ([v] if 0 < v <= 100 else []), letter
+    out = [v] if 0 < v <= 100 else []
+    if ocr and "." not in num:
+        for tail in ("9", "96"):
+            if num.endswith(tail) and len(num) > len(tail):
+                w = float(num[:-len(tail)])
+                if 0 < w <= 100 and w not in out:
+                    out.append(w)
+    return out, bool(out) and v > 100
+
+
+def _mix_atoms(text: str, ocr: bool, num_first: bool) -> list[dict]:
+    """「섬유 숫자」(num_first=False) 또는 「숫자% 섬유」 덩이들.
+    s = 덩이가 시작하는 자리(꾸밈말 포함), e = 끝난 자리, f = 섬유, c = 숫자 해석 후보들,
+    x = % 가 적혔나, sure = % 오독이 확실한가(그대로는 100 을 넘는다 · 글자 꼬리)."""
+    atoms = []
+    for m in _MIX_NUM.finditer(text):
+        num, pct, letter = m.group(1), m.group(2), m.group(3)
+        if num_first:
+            if not pct:
+                continue
+            a = _MIX_WORDS_AFTER.match(text, m.end())
+            if not a:
+                continue
+            toks = list(re.finditer(r"[A-Za-z가-힣]+", a.group(1)))
+            i0 = 0
+            while i0 < len(toks) - 1 and toks[i0].group().lower() in _MIX_MOD:
+                i0 += 1
+            f = None
+            for k in range(min(3, len(toks) - i0), 0, -1):
+                f = _mix_fiber([t.group() for t in toks[i0:i0 + k]], ocr=ocr)
+                if f:
+                    break
+            if not f:
+                continue
+            cands, _ = _mix_values(num, True, False, ocr)
+            if cands:
+                atoms.append({"s": m.start(), "e": a.start(1) + toks[i0 + k - 1].end(), "f": f, "c": cands,
+                              "x": True, "sure": False})
+            continue
+        if letter and not ocr:
+            continue                  # 매장 글의 「100X」는 오독이 아니라 다른 말이다
+        if not pct and not letter and _MIX_UNIT.match(text, m.end()):
+            continue                  # 단위가 붙은 숫자 — 「면 30수」 「20'S」
+        if not pct and not letter and re.match(r"[ \t]+\d{1,3}(?:\.\d+)?[ \t]?%", text[m.end():m.end() + 9]):
+            continue                  # 바로 뒤에 또 숫자 — 「COTTON 2 100%」의 2(깨진 글자) · 「NYLON 66 100%」
+        if not pct and not letter and re.match(r"[A-Za-z]", text[m.end():m.end() + 1]):
+            continue                  # 글자가 바로 붙은 숫자는 낱말의 일부다 — 「COTTON 3E 100%」의 3(깨진 「코튼」) · 「2way」
+        j = m.start() - 1                 # 빠른 거름: 숫자 바로 앞(빈칸 · 쌍점 건너)이 글자가 아니면 덩이가 아니다
+        while j >= 0 and text[j] in " \t:：-)":
+            j -= 1
+        if j < 0 or not (text[j].isalpha() or (ocr and pct and text[j].isdigit())):
+            continue
+        b = _MIX_WORDS_BEFORE.search(text, max(0, m.start() - 80), m.start())
+        toks = list(re.finditer(r"[A-Za-z가-힣]+", b.group(1))) if b else []
+        f, k, ab = None, 0, False
+        for k in range(min(3, len(toks)), 0, -1):
+            f = _mix_fiber([t.group() for t in toks[-k:]], ocr=ocr)
+            if f:
+                break
+        if not f and ocr:
+            # 그림 글 — 영문 섬유 이름과 숫자 사이에 한글 이름이 깨진 토막 하나(「COTTON 3E 100%」 「COTTON SE 94%」 mardi-mercredi).
+            # 토막은 세 글자 이하 · 숫자만은 아님 · 섬유도 부위 이름도 아닐 때만 건너뛴다.
+            jm = re.search(r"([A-Za-z]{4,})[ \t]+([A-Za-z0-9가-힣]{1,3})[ \t]*[:：]?[ \t]*$", text[max(0, m.start() - 40):m.start()])
+            # 숫자만인 토막은 % 가 적힌 숫자 앞의 한 자리일 때만 — 「COTTON 2 100%」(mardi-mercredi, 「코튼」이 「2」로 깨짐)
+            if jm and (not jm.group(2).isdigit() or (len(jm.group(2)) == 1 and pct)) and not _MIX_PART_RX.fullmatch(jm.group(2)) \
+                    and not _mix_fiber([jm.group(2)]) and _mix_fiber([jm.group(1)], ocr=True):
+                f = _mix_fiber([jm.group(1)], ocr=True)
+                cands, sure = _mix_values(num, bool(pct), bool(letter), ocr)
+                if cands:
+                    atoms.append({"s": max(0, m.start() - 40) + jm.start(1), "e": m.end(), "f": f, "c": cands,
+                                  "x": bool(pct), "sure": sure or bool(letter), "ab": False})
+                continue
+        if not f and not toks:
+            continue
+        if not f:
+            # 약자는 이름표 바로 뒤이거나 바로 앞(6자 안)이 약자 덩이일 때만 — 그림 글의 치수표 「L 64 43 37」 「S 48」이
+            # 린넨 · 실크 덩이가 되어, 옆의 진짜 혼용률과 붙은 토막으로 보여 함께 버려졌다.
+            pos = b.start(1) + toks[-1].start()
+            prev = atoms[-1] if atoms else None
+            if _mix_lookback(text, pos)[0] or (prev and prev.get("ab") and pos - prev["e"] <= 6):
+                k, f, ab = 1, _mix_fiber([toks[-1].group()], abbr=True), True
+        if not f:
+            continue
+        j = len(toks) - k
+        # 「Sheepskin Leather 100%」 — 끝 낱말(leather)은 그냥 가죽이고 앞 낱말이 더 자세하다(facade-pattern). 앞이 가죽의 한 갈래면 그걸 쓴다.
+        if f == "가죽" and j > 0 and (_mix_fiber([toks[j - 1].group()]) or "").endswith("가죽"):
+            f = _mix_fiber([toks[j - 1].group()])
+            j -= 1
+        # 꾸밈말과 **같은 섬유의 다른 말**은 이름에 넣는다 — 「POLYESTER 폴리에스터 100%」 「COTTON 면 35%」(mardi-mercredi 그림 글).
+        while j > 0 and (toks[j - 1].group().lower() in _MIX_MOD or _mix_fiber([toks[j - 1].group()], ocr=ocr) == f):
+            j -= 1
+        cands, sure = _mix_values(num, bool(pct), bool(letter), ocr)
+        if not cands:
+            continue
+        atoms.append({"s": b.start(1) + toks[j].start(), "e": m.end(), "f": f, "c": cands, "x": bool(pct),
+                      "sure": (sure or bool(letter)) and not ab, "ab": ab})
+    return atoms
+
+
+# 부위 이름 뒤 괄호 풀이 — 「배색(소매, 밑단 시보리) :」 「겉감(SHELL):」 「겉감2 (립부) :」(satur · kirsh). 숫자 없는 짧은 괄호만.
+_MIX_PAREN_RX = re.compile(r"[(\[（]([^()\[\]（）\d%]{1,24})[)\]）]")
+
+
+class _MixParen:
+    """괄호를 지우되 안이 부위 · 소재 이름표 하나면(「[Main]」 「(SHELL)」 「[Lining]」, ader-error · kirsh) 괄호만 벗긴다."""
+    @staticmethod
+    def sub(repl: str, t: str) -> str:
+        def f(m):
+            inner = m.group(1).strip()
+            if _MIX_PART_RX.fullmatch(inner) or re.fullmatch(rf"(?i)(?:{_MIX_CTX})", inner):
+                return f" {inner} "
+            return repl
+        return _MIX_PAREN_RX.sub(f, t)
+
+
+_MIX_PAREN = _MixParen()
+
+
+def _mix_part_name(m: re.Match) -> str:
+    return _MIX_PART_CANON.get(re.sub(r"\s+", " ", m.group(1).lower()), m.group(1)) + (f" {m.group(2)}" if m.group(2) else "")
+
+
+# 「FABRIC :\nM -COTTON 100%\nC -NYLON 100%」(merely-made — M = main, C = contrast, PR 리뷰 011 표본 14). 한 글자 이름표라
+# 대문자 그대로 · 「글자 -섬유」 꼴로 · 한 글에 M 과 C 가 다 있을 때만 부위로 읽는다(_mix_runs 가 정한다).
+_MIX_MC = re.compile(r"(?<![A-Za-z])([MC])[ \t]?-[ \t]*$")
+_MIX_MC_NAME = {"M": "겉감", "C": "배색"}
+
+
+def _mix_gap(g: str, fiber: str | None = None, mc: bool = False) -> tuple[bool, str | None]:
+    """두 덩이 사이 글이 줄기 안의 것인가 → (괜찮은가, 새 부위 이름).
+
+    부위 이름은 **첫 것**을 쓴다(괄호 풀이 안의 「시보리」가 「배색」을 덮지 않게 괄호부터 지운다).
+    소재 이름표(FABRIC · 소재 …)가 끼면 새 글이다 — thugclub 은 「Fabric: SHELL: COTTON 100% … 소재: SHELL: COTTON 100%」로
+    같은 혼용률을 두 번 적어 한 줄기로 읽으면 겉감이 둘이 됐다."""
+    if len(g) > 50 or g.count("\n") > 2:
+        return False, None
+    if mc:
+        m = re.fullmatch(r"[\s,/]*(?<![A-Za-z])([MC])[ \t]?-[ \t]*", g)
+        if m:
+            return True, _MIX_MC_NAME[m.group(1)]
+    g = _MIX_PAREN.sub(" ", g)
+    m = _MIX_PART_RX.search(g)
+    part = _mix_part_name(m) if m else None
+    rest = _MIX_PART_RX.sub(" ", g)
+    if re.search(rf"(?i)(?<![A-Za-z가-힣])(?:{_MIX_CTX})(?![A-Za-z가-힣])", rest):
+        return False, None
+    rest = re.sub(r"(?i)(?<![A-Za-z가-힣])(?:and|및|외)(?![A-Za-z가-힣])", " ", rest)
+    for w in re.findall(r"[A-Za-z가-힣]+", rest):
+        # 꾸밈말, 그리고 바로 뒤 덩이와 같은 섬유를 미리 적은 말(「Filling - Duck down (Down 80% Feather 20%)」 uniform-bridge)
+        if w.lower() not in _MIX_MOD and not (fiber and _mix_fiber([w]) == fiber):
+            return False, None
+    if re.search(r"\d", rest):
+        return False, None
+    return True, part
+
+
+def _mix_lookback(text: str, s: int, mc: bool = False) -> tuple[bool, str | None]:
+    """줄기 첫 덩이 바로 앞의 이름표 → (이름표가 있나, 부위 이름)."""
+    if mc:
+        m = _MIX_MC.search(text[max(0, s - 6):s])
+        if m:
+            return True, _MIX_MC_NAME[m.group(1)]
+    t = text[max(0, s - 50):s].rstrip(_MIX_SEP)
+    t = _MIX_PAREN.sub(" ", t).rstrip(_MIX_SEP)
+    part, ctx = None, False
+    m = _MIX_PART_END.search(t)
+    if m:
+        part = _mix_part_name(m)
+        t = _MIX_PAREN.sub(" ", t[:m.start()]).rstrip(_MIX_SEP)
+    if _MIX_CTX_END.search(t):
+        ctx = True
+    return ctx or part is not None, part
+
+
+def _mix_residue(text: str, s: int, e: int, used: list[tuple[int, int]], ocr: bool = False) -> bool:
+    """줄기 바로 앞뒤에 덜 읽은 혼용률이 남았나 — 부위 이름 뒤 숫자, 아무 덩이에도 안 든 「NN%」.
+
+    「Fabric. 아크릴 28% 폴리에스터 28% 스판 21% 모달 18% S5%」(generalidea) — 판독기가 「PU 5%」를 「S5%」로 깨뜨리면
+    나머지 넷의 합 95 가 blend 의 90~110 에 들었다. 깨진 덩이가 바로 옆에 있으면 덜 읽은 것이다."""
+    def free(a: int, b: int) -> bool:
+        for m in re.finditer(r"\d\s?%", text[a:b]):
+            p = a + m.start()
+            if not any(x <= p < y for x, y in used):
+                return True
+        if ocr:
+            # 그림 글에서는 % 가 9 · 96 으로 깨진 숫자도 덜 읽은 덩이다 — 「제품 소재 겉나일론10096 안:폴리에스터1009」(concepts1one)에서
+            # 「겉나일론」을 못 읽고 뒤의 「폴리에스터 100」만 옷 전체의 혼용률로 낼 뻔했다.
+            for m in re.finditer(r"(?<=[가-힣A-Za-z])[ :：]?(\d{3,5})(?!\d)", text[a:b]):
+                n, p = m.group(1), a + m.start(1)
+                if any(x <= p < y for x, y in used) or int(n) <= 100:
+                    continue
+                if (n.endswith("9") and 0 < int(n[:-1]) <= 100) or (n.endswith("96") and 0 < int(n[:-2]) <= 100):
+                    return True
+        return False
+    if free(e, e + 25) or free(max(0, s - 25), s):
+        return True
+    after = text[e:e + 30]
+    m = re.match(rf"(?i)^[{re.escape(_MIX_SEP)}]*(?:{_MIX_PART})(?:[ _]?\d)?(?![A-Za-z가-힣])", _MIX_PAREN.sub(" ", after))
+    if m:
+        # 부위 이름 뒤에 단위 없는 숫자가 오면 그 부위의 혼용률을 못 읽은 것이다. 「충전재: 하스 솜 2oz」는 무게라 괜찮다
+        # (afterprayshop 1331).
+        for n in re.finditer(r"(?<![\d.])\d{1,5}(?:\.\d+)?(?![\d])", text[e + m.end():e + m.end() + 25]):
+            if not _MIX_UNIT.match(text, e + m.end() + n.end()):
+                return True
+    return False
+
+
+def _mix_runs(text: str, ocr: bool, num_first: bool) -> tuple[list, int]:
+    """줄기들을 검산해 → ([(결과, 이름표가 있었나, (시작, 끝))], 걸렸지만 버린 줄기 수)."""
+    atoms = _mix_atoms(text, ocr, num_first)
+    mc = bool(re.search(r"(?<![A-Za-z])M[ \t]?-[ \t]*[A-Z]", text) and re.search(r"(?<![A-Za-z])C[ \t]?-[ \t]*[A-Z]", text))
+    runs, cur = [], []
+    for a in atoms:
+        if cur and a["s"] >= cur[-1]["e"]:
+            ok, part = _mix_gap(text[cur[-1]["e"]:a["s"]], a["f"], mc)
+            if ok:
+                a["part"] = part
+                cur.append(a)
+                continue
+        if cur:
+            runs.append(cur)
+        a["part"] = None
+        cur = [a]
+    if cur:
+        runs.append(cur)
+    used = [(a["s"], a["e"]) for a in atoms]
+    res = []
+    for run in runs:
+        res.append(_mix_check(text, run, used, ocr, mc))
+    if ocr:
+        _mix_columns(text, runs, res, used)
+    # 25자 안에 붙은 두 줄기는 한 혼용률의 토막이다 — 같은 것을 되풀이한 것(「Fabric: … 소재: …」 thugclub)만 둔다.
+    # satur 「겉감 : 면 100% / 배색(소매, 밑단 시보리) : 면 95% …」를 괄호를 몰랐을 때 뒤 토막만 읽은 것이 이 꼴이었다.
+    cond = [r == "IF" for r in res]
+    res = [None if r == "IF" else r for r in res]
+    # 줄기 바로 앞이 모르는 이름표(「webbing :」 「Insole :」)면 그 부위를 못 읽은 것이다 — 이웃 줄기와 「같은 말」로 봐 주지 않는다
+    # (horlisun 「outshell : nylon100% lining : nylon100% webbing : nylon100%」).
+    unk = [bool(re.search(r"([A-Za-z가-힣]{2,})[ \t]*[:：][ \t]*$", text[max(0, r[0]["s"] - 20):r[0]["s"]]))
+           and not _mix_lookback(text, r[0]["s"], mc)[0] for r in runs]
+
+    def agree(x, y) -> bool:
+        # 부위 이름을 뺀 값이 한쪽에 다 들어가면 같은 혼용률을 두 말로 적은 것이다 — generalidea 「겉감 : 폴리에스터 100%
+        # 안감 : 폴리에스터 100% fabric : polyester 100% lining : polyester 100%」(영문 쪽은 겉감 이름이 「fabric」뿐이다).
+        return _mix_sub(x[0], y[0]) or _mix_sub(y[0], x[0])
+    for i in range(len(runs) - 1):
+        if runs[i + 1][0]["s"] - runs[i][-1]["e"] < 25 and (res[i] is None or res[i + 1] is None or unk[i] or unk[i + 1]
+                                                           or not agree(res[i], res[i + 1])):
+            for j in (i, i + 1):
+                if res[j] is not None:
+                    _mix_why("붙은 토막", runs[j])
+            res[i] = res[i + 1] = None
+    good = [r for r in res if r]
+    # 버린 줄기에 적힌 부위 이름 — 고른 혼용률에 없는 부위가 여기 있으면 그 옷의 부위 하나를 못 읽은 것이다(blend_of_brand).
+    # tillidie 2645 는 그림 글에 「코튼 1009 소재를 이용한 오버롤」(문장)과 「소재 #2 COTTON 100 / 배색 POLYESTER 80 COTTON 20」
+    # (표 — 이름표가 판독 찌꺼기 「#2」에 가려 못 읽음)이 같이 있다. 문장만 받으면 배색이 없는 옷이 된다.
+    #
+    # 섬유도 남긴다(% 가 적힌 덩이만) — 다른 출처의 결과가 이 섬유를 하나도 안 담으면 어긋나는 것이다(blend_of_brand ⑤).
+    # atlm 1608 은 설명이 「Nylon 100% / Cow leather / Twill Cotton 100%」(가죽에 % 가 없어 떨어짐), 그림 글은 안감 줄
+    # 「Twill cotton 100%」뿐이라 가방 전체가 「코튼 100%」가 될 뻔했다. 숫자를 뺀 글을 열쇠로 남겨 매장 견본을 가린다.
+    lost = {"parts": set(), "ev": []}
+    for run, r, c in zip(runs, res, cond):
+        if r is None and not c:
+            part0 = _mix_lookback(text, run[0]["s"])[1]
+            lost["parts"] |= {x for x in [part0] + [a.get("part") for a in run] if x}
+            fib = frozenset(a["f"] for a in run if a["x"] and not a.get("ab"))
+            if fib:
+                key = re.sub(r"\d+", "#", re.sub(r"\s+", " ", text[run[0]["s"]:run[-1]["e"]])).lower()
+                lost["ev"].append((fib, key))
+    return good, len(res) - len(good), lost
+
+
+# 「※ COTTON 100% 소재의 경우 수축 · 변형 …」(nothing-written 세탁 안내) — 그 상품의 혼용률이 아니라 조건 문장이다.
+# 「- 앙고라 100% 원단보다 다른 섬유와 혼방하여 …」(ronron 소재 안내 그림) — 견주는 문장도 그 옷의 혼용률이 아니다.
+_MIX_IF = re.compile(r"\s*(?:소재|제품|원단|의류|섬유)?\s*(?:의|인|일|이)?\s*(?:경우|제품은|이상|미만|이하|초과|보다|대비|처럼|과\s?같은|와\s?같은)")
+
+
+# 전후 대조 · 실패 까닭 세기용 — 리스트를 넣어 두면 버린 줄기마다 (까닭, 시작, 끝)을 적는다. 평소에는 None.
+_MIX_TRACE: list | None = None
+
+
+def _mix_why(why: str, run: list[dict]) -> None:
+    if _MIX_TRACE is not None:
+        _MIX_TRACE.append((why, run[0]["s"], run[-1]["e"]))
+
+
+def _mix_unrepeat(run: list[dict], ocr: bool) -> list[dict]:
+    """같은 혼용률을 한 줄기 안에서 되풀이한 것을 하나로.
+
+    · 한글 · 영문을 붙여 적은 것 — generalidea 설명 「[FABRIC] 면 60% + 폴리에스터 40% cotton 60% + polyester 40% 새벽배송 …」
+      (그 매장 mat 없는 판매중 의류 2,154벌 중 대부분). 덩이 차례가 앞 절반 = 뒤 절반이면 앞 절반만 쓴다. 부위 이름도 같아야 한다.
+    · 그림 글이 같은 줄을 두 번 읽은 것 — 「POLYESTER 63%\nPOLYESTER 63%\nRAYON 31%」(siyazu). 섬유 · 숫자가 같은 덩이가
+      **잇달아** 서면(그림 글만) 뒤엣것을 뺀다. 합 100 검산은 그대로라 정말로 두 번 적힌 혼용률이면 떨어진다."""
+    sig = [(a["f"], tuple(a["c"])) for a in run]
+    n = len(run)
+    if n >= 2 and n % 2 == 0 and sig[:n // 2] == sig[n // 2:] and run[n // 2].get("part") is None \
+            and [a.get("part") for a in run[1:n // 2]] == [a.get("part") for a in run[n // 2 + 1:]]:
+        return run[:n // 2]
+    if ocr:
+        out = [run[0]]
+        for a in run[1:]:
+            if (a["f"], a["c"]) == (out[-1]["f"], out[-1]["c"]) and a.get("part") is None:
+                continue
+            out.append(a)
+        return out
+    return run
+
+
+# 그림 글의 두 단 — 왼쪽 단의 혼용률 줄 끝에 오른쪽 단 글이 붙는다: 「COTTON 65%, 드라이크리닝 대한민국\nPOLYESTER 35%」(ronron
+# FabRic | WasH | MadE in 표) · 「Cotton 64% + 편안한 스트래치\nPolyester 36%」(roem Fabric Point). 줄 끝 찌꺼기 때문에 줄기가
+# 갈려 둘 다 합이 안 맞는다. **둘 다 떨어진** 이웃 줄기이고, 사이가 「숫자 없는 줄 꼬리 + 줄바꿈 (+ 부위 이름)」뿐이면 이어 보고,
+# 이은 것이 검산을 다 통과할 때만 받는다(그림 글만).
+_MIX_COL_GAP = re.compile(rf"(?i)[^\n\d%]{{0,30}}\n[ \t]*(?:({_MIX_PART})(?:[ _]?(\d))?[ \t]*[:：\-]?[ \t]*)?")
+
+
+def _mix_columns(text: str, runs: list, res: list, used: list) -> None:
+    def fits(x, y) -> bool:
+        return isinstance(x, tuple) and isinstance(y, tuple) and (_mix_sub(x[0], y[0]) or _mix_sub(y[0], x[0]))
+    i = 0
+    while i < len(runs) - 1:
+        if fits(res[i], res[i + 1]) or "IF" in (res[i], res[i + 1]):
+            i += 1
+            continue
+        merged, j = list(runs[i]), i + 1
+        while j < len(runs):
+            m = _MIX_COL_GAP.fullmatch(text, merged[-1]["e"], runs[j][0]["s"])
+            if not m:
+                break
+            part = _mix_part_name(m) if m.group(1) else None
+            merged = merged + [dict(runs[j][0], part=part)] + runs[j][1:]
+            r = _mix_check(text, merged, used, True)
+            if r not in (None, "IF"):
+                runs[i:j + 1] = [merged]
+                res[i:j + 1] = [r]
+                break
+            j += 1
+        i += 1
+
+
+def _mix_check(text: str, run: list[dict], used: list, ocr: bool = False, mc: bool = False) -> tuple | None:
+    """줄기 하나 검산 → (결과, 이름표가 있었나, (시작, 끝)) 또는 None."""
+    if _MIX_IF.match(text, run[-1]["e"]):
+        _mix_why("조건 문장", run)
+        return "IF"                     # 조건 문장 — 받지도 않고, 덜 읽은 증거로도 안 센다
+    labeled, part0 = _mix_lookback(text, run[0]["s"], mc)
+    if _mix_residue(text, run[0]["s"], run[-1]["e"], used, ocr):
+        _mix_why("옆 토막", run)
+        return None
+    run = _mix_unrepeat(run, ocr)
+    parts, name = [], part0 or ""
+    for a in run:
+        if a["part"] is not None or not parts:
+            if a["part"] is not None:
+                name = a["part"]
+            parts.append((name, []))
+        parts[-1][1].append(a)
+    out, ok = [], True
+    for name, aa in parts:
+        if len(aa) > 8:
+            ok = False; _mix_why("덩이 너무 많음", run); break
+        explicit = all(a["x"] for a in aa)
+        if not labeled and (any(a.get("ab") for a in aa) or not all(a["x"] or a["sure"] for a in aa)):
+            ok = False; _mix_why("이름표 없이 % 없음 · 약자", run); break       # % 없는 숫자 · 약자는 이름표 뒤에서만
+        combos = [[]]
+        for a in aa:
+            combos = [c + [v] for c in combos for v in a["c"]]
+        if explicit:
+            hit = [c for c in combos if 99 <= sum(c) <= 101]
+        else:
+            hit = [c for c in combos if abs(sum(c) - 100) < 1e-6]
+        if len(hit) != 1:
+            ok = False; _mix_why("합 어긋남" if not hit else "해석 여럿", run); break
+        # 한 부위에 같은 섬유가 두 번 — 「Recycle Cotton 60% Cotton 40%」(youth) · 「RAYON13% RAYON7%」(noice)는 합이 맞으니 더한다.
+        # 두 부위를 붙여 읽은 것(「COTTON 100% - COTTON 70% LINEN 30%」 xlim)은 위 검산(합 100)에서 이미 떨어진다.
+        vals: dict[str, float] = {}
+        for a, v in zip(aa, hit[0]):
+            vals[a["f"]] = vals.get(a["f"], 0) + v
+        # 폴리우레탄이 반을 넘으면 늘어나는 실(스판덱스)이 아니라 코팅 · 인조가죽이다(tag_items.blend_fibers 와 같은 잣대).
+        # vocab 은 폴리우레탄을 스판덱스로 묶지만 「스판덱스 100%」 레깅스 같은 말을 앱에 띄우지 않게 적힌 이름으로 둔다.
+        part = {"p": name, "v": [["폴리우레탄" if f == "스판덱스" and v >= 50 else f,
+                                  int(v) if float(v).is_integer() else round(v, 2)] for f, v in vals.items()]}
+        same = [q for q in out if q["p"] == name and name]
+        if same:
+            if same[0]["v"] != part["v"]:
+                ok = False; _mix_why("같은 부위 다른 값", run); break   # 같은 부위가 다른 값으로 두 번 — 색마다 다른 혼용률(kirsh 9071 「WHA- 몸판 … NAD - 몸판 …」)
+            continue                # 같은 부위를 되풀이해 적은 것(OCR 「*Shell : … *Shell : …」)
+        out.append(part)
+    if not ok:
+        return None
+    return out, labeled, (run[0]["s"], run[-1]["e"])
+
+
+def mix_cands(text: str, ocr: bool = False) -> tuple[list[dict], int, dict]:
+    """한 글에서 검산을 통과한 혼용률 후보들 → ([{"m": 결과, "lab": 이름표, "span": (시작, 끝)}], 버린 줄기 수,
+    버린 줄기의 흔적 {"parts": 부위 이름들, "ev": [(섬유들, 숫자 뺀 글)]}).
+
+    「섬유 숫자」와 「숫자% 섬유」 두 차례로 다 읽는다. 같은 자리를 두 차례가 다 읽으면 **먼저 시작하는 쪽**이 그 글의
+    차례다 — 「Alpaca 59% Acrylic 25% Nylon 15% Spandex 1%」를 숫자 앞 차례로 읽으면 「59% Acrylic …」이 되어 섬유가 한 칸씩
+    밀린다(facade-pattern 4038). 고르는 것은 mix_pick 이 한다 — 매장 공용 줄을 먼저 걸러야 해서(tag_items.blend_of_brand)
+    둘을 갈랐다."""
+    t = re.sub(r"[\u00a0\u200b\ufeff]", " ", text or "").replace("％", "%")
+    if not re.search(r"\d", t):
+        return [], 0, {"parts": set(), "ev": []}
+    got, bad, lost = [], 0, {"parts": set(), "ev": []}
+    for nf in (False, True):
+        g, b, lp = _mix_runs(t, ocr, nf)
+        bad += b
+        lost["parts"] |= lp["parts"]
+        lost["ev"] += lp["ev"]
+        got += [{"m": m, "lab": lab, "span": sp, "nf": nf} for m, lab, sp in g]
+    out = []
+    for c in got:
+        a, b = c["span"]
+        if any(d["nf"] != c["nf"] and d["span"][0] < b and a < d["span"][1] and d["span"][0] < a for d in got):
+            continue
+        out.append({k: v for k, v in c.items() if k != "nf"})
+    return out, bad, lost
+
+
+def _mix_sub(a: list[dict], b: list[dict]) -> bool:
+    """a 의 부위가 다 b 에 들어가나 — 값이 같고 부위 이름이 같거나 한쪽이 비었을 때 같은 부위로 본다.
+    이름을 아예 안 보면 색마다 다른 혼용률 「WHA- 몸판 폴리 100% 배색1 나일론 100% NAD - 몸판 나일론 100% 배색1 폴리 100%」(kirsh
+    9071)의 두 줄기가 같은 것이 된다(값 묶음만 보면 {폴리 100, 나일론 100} 으로 같다)."""
+    # 같은 이름의 부위가 b 에 있으면 그것과 값이 같아야 한다. 그런 이름이 b 에 없으면(「배색」 대 「시보리」 — satur 3188 은
+    # 설명이 「배색(소매, 밑단 시보리)」, 그림이 「시보리」라 적었다) a 에 없는 이름의 부위와 값으로 맞춘다.
+    names_a = {p["p"] for p in a if p["p"]}
+    names_b = {q["p"] for q in b if q["p"]}
+    left = list(b)
+    for p in sorted(a, key=lambda x: x["p"] not in names_b):
+        k = _mix_key([p])
+        if p["p"] and p["p"] in names_b:
+            hit = next((q for q in left if q["p"] == p["p"] and _mix_key([q]) == k), None)
+        else:
+            hit = next((q for q in left if _mix_key([q]) == k and (not q["p"] or not p["p"] or q["p"] not in names_a)), None)
+        if hit is None:
+            return False
+        left.remove(hit)
+    return True
+
+
+def _mix_key(m: list[dict]) -> frozenset:
+    """부위 이름을 뺀 부위들의 값 — 「겉감 코튼 100」과 이름 없는 「코튼 100」은 같은 부위다."""
+    return frozenset(json.dumps(sorted([f, float(v)] for f, v in p["v"]), ensure_ascii=False) for p in m)
+
+
+def mix_pick(cands: list[dict]) -> tuple[list[dict], str]:
+    """후보들 → (혼용률, 까닭). 부위가 가장 많은 것을 고르되, 나머지가 **모두 그 부분집합**일 때만 받는다.
+
+    eenk 는 「- 양가죽 100% 소재의 레더 팬츠」(설명 문장)와 「MATERIAL : Shell : Sheep Leather 100% Lining : Polyester 100%」
+    (표)를 같이 적는다. 문장 쪽은 겉감만 말한 것이지 틀린 것이 아니다 — 표를 쓴다. 둘이 어긋나면(「BODY - COTTON 100%」 대
+    그림의 「BODY COTTON 97% SPAN 3%」, noirer 1709 · 「MATERIAL : Polyester 61% …」 대 고시 「Rayon 50%, Polyester 50%」,
+    eenk 6750) 어느 쪽이 맞는지 모르므로 버린다. 같은 부위 수면 이름표가 붙은 쪽, 그다음 먼저 온 쪽(부르는 쪽이 출처 차례로 넣는다).
+
+    한 출처 안에서 부위 이름이 붙은 후보들이 **서로 다른 부위**만 말하면 합친다 — 「*겉감 : Cotton 100% - KUROKI社 from japan
+    안감 : Polyester 65% , Cotton 35%」(anotheroffice) · 「Outshell - linen 35% …」 줄과 몇 줄 뒤 「Lining - polyester 100%」
+    (label-archive)는 사이 글 때문에 줄기가 갈렸을 뿐 한 혼용률이다. 같은 이름이 둘이면(색마다 · 세트 벌마다) 안 합친다."""
+    m, st = _mix_pick(cands)
+    # 겉감(또는 이름 없는 부위)이 없으면 그 옷의 혼용률이 아니다 — 「Lining: 56% Cotton, 44% Rayon」만 읽힌 것(khakis)을 앱은
+    # 부위가 하나라 이름을 떼고 「코튼 56% · 레이온 44%」로 적는다(layer-web materialMixAxes). 옛 blend 도 이런 것을 684벌 냈다.
+    if m and not any(p["p"] == "" or p["p"].startswith("겉감") for p in m):
+        return [], "partial"
+    return m, st
+
+
+def _mix_pick(cands: list[dict]) -> tuple[list[dict], str]:
+    if not cands:
+        return [], "none"
+    best = max(range(len(cands)), key=lambda i: (len(cands[i]["m"]), bool(cands[i].get("lab")), -i))
+    if all(_mix_sub(c["m"], cands[best]["m"]) for c in cands):
+        return cands[best]["m"], "ok"
+    srcs = {c.get("src") for c in cands}
+    if len(srcs) == 1:
+        parts: dict[str, dict] = {}
+        for c in cands:
+            for p in c["m"]:
+                if not p["p"]:
+                    return [], "conflict"
+                q = parts.get(p["p"])
+                if q is not None and q["v"] != p["v"]:
+                    return [], "conflict"
+                parts[p["p"]] = p
+        return list(parts.values()), "ok"
+    return [], "conflict"
+
+
+def mix(text: str, ocr: bool = False) -> tuple[list[dict], str, tuple[int, int] | None]:
+    """한 글만 볼 때 — 혼용률(blend 와 같은 모양) · 까닭("ok" · "none" · "conflict" · "bad") · 읽은 자리."""
+    cands, bad, lost = mix_cands(text, ocr)
+    if not cands:
+        return [], ("bad" if bad else "none"), None
+    m, st = mix_pick(cands)
+    if m and lost["parts"] - {p["p"] for p in m}:
+        return [], "partial", None
+    if not m:
+        return [], st, None
+    sp = [c["span"] for c in cands if c["m"] == m] or [(min(c["span"][0] for c in cands), max(c["span"][1] for c in cands))]
+    return m, st, sp[0]
+
+
 def material_of(text: str) -> str:
     """혼용률만 따로 건진다 — 치수표 한가운데 끼어 있어도 살린다.
 

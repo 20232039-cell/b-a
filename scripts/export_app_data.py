@@ -269,7 +269,15 @@ def full(r: dict, tags: dict, sizes: dict, crawl: dict,
     # 혼용률. 소재 칸(`tags.material`)은 표준화된 이름(「코튼」)뿐이라 70/30 이 없다.
     # 설명글이 유일한 자리였다 — 칸으로 옮긴다(앱 쪽 지적 2026-09-20). 전수 9.7% · 12,327벌.
     # **부위 구조를 뭉개지 않는다.** 스펙표에 어떻게 세울지는 앱이 정한다.
-    mat = product_desc.blend(d.get("description") or "")
+    # 2026-10-02 부터는 tag_items 가 설명 · 스펙 · 사이즈가이드 창 · 브라우저 글 · 그림 글을 다 보고 만든 것을 옮긴다
+    # (tag_items.blend_of_brand 주석 — 판매중 의류 13.6% → 72.2%). 새 판 태거를 거친 상품은 못 읽었어도 "mat": [] 가 실려 있다 —
+    # 그것을 설명글 해석으로 되살리면 안 된다(새 판이 **버린** 것: 어긋나는 출처 · 베껴 붙인 매장 글 · 겉감 없는 안감만).
+    # 열쇠가 아예 없는 상품(옛 판 태그 파일)만 예전처럼 설명글에서 읽는다.
+    te = tags.get(r["source_url"]) or {}
+    if "mat" in te:
+        mat = te["mat"] or []
+    else:
+        mat = product_desc.blend(d.get("description") or "")
     if mat:
         out["mat"] = mat
     out.update({
@@ -351,6 +359,8 @@ def main() -> int:
     if held:
         print(f"아직 안 내보내는 매장 {sorted(platforms.APP_HOLD)} — {held}벌 뺌")
     tags = json.loads((DATA / "product_tags_full.json").read_text(encoding="utf-8"))
+    n_mat = sum(1 for e in tags.values() if "mat" in (e or {}))
+    print(f"혼용률(mat): 태그 파일이 정한 상품 {n_mat:,} / {len(tags):,} (나머지는 설명글에서)")
     sizes = json.loads((DATA / "product_sizes.json").read_text(encoding="utf-8"))
     for r in rows:
         TAG_DF.update(style_tags((tags.get(r["source_url"]) or {}).get("tags") or {}))
