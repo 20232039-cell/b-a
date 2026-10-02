@@ -201,7 +201,7 @@ def refetch(http: cc.PoliteSession, shop: cc.Shop, only_missing: bool, log, fiel
                 # 빈 값은 안 받으므로(아래 조건) 새로 읽어 한 장도 못 얻으면 옛것이 남는다 —
                 # 줄어드는 쪽으로만 바뀌니 안전하다(2026-09-21 사람 제보로 고침).
                 for key in ("description", "description_source", "detail_text", "spec", "detail_images",
-                            "gallery", "size_table", "soldout", "price", "options", "soldout_options"):
+                            "gallery", "size_table", "soldout", "price", "options", "soldout_options", "options_all"):
                     if nd.get(key) not in (None, "", [], {}):
                         d[key] = nd[key]
                 if not nd.get("price"):

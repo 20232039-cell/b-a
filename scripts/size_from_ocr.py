@@ -4878,42 +4878,48 @@ _COLOR_NAME = re.compile(
 # 그대로 냈다. we11done 1000002079 「빈티지 코듀로이 집업 후디」: 옵션 S | M | L, 사이즈가이드 표 XS/S/M/L/XL(코덱스 019 15번,
 # 2026-10-02 — 살아 있는 페이지에서 칩 세 개 · 표 다섯 칸을 확인). names_from_options 는 「옵션 수 = 칸 수」일 때만 이름을
 # 붙이니 여기는 건드리지 않는다.
-# 자르는 것은 이름이 **글자 그대로** 맞을 때만이다:
-#   · 옵션이 전부 사이즈 이름이다(색 · 동의 칸은 상품표에서 이미 빠졌다 — crawl_cafe24.app_options). 옵션이 30개(수집 상한)면
-#     뒤가 잘렸을 수 있어 안 본다.
-#   · 표의 이름이 모두 사이즈로 읽히고 겹치지 않으며, 옵션 이름이 표 이름에 **모두** 있고, 표 안에서 **이어진 토막**이다.
-#     가운데가 빠진 옵션(foeto 「S | L」 · 표 S/M/L)은 매장이 품절 옵션을 목록에서 내린 것일 수 있어 자르지 않는다.
-#   · 사람이 옮겨 적은 표(manual)와 세트 표(size_parts)는 손대지 않는다.
-def trim_unsold_sizes(out: dict, rows_by_url: dict) -> Counter:
+# **품절은 판매하지 않는 것이 아니다.** 카페24 매장 다수가 품절 옵션을 선택창에서 숨긴다 — frizmworks 2144 는 선택창이 「L」
+# 하나인데 M · XL 은 숨긴 품절이었다(option_stock_data 의 is_display F). 재입고되면 다시 파는 칸이라 실측을 잃으면 안 되고, 품절 ·
+# 재입고 기록과도 어긋난다(조정 지시 2026-10-02). 그래서 견주는 목록은 그 상품의 옵션 **전부**다:
+#   · 수집기가 option_stock_data 에서 숨긴 것까지 담은 options_all(crawl_cafe24.option_values_all).
+#   · 없으면 옵션 목록이 곧 그 상품의 사이즈 전부인 틀(FULL_OPTION_PLATFORMS)의 options.
+#   · 둘 다 없으면(options_all 이 생기기 전에 받은 카페24 줄) **자르지 않는다** — 주간 갱신이 판매중 상품 상세를 7일마다 다시
+#     읽으니(weekly_update STALE_PRICE_DAYS) 차례로 찬다.
+# 자르는 것은 표의 사이즈 이름이 그 목록 **어디에도 글자 그대로 없을 때만**이다. 표 이름이 모두 사이즈로 읽히고 겹치지 않으며,
+# 남는 칸이 표 안에서 이어진 토막일 때만(가운데가 빠지면 이름을 잘못 읽었을 수 있다). 사람이 옮겨 적은 표(manual)와 세트 표
+# (size_parts)는 손대지 않는다.
+# 고도몰(we11done 해석기)은 품절 칩도 class soldout 으로 그대로 그려 그 상품의 사이즈 칩이 전부 나온다(stores/we11done.py 머리말 ·
+# 1000002398 「XS · XL 품절」). Shopify 는 products.json 의 variants 가 품절(available false)까지 전부다(crawl_shopify).
+FULL_OPTION_PLATFORMS = {"godomall", "shopify"}
+
+
+def _opt_keys(o: str) -> set[str]:
+    """옵션 값 하나가 가리키는 이름 — 그대로, 그리고 「S (26-마른27)」·「M 실버지퍼」의 앞 사이즈 토막."""
+    o = _OPT_STOCK.sub("", _OPT_SOLDOUT.sub("", str(o))).strip()
+    keys = {o.upper().replace(" ", "")}
+    m = _SIZE_HEAD.match(o)
+    if m:
+        keys.add(m.group(1).upper())
+    return keys
+
+
+def trim_unsold_sizes(out: dict, rows_by_url: dict, full_opts: dict) -> Counter:
     n: Counter = Counter()
     for u, e in out.items():
         r = rows_by_url.get(u)
-        # 품절 상품은 안 자른다 — 카페24 매장 다수가 품절된 옵션을 목록에서 **숨긴다**(option_stock_data 의 is_display F).
-        # frizmworks 2144 는 옵션이 「L」 하나인데 M · XL 은 숨긴 품절 옵션이었다(살아 있는 페이지 2026-10-02). 판매중 상품에서
-        # 숨긴 품절 칸이 빠지는 것은 「지금 살 수 있는 칸」만 남기는 것이라 받지만, 다 팔린 상품은 남은 칸이 우연이다.
-        if not r or r.get("status") != "ON_SALE" or e.get("source") == "manual" or e.get("size_parts") or e.get("axis") == "head":
+        allo = full_opts.get(u)
+        if not r or not allo or e.get("source") == "manual" or e.get("size_parts") or e.get("axis") == "head":
             continue
         names = [str(x).strip() for x in (e.get("size_names") or [])]
         sizes = e.get("sizes") or {}
         if len(names) < 2 or not sizes or any(len(v) != len(names) for v in sizes.values()):
             continue
-        opts = [o.strip() for o in (r.get("options") or "").split("|") if o.strip()]
-        if not opts or len(opts) >= 30:
-            continue
-        sold = []
-        for o in opts:
-            o = _OPT_STOCK.sub("", _OPT_SOLDOUT.sub("", o)).strip()
-            if not _SIZE_OPT.match(o):
-                sold = []
-                break
-            sold.append(o.upper().replace(" ", ""))
         up = [x.upper().replace(" ", "") for x in names]
-        if not sold or len(set(up)) != len(up) or any(_opt_rank(x) is None for x in up):
+        if len(set(up)) != len(up) or any(_opt_rank(x) is None for x in up):
             continue
-        if not set(sold) <= set(up) or len(set(sold)) >= len(up):
-            continue
-        keep = sorted(up.index(x) for x in set(sold))
-        if keep != list(range(keep[0], keep[-1] + 1)):
+        have = set().union(*(_opt_keys(o) for o in allo))
+        keep = [i for i, x in enumerate(up) if x in have]
+        if not keep or len(keep) == len(up) or keep != list(range(keep[0], keep[-1] + 1)):
             continue
         # 형제에게 물려준 표는 사전을 함께 쓴다 — 새 사전으로 바꿔 끼운다(제자리에서 고치면 형제 표까지 잘린다)
         e["sizes"] = {k: [v[i] for i in keep] for k, v in sizes.items()}
@@ -5684,6 +5690,7 @@ def main():
     src = Counter()
     per_brand_html, per_brand_ocr, per_brand_tot = Counter(), Counter(), Counter()
     head_todo: dict[str, tuple[str, str, str]] = {}
+    full_opts: dict[str, list[str]] = {}       # 그 상품이 가진 옵션 값 전부(trim_unsold_sizes 주석)
     for p in sorted(CRAWL.glob("*.jsonl")):
         if p.name.startswith("_"):
             continue
@@ -5693,6 +5700,10 @@ def main():
             if not r:
                 continue
             per_brand_tot[k[0]] += 1
+            if d.get("options_all"):
+                full_opts[r["source_url"]] = [str(x) for x in d["options_all"]]
+            elif d.get("platform") in FULL_OPTION_PLATFORMS:
+                full_opts[r["source_url"]] = [o.strip() for o in (r.get("options") or "").split("|") if o.strip()]
             if r.get("category_code") == "headwear":
                 head_todo[r["source_url"]] = (k[0], "\n".join(t for t in (d.get("description") or "", d.get("detail_text") or "") if t), r.get("options") or "")
             st = d.get("size_table")
@@ -6046,7 +6057,7 @@ def main():
     rep = repair_names(out, {r["source_url"]: r for r in rows.values()})
     if rep:
         print("읽다 만 사이즈 이름: " + " · ".join(f"{k} {v}" for k, v in sorted(rep.items())))
-    trimmed = trim_unsold_sizes(out, {r["source_url"]: r for r in rows.values()})
+    trimmed = trim_unsold_sizes(out, {r["source_url"]: r for r in rows.values()}, full_opts)
     if trimmed:
         print(f"매장이 팔지 않는 사이즈 칸을 뺀 표 {sum(trimmed.values())}벌: {dict(trimmed.most_common(15))}")
     model_b = blank_bottom_model(out, {r["source_url"]: r for r in rows.values()})

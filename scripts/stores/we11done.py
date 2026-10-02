@@ -188,6 +188,8 @@ def parse_page(html_text: str, url: str, slug: str, now: str, http=None) -> dict
         "detail_images": detail_imgs,
         "options": opts,
         "soldout_options": sold,
+        # 품절 칩도 class soldout 으로 그대로 그려지므로 칩 목록이 그 상품의 사이즈 전부다(size_from_ocr.trim_unsold_sizes)
+        "options_all": list(opts),
         "category_nos": [],
         "category_names": cats,
         "brand_slug": slug,

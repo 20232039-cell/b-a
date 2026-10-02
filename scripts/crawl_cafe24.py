@@ -3535,6 +3535,39 @@ def table_is_better(new: dict, old: dict) -> bool:
     return n >= o
 
 
+# 카페24 는 품절된 옵션을 선택창에서 **숨길** 수 있다(매장 설정). 숨긴 옵션은 select · ul 에 없고 페이지의
+# `var option_stock_data = '{…}'` 에만 is_display "F" 로 남는다 — frizmworks 2144 는 선택창이 「L」 하나인데 자료에는
+# M · XL 이 숨긴 품절로 있었다(2026-10-02 살아 있는 페이지). 품절은 재입고되면 다시 팔리는 사이즈라, 옵션이 「L」뿐이라고
+# 실측표의 M · XL 칸을 자르면 안 된다(size_from_ocr.trim_unsold_sizes). 그래서 숨긴 것까지 **그 상품의 옵션 값 전부**를
+# options_all 에 따로 남긴다. options(선택창에 보인 것)는 그대로 — pick_color · 품절 판정 · 앱 옵션이 그것을 쓴다.
+_OPT_STOCK_DATA = re.compile(r"option_stock_data\s*=\s*'((?:[^'\\]|\\.)*)'")
+
+
+def option_values_all(html_text: str) -> list[str] | None:
+    """option_stock_data 의 옵션 값 전부(숨긴 것 포함, 조합 옵션은 칸마다 떼어). 자료가 없거나 못 읽으면 None."""
+    m = _OPT_STOCK_DATA.search(html_text or "")
+    if not m:
+        return None
+    try:
+        data = json.loads(json.loads('"' + m.group(1).replace("\\'", "'") + '"'))
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    out: list[str] = []
+    for v in data.values():
+        if not isinstance(v, dict):
+            continue
+        vals = v.get("option_value_orginal")
+        if not isinstance(vals, list) or not vals:
+            vals = [v.get("option_value")]
+        for x in vals:
+            x, _ = split_option(str(x or ""))
+            if x and x not in out:
+                out.append(x)
+    return out[:60] or None
+
+
 def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
     soup = BeautifulSoup(html_text, "lxml")
     ld = parse_json_ld_product(html_text)
@@ -3978,6 +4011,7 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
         "detail_images": detail_images[:80],
         "options": options[:30],
         "soldout_options": soldout_options[:30],
+        **({"options_all": opts_all} if (opts_all := option_values_all(html_text)) else {}),
     }
 
 

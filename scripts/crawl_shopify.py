@@ -133,6 +133,8 @@ def to_row(p: dict, slug: str, base: str, now: str) -> dict:
         # 사이즈마다 품절을 따로 준다. 이게 없으면 카페24 규칙(cc.is_soldout)이 「옵션은 있는데
         # 품절 표시가 없다」며 다 판 옷을 판매중으로 읽는다 — 첫 판에서 품절 62벌이 전부 판매중이었다.
         "soldout_options": [v.get("title") or "" for v in vs if not v.get("available")],
+        # variants 는 품절(available false)까지 그 상품의 변형 전부다 — size_from_ocr.trim_unsold_sizes 가 견주는 목록
+        "options_all": [v.get("title") or "" for v in vs],
         "category_nos": [],
         "category_names": names,
         "brand_slug": slug,
