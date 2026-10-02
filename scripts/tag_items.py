@@ -814,7 +814,8 @@ def order_materials(found: set[str], body: str, name: str, subtype: str = "",
             return (1, fib.index(m))
         i = text.find(m.lower())
         return (2, i if i >= 0 else 10 ** 9)
-    out = sorted(found, key=first)
+    # 동점(글에 안 나온 소재끼리)은 이름순 — 집합 순서는 실행마다 바뀌어(해시 무작위) 재생성마다 2,945벌 소재 순서가 흔들렸다.
+    out = sorted(found, key=lambda m: (first(m), m))
     # 소가죽·양가죽이 있으면 「가죽」도 — 앱 필터의 가죽 칸이 이 옷들을 찾아야 한다. 혼용률이 「소가죽 100%」면
     # 글의 「가죽」이 섬유 규칙에 걸려 빠져서, 가죽 칸에서 245벌이 사라졌다(D 판 전수, 2026-09-23).
     specific = [m for m in out if m in REAL_LEATHER and m != "가죽"]
