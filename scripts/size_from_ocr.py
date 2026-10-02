@@ -769,6 +769,425 @@ def loose_pass(rows: dict, ocr: dict, out: dict) -> Counter:
 
 
 
+
+# ── rolarola 「SIZE CHART」 표 — 매장 틀 셋째 판(2026-10-02, 코덱스 검증 026) ─────────────────────────────
+# rolarola(위사몰)는 실측을 상세 그림 맨 아래 「SIZE CHART」 칸에만 싣는다. 꼴은 늘 같다:
+#     US      총장   어깨   가슴    밑단    소매    소매     소매부리       ← 한글 머리(OCR 이 잘 깬다)
+#     사이즈          단면   둘레    둘레    길이    통둘레   둘레           ← 칸마다 잰 방식
+#     US SIZE TOTAL  SHOULDER CHEST HEM-   SLEEVE  ARMHOLE  SLEEVE         ← 영문 머리(한글보다 덜 깨진다)
+#             LENGTH WIDTH  GIRTH  AROUND  LENGTH  AROUND   OPENING
+#     FREE    515    455    1065   745     61      33.5     18             ← 소수점이 자주 빠진다(51.5 · 106.5)
+# (그림 2967 을 열어 확인 — 「ARMHOLE AROUND」 칸의 한글은 「소매 통둘레」다. 소매통 둘레다, 진동 둘레가 아니다.)
+# 하의는 「TOTAL WAIST WAIST HIP THIGH HEM FRONT BACK / LENGTH BAND GIRTH GIRTH GIRTH AROUND RISE RISE」(오비 높이 ·
+# 허리둘레 · 힙둘레 · 허벅지둘레 · 밑단둘레 · 앞밑위 · 뒷밑위). 값 줄 머리에는 사이즈 이름과 US 호수(「S 2」 「M4」)가 선다.
+# 기존 갈래는 둘레를 그대로 받거나(가슴 90 · 허리 72) 「120」을 소수점 빠진 수로 보고 12 로 줄였다(밑단 12) —
+# 코덱스 026 이 짚은 값: 스커트 허리 66 → 33 · 밑단 120 → 60 · 상의 가슴 90 → 45 · 밑단 124 → 62 · 소매단 25 → 12.5.
+# 그래서 이 매장은 이 갈래가 **유일한 OCR 출처**다(rolarola_pass — 못 읽으면 기존 OCR 값도 지운다. 틀린 값보다 빈칸).
+#   · 칸은 영문 첫 줄의 부위 낱말로 세운다. 낱말 수가 값 줄의 칸 수와 정확히 같아야 한다 — 칸 낱말 하나가 「1」 「대69」로
+#     깨지면(「WAST 1 THIGH」) 부위가 하나 모자라 표가 걸린다. 모르는 영어 낱말(세 글자 이상)이 끼어도 버린다.
+#   · 잰 방식(단면 / 둘레 / 길이 / 높이)은 영문 둘째 줄이 칸 수와 맞을 때 그것으로, 아니면 이 매장의 기본(가슴 · 허리 · 힙 ·
+#     허벅지 · 밑단 · 소매통 · 소매부리 = 둘레)으로. 한글 둘째 줄에 「너비」나 둘째 「단면」이 보이면 기본을 쓰지 않는다.
+#   · 둘레 칸은 반으로 접는다. 소수점은 끝자리가 5 인 맨수만, 라벨 범위(접은 뒤 · 품목별)에 드는 쪽 하나로 되살린다 —
+#     둘 다 들거나 둘 다 안 들면 그 줄을 버린다. 한 칸이라도 못 믿으면 칸을 밀어 맞추지 않고 줄을 버린다.
+#   · 표 하나가 받아들여지는 문은 좁다: 사이즈가 커지는데 값이 줄거나 크게 뛰면, 부위끼리 말이 안 되면(_lz_sane), 상의의 총장이
+#     가슴 단면보다 한참 짧으면 버린다. 머리가 다른 표가 둘이면(세트) 어느 것이 이 옷인지 몰라 버린다.
+#   · 사이즈 이름은 깨끗이 읽힌 것만(「9 2」 「5 2」 「S$」는 버린다), 그리고 줄 이름이 **매장 옵션과 차례까지 같을 때만** 표를 받는다.
+#   · 「MODEL SIZE height 178cm / bust 30"」은 SIZE CHART 머리 앞이라 이 갈래가 보지 않는다.
+_RR_BRANDS = {"rolarola"}
+_RR_PART = {
+    "TOTAL": "TOTAL", "SHOULDER": "SHOULDER", "SHOLILDER": "SHOULDER", "SHOULDFR": "SHOULDER", "SOULDER": "SHOULDER",
+    "CHEST": "CHEST", "BUST": "CHEST",
+    "WAIST": "WAIST", "WAST": "WAIST", "WEIST": "WAIST", "WATST": "WAIST", "WAISTBAND": "WAISTBAND",
+    "HIP": "HIP", "THIGH": "THIGH", "HEM": "HEM", "HENM": "HEM",
+    "SLEEVE": "SLEEVE", "SELLVE": "SLEEVE", "ARMHOLE": "ARMHOLE",
+    "FRONT": "FRONT", "BACK": "BACK", "BAK": "BACK", "LENGTH": "LENGTH", "LENGT": "LENGTH",
+    # 우리 라벨이 없는 칸 — 칸 수에는 세고 값은 버린다(스커트 기장 · 무릎 둘레 · 벨트 너비 · 끈 · 클러치 · 목 · 속바지 · 레이스)
+    "SKIRT": "", "KNEE": "", "BELT": "", "STRING": "", "TOP": "", "CLUTCH": "", "CLUCH": "", "RAGLAN": "",
+    "NECK": "", "TURTLE": "", "UNDERPANTS": "", "LACE": "",
+}
+_RR_QUAL = {"LENGTH": "LENGTH", "WIDTH": "WIDTH", "GIRTH": "GIRTH", "GRTH": "GIRTH", "GRITH": "GIRTH", "AROUND": "AROUND",
+            "OPENING": "OPENING", "RISE": "RISE", "RSE": "RISE", "BAND": "BAND", "HEIGHT": "HEIGHT", "FROM": "FROM"}
+# 영문 둘째 줄이 칸 수와 맞을 때 부위와 잰 방식이 서로 말이 되나 — 안 되면 두 줄이 서로 다른 칸을 읽은 것이다
+_RR_FIT = {"TOTAL": {"LENGTH"}, "SHOULDER": {"WIDTH"}, "CHEST": {"GIRTH", "AROUND"}, "HIP": {"GIRTH", "AROUND"},
+           "THIGH": {"GIRTH", "AROUND"}, "HEM": {"AROUND", "GIRTH", "WIDTH"},
+           "WAIST": {"GIRTH", "AROUND", "BAND", "HEIGHT", "WIDTH"}, "WAISTBAND": {"BAND", "HEIGHT"},
+           "SLEEVE": {"LENGTH", "AROUND", "OPENING", "GIRTH"}, "ARMHOLE": {"AROUND", "LENGTH", "GIRTH"},
+           "FRONT": {"RISE"}, "BACK": {"RISE"}, "LENGTH": {"FROM"}}
+# 영문 머리줄 앞에 붙는 「US SIZE」 칸의 깨진 꼴 — 영문 둘째 줄의 첫 낱말 앞에서만 버린다
+_RR_PRE = re.compile(r"(?i)^(?:us|se|size|sz|sze|ussize|ussze|ussue|ussjze|vssize|wee|wan|iron|cere|sre|\W*)$")
+_RR_NAME = re.compile(r"^(FREE|PREE|FRFE|FREF|XS|S|M|L|XL)(\d)?$")
+_RR_NUM = re.compile(r"^\d{1,4}(?:\.\d{1,2})?\.?$")
+_RR_SPAN = re.compile(r"^\d{1,4}(?:\.\d)?[-~/]\d{1,4}(?:\.\d)?$")   # 「615-100」 「37/47」 — 칸 하나, 값은 비운다
+_RR_DASH = {"-", "–"}                    # 그 사이즈에 없는 칸
+_RR_AMBIG = {"=", "—", "_", "——", "=="}   # 빈칸(「-」를 OCR 이 이렇게도 읽는다). 「|」 「~~」 「.」은 괘선 찌꺼기라 그 줄을 버린다
+# 범위는 품목에 맞춰 좁힌다 — 소수점을 되살릴지 정하는 잣대라서다. 접은 뒤 밑단은 원피스 · 치마 · 코트에서 60 을 넘고
+# (코덱스 026 「밑단 124 → 62」, 롱 원피스 260 → 130, 티어드 스커트 6243 「320」 → 160) 바지가 아니면 25 아래일 수 없다 —
+# 전 범위(8~60)로 보면 「320」이 32.0 → 16 으로 섰다. 총장도 하의가 아니면 30 아래가 없다(5189 「앞 53 / 뒤 55」가
+# 「253」으로 붙어 25.3 이 됐다).
+def _rr_ranges(cat: str) -> dict:
+    if cat in ("Pants", "Denim"):
+        return {**RANGES, "밑단": (8, 60)}
+    if cat == "Skirts":
+        return {**RANGES, "밑단": (25, 200)}
+    return {**RANGES, "밑단": (25, 200), "총장": (30, 160)}
+
+
+def _rr_parts(line: str) -> list[str] | None:
+    """영문 첫 줄 → 부위 목록. TOTAL 앞(「US SIZE」 칸)은 무엇이든 버린다. TOTAL 뒤에 모르는 낱말(세 글자 이상)이
+    끼면 None — 칸 하나가 깨졌다. 숫자 · 한글 · 두 글자 이하 토막(「—s」 「0」 「대69」)은 버리되, 그것이 깨진 칸
+    낱말이었다면 부위 수가 값 줄의 칸 수보다 하나 모자라 뒤에서 표가 통째로 걸린다(_rr_table)."""
+    out: list[str] = []
+    started = False
+    for t in line.split():
+        w = re.sub(r"[^A-Za-z]", "", t).upper()
+        if not started:
+            if w == "TOTAL":
+                started = True
+                out.append("TOTAL")
+            continue
+        if w == "BAND" and out and out[-1] == "WAIST":
+            out[-1] = "WAISTBAND"                 # 「WAIST BAND」 — 오비 높이
+            continue
+        p = _RR_PART.get(w)
+        if p is None:
+            if len(w) <= 2:
+                continue
+            return None
+        out.append(p)
+    return out if started else None
+
+
+def _rr_quals(line: str) -> list[str] | None:
+    out = []
+    for t in line.split():
+        w = re.sub(r"[^A-Za-z]", "", t).upper()
+        if not w:
+            continue
+        q = _RR_QUAL.get(w) or next((v for k, v in _RR_QUAL.items() if len(k) >= 5 and k in w), None)
+        if q is None:
+            if not out and _RR_PRE.match(w):
+                continue
+            return None
+        out.append(q)
+    return out or None
+
+
+def _rr_spec(parts: list[str], quals: list[str] | None, center_back: bool):
+    """(부위, 잰 방식) → [(정식 라벨 | None, 둘레인가) …]. 못 정하는 칸이 있으면 None."""
+    aligned = bool(quals) and len(quals) == len(parts)
+    q = quals if aligned else [None] * len(parts)
+    if aligned and any(qq not in _RR_FIT[p] for p, qq in zip(parts, q) if p in _RR_FIT):
+        return None
+    # 소매통이 따로 있는 표(「SLEEVE AROUND」)의 「ARMHOLE AROUND」는 소매통이 아니다(4320 — 한글 머리 「소매 · 소매부리 · 암홀」)
+    sleeve_around = any(p == "SLEEVE" and qq in ("AROUND", "GIRTH") for p, qq in zip(parts, q))
+    spec: list = []
+    for i, (p, qq) in enumerate(zip(parts, q)):
+        if p == "WAISTBAND":
+            spec.append((None, False))
+        elif p == "TOTAL":
+            spec.append(("총장", False))
+        elif p == "SHOULDER":
+            spec.append(("어깨", qq in ("GIRTH", "AROUND")))
+        elif p in ("CHEST", "HIP", "THIGH", "HEM"):
+            lab = {"CHEST": "가슴", "HIP": "엉덩이", "THIGH": "허벅지", "HEM": "밑단"}[p]
+            spec.append((lab, qq != "WIDTH"))
+        elif p == "WAIST":
+            if qq in ("BAND", "HEIGHT"):
+                spec.append((None, False))
+            elif qq == "WIDTH":
+                spec.append(("허리", False))
+            elif qq in ("GIRTH", "AROUND"):
+                spec.append(("허리", True))
+            else:
+                spec.append(("허리?", True))     # 오비 높이인지 허리둘레인지 값으로 정한다(_rr_table)
+        elif p in ("SLEEVE", "ARMHOLE"):
+            if qq == "LENGTH":
+                spec.append(("소매길이" if p == "SLEEVE" else "암홀", False))
+            elif qq in ("AROUND", "GIRTH"):
+                # 소매통이 따로 있는 표의 「ARMHOLE AROUND」 값은 둘레로 보기엔 작다(4201 「24」 · 4219 「25」 — 재킷) —
+                # 단면인지 둘레인지 모르니 칸만 세고 값은 버린다
+                spec.append((None, False) if p == "ARMHOLE" and sleeve_around else ("소매통", True))
+            elif qq == "OPENING":
+                spec.append(("소매단", True))
+            else:
+                spec.append(("소매?", True))
+        elif p == "LENGTH":
+            # 래글런 옷의 「LENGTH FROM CENTER BACK」 = 화장
+            if qq == "FROM" or (qq is None and center_back):
+                spec.append(("화장", False))
+            else:
+                return None
+        elif p == "FRONT":
+            spec.append(("밑위", False))
+        elif p == "BACK":
+            spec.append(("뒤밑위", False))
+        else:
+            spec.append((None, False))
+    # 잰 방식을 못 읽은 소매 칸 — 이 매장의 소매 칸 차례는 「길이 · 통둘레 · 부리둘레」다
+    i = 0
+    while i < len(spec):
+        if spec[i][0] != "소매?":
+            i += 1
+            continue
+        j = i
+        while j < len(spec) and spec[j][0] == "소매?":
+            j += 1
+        run = j - i
+        after_hw = i > 0 and spec[i - 1][0] == "화장"
+        if run == 3 and not after_hw:
+            fill = [("소매길이", False), ("소매통", True), ("소매단", True)]
+        elif run == 2 and (after_hw or parts[i] == "ARMHOLE"):
+            fill = [("소매통", True), ("소매단", True)]
+        elif run == 1 and parts[i] == "SLEEVE" and not after_hw and "SLEEVE" not in parts[i + 1:] \
+                and "ARMHOLE" not in parts[:i] + parts[i + 1:]:
+            fill = [("소매길이", False)]
+        else:
+            return None
+        spec[i:j] = fill
+        i = j
+    labs = [s[0] for s in spec if s[0] and s[0] != "허리?"]
+    if len(labs) != len(set(labs)):
+        return None                               # 「HEM- HEM-」 — 그림 머리가 틀렸다(3587: 첫 HEM 의 한글은 허리)
+    return spec
+
+
+def _rr_value(lab: str, raw: str, girth: bool, rng: dict) -> float | None | bool:
+    """한 칸 → 값. None = 빈칸, False = 못 믿을 값(줄을 버린다)."""
+    if raw in _RR_DASH or raw in _RR_AMBIG or _RR_SPAN.match(raw):
+        return None
+    raw = raw.rstrip(".")
+    # 소수가 .5 · .0 이 아니면 OCR 이 끝자리를 잘못 읽은 것이다(6861 소매 「56.9」 — 그림 56.5)
+    if "." in raw and raw[-1] not in "05":
+        return False
+    v = float(raw)
+    cand = [v]
+    # 소수점을 되살리는 것은 끝자리가 5 일 때만 — 이 매장은 0.5cm 단위로 적는다(OCR 이 소수점까지 읽은 칸 310 중 .5 가 295).
+    # 「1022」(그림 102 — 4981) · 「358」 같은 것은 OCR 이 수를 하나 더 지어낸 것일 수 있어 줄을 버린다.
+    if raw.isdigit() and len(raw) >= 3 and raw.endswith("5"):
+        cand.append(v / 10)
+    if girth:
+        cand = [x / 2 for x in cand]
+    lo, hi = rng.get(lab, (3, 200))
+    ok = [x for x in cand if lo <= x <= hi]
+    return round(ok[0], 1) if len(ok) == 1 else False
+
+
+def _rr_row(line: str, n: int):
+    """값 줄 → (이름, [토막 n개]) | None."""
+    toks = line.split()
+    if len(toks) < 2:
+        return None
+    m = _RR_NAME.match(toks[0])
+    if not m:
+        return None
+    nm = m.group(1)
+    nm = "FREE" if nm in ("PREE", "FRFE", "FREF") else nm
+    # 「6l」 「I9」 — 숫자 사이의 l · I 는 1 이다(OCR 의 흔한 혼동, 창고 85칸). 첫 자리가 깨진 「Jl」 「él」은 고치지 않는다.
+    rest = [re.sub(r"[lI]", "1", t) if re.fullmatch(r"\d+[lI]\d*|[lI]\d+", t) else t for t in toks[1:]]
+    for t in rest:
+        if not (_RR_NUM.match(t) or _RR_SPAN.match(t) or t in _RR_DASH or t in _RR_AMBIG):
+            return None                           # 「Jl」 「él」 「기」 「£77」 — 깨진 칸이 있다
+    # 「=」 「—」는 빈칸으로만 센다. 찌꺼기로 보고 빼야 칸 수가 맞는 줄은 버린다 — 6076 「FREE = 32 38 …」은 그림이
+    # 「FREE 52 38 …」이다(「5」가 「= 3」으로 깨졌다). 찌꺼기 옆 수는 믿을 수 없다.
+    cells = rest
+    # US 호수(「S 2」)는 첫 칸 앞의 한 자리 수 — 이름에 붙어 읽히면(「M4」) 이미 떨어졌다
+    if len(cells) == n + 1 and m.group(2) is None and nm != "FREE" and re.fullmatch(r"\d", cells[0]):
+        cells = cells[1:]
+    return (nm, cells) if len(cells) == n else None
+
+
+_RR_STOP = re.compile(r"(?i)washing|세탁|made in|product of")
+_RR_HEAD_EN = re.compile(r"(?i)GIRTH|AROUND|OPENING|WIDTH")
+
+
+def _rr_blocks(text: str):
+    """「SIZE CHART」 칸마다 줄 묶음. 제목을 OCR 이 흘린 그림(창고 177벌 — 영문 머리만 남았다)은 영문 머리(TOTAL …)
+    위로 다섯 줄까지(한글 머리)를 시작으로 본다."""
+    lines = [ln.strip() for ln in text.splitlines()]
+    starts = [i for i, ln in enumerate(lines) if "SIZE CHART" in ln.upper()]
+    covered = {j for i in starts for j in range(i, i + 16)}
+    for i, ln in enumerate(lines):
+        if i in covered or "TOTAL" not in ln.upper() or _RR_HEAD_EN.search(ln):
+            continue
+        p = _rr_parts(ln)
+        if not p or len(p) < 2:
+            continue
+        st = i
+        for j in range(i - 1, max(-1, i - 6), -1):
+            if j in covered or _RR_STOP.search(lines[j]):
+                break
+            st = j
+        starts.append(st)
+        covered.update(range(st, i + 16))
+    starts.sort()
+    for a, i in enumerate(starts):
+        end = starts[a + 1] if a + 1 < len(starts) else len(lines)
+        body = []
+        for ln in lines[i:min(end, i + 16)]:
+            if _RR_STOP.search(ln):
+                break
+            if ln:
+                body.append(ln)
+        yield body
+
+
+def _rr_table(body: list[str], cat: str):
+    """SIZE CHART 한 칸 → (부위 목록, [(이름, {라벨: 값})…]) | None."""
+    # 영문 머리가 두 번 찍힌 그림이 있다(3947 — 첫 쌍은 「IENGTH WINTH」로 깨졌다). 둘째 줄까지 칸 수가 맞는 쌍을 먼저 쓴다.
+    heads = []
+    for i, ln in enumerate(body):
+        if "TOTAL" in ln.upper() and not _RR_HEAD_EN.search(ln):
+            p = _rr_parts(ln)
+            if p and len(p) >= 2:
+                q = _rr_quals(body[i + 1]) if i + 1 < len(body) else None
+                heads.append((len(q or []) != len(p), i, p, q))
+    if not heads:
+        # 옛 하의 그림은 영문 첫 줄이 흐린 글씨라 OCR 이 통째로 흘린다(2907 · 3795 …). 한글 둘째 줄 「높이 둘레 둘레 둘레 둘레
+        # 밑위 밑위」로 틀을 세워 봤으나(11벌) 그 그림들은 S 줄 이름도 늘 「5 2」 「9 2」로 깨져 옵션과 맞는 표가 하나도 없었다 — 두지 않는다.
+        return None
+    _, pi, parts, quals = min(heads)
+    if len({tuple(h[2]) for h in heads}) > 1:
+        return None                               # 두 영문 머리가 칸을 달리 읽었다
+    center_back = any("CENTER" in ln.upper() for ln in body[pi + 1:pi + 4])
+    # 한글 둘째 줄에 「너비」나 둘째 「단면」(어깨 말고)이 보이면 이 매장 기본(둘레)을 믿지 않는다 — 영문 둘째 줄이 맞아야
+    ko2 = [ln for ln in body[:pi] if re.search(r"둘레|단면|길이|높이|너비", ln) and not ln.startswith("-")]
+    odd = any("너비" in ln or ln.count("단면") >= 2 for ln in ko2)
+    if odd and not (quals and len(quals) == len(parts)):
+        return None
+    spec = _rr_spec(parts, quals, center_back)
+    if not spec:
+        return None
+    # 영문은 「SLEEVE LENGTH」인데 한글 머리가 「화장 (길이)」인 그림이 있다(6384 오프숄더 블라우스 · 창고 60여 벌) — 한글을 따른다.
+    # 어깨 칸이 없는 표(래글런 · 오프숄더)에서 한글 머리의 그 자리가 깨져 소매인지 화장인지 안 보이면 그 칸은 버린다.
+    ko1 = [ln for ln in body[:pi] if not ln.startswith("-")
+           and len(re.findall(r"총장|종장|어깨|가슴|밑단|소매|허리|화장|힙|허벅지", ln)) >= 2]
+    if "소매길이" in [x[0] for x in spec]:
+        k = [x[0] for x in spec].index("소매길이")
+        if any("화장" in ln for ln in ko1):
+            spec[k] = ("화장", False)
+        elif "SHOULDER" not in parts and not any(re.search(r"(?:^|\s)소매(?:길이)?(?=\s|$)", ln) for ln in ko1):
+            spec[k] = (None, False)
+    n = len(spec)
+    rows = []
+    for ln in body[pi + 1:]:
+        r = _rr_row(ln, n)
+        if r:
+            rows.append(r)
+    if not rows:
+        return None
+    # 오비 높이인지 허리둘레인지 못 읽은 WAIST 칸 — 오비 높이는 한 자리 수(4 · 7)다
+    for i, (lab, g) in enumerate(spec):
+        if lab != "허리?":
+            continue
+        vals = [float(c[i].rstrip(".")) for _, c in rows if _RR_NUM.match(c[i])]
+        if vals and max(vals) <= 12:
+            spec[i] = (None, False)
+        elif vals and min(vals) >= 40:
+            spec[i] = ("허리", True)
+        else:
+            return None
+    labs = [s[0] for s in spec if s[0]]
+    if len(labs) != len(set(labs)) or len(labs) < 2:
+        return None
+    rng = _rr_ranges(cat)
+    got: list = []
+    for nm, cells in rows:
+        vals = {}
+        for (lab, g), raw in zip(spec, cells):
+            if not lab:
+                continue
+            v = _rr_value(lab, raw, g, rng)
+            if v is False:
+                vals = None
+                break
+            vals[lab] = v
+        if vals is None:
+            continue
+        old = next((v for x, v in got if x == nm), None)
+        if old is not None:
+            if old != vals:
+                return None                       # 같은 이름 줄이 둘인데 값이 다르다 — 어느 쪽인지 모른다
+            continue
+        got.append((nm, vals))
+    return (tuple(p for p in parts), got) if got else None
+
+
+def parse_rolarola(text: str, opts: list[str], cat: str = ""):
+    """rolarola 의 SIZE CHART → (사이즈 이름, {라벨: [값…]}) | None. 줄 이름이 매장 옵션과 차례까지 같아야 한다."""
+    tables = []
+    for body in _rr_blocks(text):
+        t = _rr_table(body, cat)
+        heads = any("TOTAL" in ln.upper() for ln in body)
+        if t:
+            tables.append(t)
+        elif heads:
+            tables.append(None)                   # 머리는 있는데 못 읽은 표
+    good = [t for t in tables if t]
+    if not good:
+        return None
+    # 같은 그림이 두 번 읽힌 것은 하나로 — 머리가 다른 표가 둘이면(세트의 둘째 벌) 어느 것이 이 옷인지 모른다
+    if any(t is None for t in tables) or len({t[0] for t in good}) > 1:
+        return None
+    rows: list = []
+    for _, got in good:
+        for nm, vals in got:
+            old = next((v for x, v in rows if x == nm), None)
+            if old is None:
+                rows.append((nm, vals))
+            elif old != vals:
+                return None
+    names = [nm for nm, _ in rows]
+    want = [str(o).strip().upper() for o in opts]
+    if names != want:
+        return None
+    labs = [lab for lab in rows[0][1]]
+    cols = {lab: [vals.get(lab) for _, vals in rows] for lab in labs}
+    cols = {lab: v for lab, v in cols.items() if any(isinstance(x, (int, float)) for x in v)}
+    # 사이즈가 커지는데 값이 줄거나(5341 M 총장 「33」 — 53 을 잘못 읽었다) 한 칸에 크게 뛰면 숫자 하나가 잘못 읽힌 것이다 —
+    # 범위 안의 값이라 칸 검사로는 못 잡는다. 표를 버린다(이 매장 표는 한 치수에 1~3cm 씩 는다).
+    for v in cols.values():
+        xs = [x for x in v if isinstance(x, (int, float))]
+        if any(b < a - 0.5 or b - a > max(4.0, a * 0.2) for a, b in zip(xs, xs[1:])):
+            return None
+    if len(cols) < 2 or not _lz_sane(cols, len(names)):
+        return None
+    # 새 그림(「Size Chart 사이즈 …」)의 가는 글씨에서 OCR 이 「5」를 「3」으로 읽는다 — 5061 총장 53 → 33 · 5611 52 → 32 ·
+    # 6076 52 → 「= 32」. 범위 안이라 칸 검사로는 안 걸린다. 상의의 총장이 가슴 단면의 4분의 3도 안 되거나 긴소매의
+    # 0.55 배도 안 되면 버린다(다른 매장 HTML 표에서 총장/가슴 0.5 백분위가 0.76 · 총장/소매 0.6, 2026-10-02).
+    if cat not in _TPL_BOTTOM:
+        for i in range(len(names)):
+            at = lambda c: cols[c][i] if c in cols and isinstance(cols[c][i], (int, float)) else None
+            ln, ch, sl = at("총장"), at("가슴"), at("소매길이")
+            if ln is not None and ((ch and ln < 0.75 * ch) or (sl and sl >= 50 and ln < 0.55 * sl)):
+                return None
+    return names, cols
+
+
+def rolarola_pass(rows: dict, ocr: dict, out: dict) -> Counter:
+    """_RR_BRANDS 매장의 옷은 SIZE CHART 해석이 유일한 OCR 출처 — 읽히면 넣고, 못 읽으면 기존 OCR 값을 지운다."""
+    n: Counter = Counter()
+    for k, r in rows.items():
+        if k[0] not in _RR_BRANDS:
+            continue
+        u = r["source_url"]
+        ent = out.get(u)
+        if ent is not None and ent.get("source") != "ocr":
+            continue
+        got = None
+        if ocr.get(k) and r.get("category") in GARMENT_LABELS:
+            opts = [o.strip() for o in (r.get("options") or "").split("|") if o.strip()]
+            got = parse_rolarola(ocr[k], opts, r.get("category") or "")
+        if got:
+            names, cols = got
+            out[u] = {"brand_slug": k[0], "source": "ocr", "template": True,
+                      "size_names": names, "sizes": sleeve_to_hwajang(cols)}
+            n["읽음"] += 1
+        elif ent is not None:
+            del out[u]
+            n["못 읽어 지움"] += 1
+    return n
+
+
 # ── 소수점이 빠진 둘레 표 — 이름 줄 「(cm) 28 29 30 …」 + 라벨 줄(2026-10-01) ───────────────────────────────
 # concepts1one(지오다노)의 DETAIL SIZE 그림은 글씨가 가늘어 OCR 이 소수점을 통째로 흘린다:
 #     <= (cm) 28 29 30 31 _ 32 _ 33 34 _ 36
@@ -5428,6 +5847,11 @@ def main():
     if lz_added:
         print(f"느슨한 줄 읽기로 읽은 OCR 표 {sum(lz_added.values())}벌: {dict(lz_added.most_common(15))}")
         src["ocr"] += sum(lz_added.values())
+    # rolarola 는 SIZE CHART 해석만 믿는다(rolarola_pass 주석 — 코덱스 026). 기존 갈래가 읽은 둘레 그대로의 값을 갈아 끼우거나 지운다.
+    # 사람 값 · 형제 물려주기보다 앞이라 읽힌 옷의 다른 색이 그 값을 물려받는다.
+    rr = rolarola_pass(rows, ocr, out)
+    if rr:
+        print(f"rolarola SIZE CHART: {dict(rr)}")
     # 사람이 직접 옮겨 적은 값. 기계가 못 읽는 자리(사이즈가이드 탭 그림 등)를 사람이 메운
     # 것이라 무엇보다 앞선다. 형제 물려주기보다 먼저 넣어야 같은 옷의 다른 색도 함께 산다.
     for u, ent in load_manual().items():
@@ -5447,12 +5871,24 @@ def main():
         donor = next((s for s in sibs if s["source_url"] in out), None)
         if not donor:
             continue
-        base_entry = out[donor["source_url"]]
+        own = {s["source_url"] for s in sibs if s["source_url"] in out}
         for r in sibs:
             if r["source_url"] in out or r.get("category") not in GARMENT_LABELS:
                 continue
+            d = donor
+            # rolarola 는 같은 이름을 시즌을 넘겨 다시 쓰고 치수도 바뀐다 — 6861 HAIRY V NECK CARDIGAN VIOLET(2026, 그림 총장 61 ·
+            # 가슴 100)이 4268 BEIGE(2023, 총장 56 · 가슴 50 단면)의 표를 물려받았다. 이 매장 표를 둘 다 읽은 같은 이름 짝을 대 보니
+            # 상품 번호가 20 안이면 265쌍 중 263쌍이 같고, 20 넘게 떨어지면 26쌍 중 5쌍이 달랐다(2026-10-02). 그래서 이 매장만
+            # 번호가 20 안인 가장 가까운 형제에게서만 받는다.
+            if r["brand_slug"] in _RR_BRANDS:
+                near = [s for s in sibs if s["source_url"] in own and str(s["product_no"]).isdigit()
+                        and str(r["product_no"]).isdigit() and abs(int(s["product_no"]) - int(r["product_no"])) <= 20]
+                if not near:
+                    continue
+                d = min(near, key=lambda s: abs(int(s["product_no"]) - int(r["product_no"])))
+            base_entry = out[d["source_url"]]
             out[r["source_url"]] = {"brand_slug": r["brand_slug"], "source": "sibling",
-                                    "sibling_of": donor["source_url"],
+                                    "sibling_of": d["source_url"],
                                     "size_names": base_entry["size_names"], "sizes": base_entry["sizes"],
                                     # 세트는 색만 달라도 하의 표까지 같다
                                     **({"size_parts": base_entry["size_parts"]} if base_entry.get("size_parts") else {}),
