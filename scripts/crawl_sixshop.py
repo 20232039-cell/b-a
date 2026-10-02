@@ -176,6 +176,9 @@ def size_dict(text: str) -> tuple[list[str] | None, dict[str, list[float]]]:
                     blocks.append([])
                 blocks[-1].append((name, pairs))
                 last_end = m.end()
+                # 「FREE - 총장 66 / 어깨 56 / 가슴 56」 한 줄 표 — 아래 「줄 하나는 ONE · FREE 일 때만」 문에 걸려
+                # 버려지고 있었다(코덱스 025 리뷰). 이름이 원사이즈 말이면 그 문을 연다.
+                one = one or name.upper() in {"FREE", "F", "ONE", "OS", "ONESIZE"}
             else:                                  # 못 읽은 줄 — 다음 줄은 새 벌
                 if blocks[-1]:
                     blocks.append([])

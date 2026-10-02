@@ -4742,10 +4742,13 @@ def _measurer(tbl: dict):
                         out[c] = [x if isinstance(x, (int, float)) else None for x in vs]
                 return out or None
             if slug not in cache:
+                # 한 매장 것만 들고 있는다 — 묶음은 매장 안에서만 서므로 앞 매장 글은 다시 안 묻는다. 매장마다 쌓아 두면
+                # 후보가 많은 판에서 OCR 글 수백 MB 가 끝까지 남는다(코덱스 025 리뷰). 파일도 줄 단위로 흘려 읽는다.
+                cache.clear()
                 cache[slug] = {}
                 p = CRAWL_DIR / "ocr" / f"{slug}.jsonl"
                 if p.exists():
-                    for ln in p.read_text(encoding="utf-8").splitlines():
+                    for ln in p.open(encoding="utf-8"):
                         try:
                             d = json.loads(ln)
                         except Exception:
