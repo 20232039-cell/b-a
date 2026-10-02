@@ -1653,6 +1653,9 @@ def _mat_ctx(text: str, span: tuple[int, int]) -> str:
 MANUAL_MAT = DATA / "manual_mat.csv"   # 사람(또는 코덱스 비전)이 그림을 보고 옮겨 적은 혼용률 — 무엇보다 앞선다
 
 
+_MAT_SYN = {"비스코스": "레이온", "폴리아미드": "나일론", "엘라스테인": "스판덱스", "엘라스탄": "스판덱스", "면": "코튼", "폴리": "폴리에스터", "메탈 섬유": "메탈섬유"}
+
+
 def load_manual_mat() -> dict[str, list]:
     """data/manual_mat.csv — 한 줄이 한 섬유: 브랜드,링크,부위,섬유,퍼센트,왜.
 
@@ -1672,6 +1675,11 @@ def load_manual_mat() -> dict[str, list]:
         except ValueError:
             continue
         part = (r.get("부위") or "").strip() or "겉감"
+        # 설명글 해석(product_desc)과 같은 이름으로 — 반이 안 되는 폴리우레탄은 늘어나는 실(스판덱스)이고, 비스코스 ·
+        # 폴리아미드 · 엘라스테인은 우리 표준 이름이 따로 있다(코덱스가 원문 그대로 옮긴 belier 3801 「폴리우레탄 16」).
+        f = _MAT_SYN.get(f, f)
+        if f == "폴리우레탄" and v < 50:
+            f = "스판덱스"
         acc.setdefault(u, {}).setdefault(part, []).append([f, int(v) if v == int(v) else v])
     out = {}
     for u, parts in acc.items():
