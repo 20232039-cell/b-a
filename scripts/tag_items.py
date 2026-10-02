@@ -1631,6 +1631,37 @@ def _mat_ctx(text: str, span: tuple[int, int]) -> str:
     return re.sub(r"\s+", " ", text[max(0, a - 25):b + 25]).strip().lower()
 
 
+MANUAL_MAT = DATA / "manual_mat.csv"   # 사람(또는 코덱스 비전)이 그림을 보고 옮겨 적은 혼용률 — 무엇보다 앞선다
+
+
+def load_manual_mat() -> dict[str, list]:
+    """data/manual_mat.csv — 한 줄이 한 섬유: 브랜드,링크,부위,섬유,퍼센트,왜.
+
+    판독기가 못 읽는 그림(혼용률이 상세 그림 맨 아래 작은 글씨 · 고시 표에만 있는 상품)을 사람이나 코덱스가 보고 적는다
+    (사람 2026-10-02 「코덱스 사용해서 토큰 많이드는 일 시켜봐」 · 부탁 053~062). manual_sizes.csv 와 같은 자리다.
+    부위마다 합이 99~101 일 때만 받는다 — 옮겨 적다 한 섬유를 빠뜨린 상품은 통째로 안 쓴다. 「없음」 줄은 건너뛴다.
+    """
+    if not MANUAL_MAT.exists():
+        return {}
+    acc: dict[str, dict[str, list]] = {}
+    for r in csv.DictReader(MANUAL_MAT.open(encoding="utf-8-sig")):
+        u, f = (r.get("링크") or "").strip(), (r.get("섬유") or "").strip()
+        if not u or not f or f == "없음":
+            continue
+        try:
+            v = float(r.get("퍼센트") or "")
+        except ValueError:
+            continue
+        part = (r.get("부위") or "").strip() or "겉감"
+        acc.setdefault(u, {}).setdefault(part, []).append([f, int(v) if v == int(v) else v])
+    out = {}
+    for u, parts in acc.items():
+        if all(99 <= sum(x for _, x in vs) <= 101 for vs in parts.values()):
+            # 부위가 겉감 하나면 앱이 부위 이름을 떼고 보여 준다 — 설명글 해석(blend)과 같은 모양
+            out[u] = [{"p": "" if (p == "겉감" and len(parts) == 1) else p, "v": vs} for p, vs in parts.items()]
+    return out
+
+
 def blend_of_brand(slug: str, items: list[dict], why: dict | None = None) -> dict[str, list]:
     """source_url → 혼용률(mat). 못 읽었거나 버린 상품은 없다. why 를 주면 상품마다 (까닭, 고른 출처)를 적는다(전후 대조용)."""
     import product_desc
@@ -1760,9 +1791,13 @@ def main():
     q_count, src_count = Counter(), Counter()
     mat_count = 0
     ax_count, cat_count = Counter(), Counter()
+    manual_mat = load_manual_mat()
+    if manual_mat:
+        print(f"사람 · 코덱스가 옮겨 적은 혼용률 {len(manual_mat)}벌 (data/manual_mat.csv)")
     for slug, items in sorted(by_brand.items()):
         prepared, store_lines = prepare_brand(slug, items)
-        mats = blend_of_brand(slug, items)
+        mats = {**blend_of_brand(slug, items),
+                **{r["source_url"]: manual_mat[r["source_url"]] for r in items if r["source_url"] in manual_mat}}
         for r, body, sources, quality, color_text in prepared:
             tags = tagger.tag(r["category"], r["name"], body, color_text, quality,
                               sleeve_cm=sleeve_of(r["source_url"]), store_lines=store_lines)
