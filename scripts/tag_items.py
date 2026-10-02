@@ -924,7 +924,7 @@ class Tagger:
             for value, aliases in vocab[ax].items():
                 names = list(aliases) if value in self.mine_only else [value] + list(aliases)
                 for a in names:
-                    (color_rules if ax == "color" else text_rules).append((len(a), ax, value, compile_alias(a)))
+                    (color_rules if ax == "color" else text_rules).append((len(a), ax, value, compile_alias(a), a.lower()))
         self.text_rules = sorted(text_rules, key=lambda r: -r[0])
         self.color_rules = sorted(color_rules, key=lambda r: -r[0])
 
@@ -946,7 +946,12 @@ class Tagger:
         for ax, rs in by_ax.items():
             masked = list(text)
             cur = text
-            for _, _, value, rx in rs:
+            for _, _, value, rx, lit in rs:
+                # 모든 별칭 정규식은 별칭 글자를 그대로 담는다(compile_alias) — 글에 그 글자가 없으면 정규식을 돌릴 것도 없다.
+                # 축마다 수천 개 규칙을 4,000자 글에 다 돌려 태그 재생성이 상품당 0.2초, 전수 몇 시간이 걸렸다(주간 갱신
+                # 37021619738 의 태그 단계가 잡 상한을 넘김, 2026-10-02).
+                if lit not in text:
+                    continue
                 found = False
                 for m in rx.finditer(cur):
                     found = True
