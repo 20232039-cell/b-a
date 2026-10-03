@@ -223,8 +223,8 @@ ITEM_TYPE_VOCAB = {
     "티셔츠": ["t-shirt", "tshirt", "tee", "티셔츠", "t",
              # 「WAFFLE HENLEY NECK」처럼 henley 가 머리 낱말인 이름 15벌 — 헨리넥은 넥라인이고 옷은 티셔츠다.
              "henley"],
-    "셔츠": ["shirt", "blouse", "셔츠", "블라우스", "셔켓", "shacket", "shirket", "셔킷", "overshirt", "오버셔츠"],
-    "니트": ["knit", "sweater", "니트", "스웨터", "cardigan", "카디건", "pullover", "풀오버",
+    "셔츠": ["shirt", "blouse", "셔츠", "블라우스", "오버셔츠"],
+    "니트": ["knit", "sweater", "니트", "스웨터", "pullover", "풀오버",
             "turtle neck", "turtleneck", "터틀넥", "mock neck", "모크넥", "하이넥", "high neck"],
     # 「fur」·「shearling」·「sheepskin」은 소재지 품목이 아니다. 품목으로 넣었더니
     # 「FUR MINIBAG」·「Real Mink Fur Hat」·「퍼 블랙 버블백」이 겉옷이 됐다(2026-09-05).
@@ -254,13 +254,15 @@ ITEM_TYPE_VOCAB = {
               "wind stopper", "윈드 스토퍼", "아노락", "anorak"],
     "숏팬츠": ["shorts", "숏팬츠", "반바지", "숏츠", "쇼츠"],
     "점프수트": ["jumpsuit", "점프수트", "overall", "오버올"],
-    "가디건": ["가디건", "shrug", "슈러그", "볼레로", "bolero"],
+    # 영문 「cardigan」 · 「카디건」 표기가 니트 쪽 어휘에 있어 3,643벌이 가디건이 아니라 니트로 서 있었다(코덱스 사전 검증 244 ·
+    # 2026-10-03). 「Knit Cardigan」은 뒤 낱말 cardigan 이 이겨 가디건이 된다.
+    "가디건": ["가디건", "cardigan", "카디건", "shrug", "슈러그", "볼레로", "bolero"],
     "블레이저": ["blazer", "블레이저", "블레이져", "브레이저"],
     # 「더블 하이넥 벨티드 트렌치 코트」가 트렌치가 아니라 코트로 갔다 — 뒤에 오는 「코트」가
     # 이기기 때문이다. 붙은꼴을 넣어야 끝나는 자리가 같아지고 긴 쪽이 이긴다(2026-09-20).
     "트렌치": ["trench", "트렌치", "트렌치 코트", "트렌치코트", "trench coat", "trenchcoat"],
     "점퍼": ["jumper", "점퍼"],
-    "탑": ["top", "탑", "sleeveless", "슬리브리스", "민소매", "tank", "탱크", "뷔스티에", "bustier",
+    "탑": ["top", "탑", "sleeveless", "슬리브리스", "민소매", "tank", "탱크",
            "캐미솔", "camisole", "브라렛", "bralette", "브라탑", "bra top", " 브라 ",
              # 캐미솔은 있는데 cami·camisole 이 없어 10벌, bra 는 한글 「 브라 」만 있어 7벌, halter 7벌이 품목 빈칸이었다(2026-09-08).
              "cami", "camisole", "bra", "halter"],
@@ -270,6 +272,16 @@ ITEM_TYPE_VOCAB = {
     # 세트(「브라탑 & 드로즈」·「브라렛 & 팬티」)는 뒷말이 이겨 그대로 언더웨어로 남는다.
     # 바디수트는 어느 키에도 없어서 13벌이 품목 빈칸이었다. 「Tank Bodysuit」·「Jersey … Bodysuit」처럼
     # 탑·저지가 앞에 붙어도 뒤 낱말인 bodysuit 이 이긴다(2026-09-08).
+    # 세부 품목 — 코덱스 사전 검증(244)이 「큰 분류로 뭉개져 품목 정보가 사라진다」고 짚은 것(사람 「뷔스티에 스크런치
+    # 이런 세부 품목은 만들어야겠네」 2026-10-03). 「Bustier Top」은 뒤의 top 이 이기니 붙은꼴을 같이 넣는다.
+    "뷔스티에": ["뷔스티에", "bustier", "뷔스티에 탑", "bustier top", "뷔스티에탑"],
+    # 트랙 재킷 — 「track jacket」 134벌이 재킷, 「track top」 43벌이 탑에 있었다. 지퍼 달린 운동복 겉옷이다.
+    "트랙재킷": ["track jacket", "트랙 자켓", "트랙자켓", "트랙 재킷", "트랙재킷", "track top", "트랙 탑", "트랙탑",
+             "training jacket", "트레이닝 자켓", "트레이닝자켓", "트레이닝 재킷", "트레이닝재킷", "track jk"],
+    # 셔츠 모양 겉옷 — 앱 garmentCategory.ts 의 오버셔츠 · 아우터셔츠(대표 갈래 아우터, also 상의 — 2026-10-03 갈래 결정).
+    # 한글 「오버셔츠」는 오버핏 셔츠를 뜻하기도 해 안 넣는다 — 영문 overshirt 와 셔켓만.
+    "오버셔츠": ["overshirt", "over shirt", "over-shirt", "셔켓", "shacket", "shirket", "셔킷", "shirt jacket",
+             "셔츠 자켓", "셔츠자켓", "셔츠 재킷"],
     "바디수트": ["bodysuit", "body suit", "바디수트", "바디슈트"],
     "언더웨어": ["boxer brief", "boxer", "brief", "브리프", "드로즈", "팬티", "언더웨어",
              "underwear"],
@@ -378,6 +390,7 @@ ITEM_TO_CATEGORY = {
     "파라슈트팬츠": "bottoms", "트랙팬츠": "bottoms",
     "케이블니트": "tops", "아가일니트": "tops", "링거티": "tops", "라글란": "tops",
     "웨스턴셔츠": "tops",
+    "뷔스티에": "tops", "트랙재킷": "outer", "오버셔츠": "outer",
     "스니커즈": "shoes", "부츠": "shoes", "샌들": "shoes", "구두": "shoes",
 }
 
@@ -497,12 +510,12 @@ NAME_WOMEN_ONLY = re.compile(
 TOP_ITEMS = {"티셔츠", "맨투맨", "셔츠", "니트", "후드", "롱슬리브", "반팔", "탑",
              "가디건", "집업", "베스트", "피케", "저지",
              # 2026-09-20 에 가른 것 — 여기 안 넣으면 총장 성별 규칙이 그 옷에서 꺼진다
-             "케이블니트", "아가일니트", "링거티", "라글란", "웨스턴셔츠"}
+             "케이블니트", "아가일니트", "링거티", "라글란", "웨스턴셔츠", "뷔스티에"}
 OUTER_ITEMS = {"재킷", "코트", "점퍼", "블레이저", "패딩", "파카", "바람막이",
                "MA-1/봄버", "트렌치",
                "레더자켓", "스웨이드자켓", "트위드자켓", "트러커", "워크자켓", "필드자켓",
                "해링턴", "바시티", "코치자켓", "사파리자켓", "퀼팅자켓", "블루종",
-               "발마칸", "더플코트", "맥코트", "피코트", "싱글코트", "더블코트"}
+               "발마칸", "더플코트", "맥코트", "피코트", "싱글코트", "더블코트", "트랙재킷", "오버셔츠"}
 TOP_SHORT_CM = 57.0          # 총장 중앙이 이보다 짧으면 여성
 SHOULDER_NARROW_CM = 40.0    # 총장을 모를 때만 본다
 _LEN_KEYS = ("총장", "총길이", "기장", "length", "총기장")
@@ -1062,7 +1075,9 @@ ACC_TYPE_VOCAB = {
     # 하이픈 꼴 「FLIP-FLOP」(unaffected × OOFOS · youth 「Geta Flip-flop」 · arend · low-classic)이 안 걸렸다
     "샌들": ["sandal", "샌들", "플립플랍", "flip flop", "flipflop", "쪼리", "flip-flop"],
     # cayl 「down booties」 7벌 — 텐트 안에서 신는 다운 슬리퍼다. 「boot」 꼴로는 안 걸린다(booties 는 boot+ies).
-    "뮬": ["mule", "뮬 ", "슬리퍼", "slipper", "슬라이드", "slide", "booties"],
+    "뮬": ["mule", "뮬 "],
+    # 슬리퍼는 뒤축 없는 신발 전반이고 뮬은 그 한 모양이다(코덱스 244). 「down booties」(cayl)도 실내용 슬리퍼다.
+    "슬리퍼": ["슬리퍼", "slipper", "슬라이드", "slide", "booties"],
     # 가방
     "숄더백": ["숄더백", "shoulder bag", "숄더 백", "shoulder", "숄더", "사첼", "satchel", "새들", "saddle"],
     # 붙여 쓴 「totebag」 — doffjason 「Cowhide totebag」 · the-museum-visitor 「… PRINTED TOTEBAG」, 홑 「tote」 —
@@ -1070,8 +1085,10 @@ ACC_TYPE_VOCAB = {
     # 「DETACHABLE TOTE WINDBREAKER」 하나 빼고 전부 가방이고, 그것은 뒤 낱말(windbreaker)이 이긴다.
     "토트백": ["토트백", "tote bag", "토트 백", "shopper", "쇼퍼", "totebag", "tote"],
     "크로스백": ["크로스백", "cross bag", "crossbag", "crossbody", "크로스 백", "크로스", "sling bag", "슬링백",
-              "fanny pack", "hip pack", "waist pack", "wrap pack", "hipbelt", "hip belt", "힙색", "웨이스트백",
               "sacoche", "사코슈"],
+    # 허리에 두르는 가방 — 크로스백과 다른 품목(코덱스 244: hipbelt 는 크로스백이 아니다)
+    "웨이스트백": ["fanny pack", "hip pack", "waist pack", "wrap pack", "hipbelt", "hip belt", "힙색", "웨이스트백",
+              "웨이스트 백", "waist bag", "belt bag", "벨트백", "벨트 백", "힙백", "hip bag"],
     # 「daypack」·「roll top」 — cayl 「mari roll top / xpac」·espionage 「Utility Daypack」이
     # 가방 낱말이 없어 설명글의 치수 낱말 하나로 상의가 됐다(2026-09-26).
     "백팩": ["백팩", "backpack", "knapsack", "냅색", "짐색", "gym sack",
@@ -1096,8 +1113,9 @@ ACC_TYPE_VOCAB = {
     # the-museum-visitor 「PVC POCKET DRAWBAG」, 2026-10-01).
     "가방": ["가방", "bag", "백 ", "handbag", "drawbag"],
     # 모자
-    "볼캡": ["볼캡", "ball cap", "baseball cap", "야구모자", "캠프캡", "camp cap", "5패널",
-            "five panel", "6패널", "snapback", "스냅백", "work cap", "워크캡", "뉴스보이", "newsboy", "헌팅캡", "hunting cap",
+    # 캠프캡은 5패널 모자로 볼캡과 다른 품목이다(코덱스 244)
+    "캠프캡": ["캠프캡", "캠프 캡", "camp cap", "5패널", "5 패널", "5 panel", "5-panel", "five panel"],
+    "볼캡": ["볼캡", "ball cap", "baseball cap", "야구모자", "6패널", "snapback", "스냅백", "work cap", "워크캡", "뉴스보이", "newsboy", "헌팅캡", "hunting cap",
             "cap", "캡", "ballcap",
             # 「NM x NEW ERA 5950 NO RULES」 · 「… 940UNST …」 · 「… PILLBOX …」 — 뉴에라 협업은 이름에 모자 낱말 없이
             # 모델 번호만 적는다(nomanual 6벌, 2026-10-01). 협업 옷은 뒤에 옷 낱말이 와서 그쪽이 이긴다.
@@ -1150,14 +1168,16 @@ ACC_TYPE_VOCAB = {
             "핸드워머", "핸드 워머", "hand warmer", "handwarmer",
             # 「FINGERLESS」만 적은 장갑 — unaffected 「FINGERLESS GUNTE」 4벌이 설명글 「총장」 하나로 하의였다(2026-10-01)
             "fingerless"],
-    "헤어": ["헤어밴드", "hair band", "headband", "head band", "hairband", "헤어 밴드",
-            "헤어핀", "hairpin", "바레트", "barrette", "스크런치",
+    "헤어": ["헤어핀", "hairpin", "바레트", "barrette",
             "커치프", "kerchief", "헤드랩", "headwrap", "두건", "반다나", "bandana",
-            "scrunchie", "머리끈", "집게핀", "헤어 클립", "hair clip",
+            "머리끈", "집게핀", "헤어 클립", "hair clip",
             # 스크런치의 다른 표기 — 「SCRUNCH」(grove · misu-a-barbe · sinoon · ostkaka 32벌) · 「scrunchy」(till-i-die) ·
             # 「스크런처」(tibaeg). 「SCRUNCHED BIKINI」는 낱말 경계로 안 걸린다. 집게 — arto 「Claw Clip」 ·
             # margarin-fingers 「HAIR CLAW」(상의로 섰다) · lememe 「벨 헤어 집게」(2026-10-01).
-            "scrunch", "scrunchy", "스크런처", "claw clip", "hair claw", "헤어 집게", "헤어집게", "hair comb"],
+            "claw clip", "hair claw", "헤어 집게", "헤어집게", "hair comb"],
+    # 헤어에서 세운 세부 품목(코덱스 244 · 사람 2026-10-03)
+    "스크런치": ["스크런치", "scrunchie", "scrunch", "scrunchy", "스크런처", "곱창밴드", "곱창 밴드"],
+    "헤어밴드": ["헤어밴드", "hair band", "headband", "head band", "hairband", "헤어 밴드"],
     "아이웨어": ["선글라스", "sunglass", "안경", "eyewear", "glasses"],
     "우산": ["우산", "umbrella", "양산", "parasol"],
     # 한글 「타이」는 홀로 선 것만(「타이다이」·「타이츠」 안 걸림) — drawfit 「슬림 모던 타이」 · lmood 「실크 타이」 ·
@@ -1170,7 +1190,9 @@ ACC_TYPE_VOCAB = {
             # 「KEY LOOP」·「KEY TAG」(insane-garage · nomanual) · 「LUGGAGE TAG」(glowny) · 홀로 선 한글 「참」
             # (lememe 「펜 테슬 참」 · carlyn 「니트 플라워 참」이 니트였다), 2026-10-01.
             "carabiner", "key loop", "key tag", "keytag", "luggage tag", " 참 "],
-    "가방끈": ["스트랩", "strap", "핸들", "handle", "체인 스트랩"],
+    "가방끈": ["스트랩", "strap", "체인 스트랩"],
+    # 손으로 드는 손잡이는 어깨에 메는 끈과 다르다(코덱스 244)
+    "가방손잡이": ["핸들", "handle", "가방 손잡이", "bag handle"],
     # 영문 「griptok · grip tok · finger tok」(ader-error · loeuvre · 99-is · margarin-fingers), 「cable holder」(2026-10-01)
     "폰액세서리": ["그립톡", "grip ring", "그립링", "폰케이스", "phone case", "iphone case", "airpod", "에어팟", "case", "케이스",
               "griptok", "grip tok", "finger tok", "cable holder", "케이블 홀더"],
@@ -1202,7 +1224,8 @@ ACC_TYPE_VOCAB = {
 
 ACC_TO_CATEGORY = {
     "스니커즈": "shoes", "부츠": "shoes", "더비": "shoes", "로퍼": "shoes", "메리제인": "shoes",
-    "플랫": "shoes", "샌들": "shoes", "뮬": "shoes",
+    "플랫": "shoes", "샌들": "shoes", "뮬": "shoes", "슬리퍼": "shoes", "웨이스트백": "bags", "캠프캡": "headwear",
+    "스크런치": "accessories", "헤어밴드": "accessories", "가방손잡이": "accessories",
     "숄더백": "bags", "토트백": "bags", "크로스백": "bags", "백팩": "bags", "미니백": "bags",
     "호보백": "bags", "보스턴백": "bags", "클러치": "bags", "파우치": "bags", "에코백": "bags",
     "지갑": "bags", "카드지갑": "bags", "가방": "bags",
@@ -1227,7 +1250,8 @@ ACC_SUB_CODE = {
     "트루퍼햇": "trooper-hat", "선바이저": "sun-visor",
     "목걸이": "necklace", "팔찌": "bracelet", "반지": "ring", "귀걸이": "earring", "브로치": "brooch",
     "벨트": "belt", "양말": "socks", "스카프": "scarf-muffler", "목도리": "scarf-muffler",
-    "장갑": "gloves", "헤어": "hair-acc",
+    "장갑": "gloves", "헤어": "hair-acc", "스크런치": "hair-acc", "헤어밴드": "hair-acc",
+    "슬리퍼": "mules-slippers", "웨이스트백": "cross-bag", "캠프캡": "ball-cap",
     "아이웨어": "eyewear", "넥타이": "tie", "키링": "keyring-charm", "폰액세서리": "phone-acc",
     "레그웨어": "legwear",
     "러그": "rug-mat", "테이블웨어": "tableware", "캔들": "candle-incense", "문구": "stationery",
@@ -1301,6 +1325,8 @@ def match_head(text: str, vocab: dict) -> str:
 # 레더자켓으로 서 있었고, 그러면 아래 차례가 돌 기회가 없었다(2026-09-20 표본 검사).
 OUTER_SHAPE_ITEMS = {"재킷", "트러커", "워크자켓", "필드자켓", "코치자켓", "사파리자켓",
                      "퀼팅자켓", "블루종", "바시티", "해링턴",
+                     # 2026-10-03 세운 모양 품목 — 「스웨이드 셔츠 자켓」 7벌 · 레더 6 · 트위드 5가 오버셔츠로 갔다. 소재가 앞선다.
+                     "오버셔츠", "트랙재킷",
                      "레더자켓", "스웨이드자켓", "트위드자켓"}
 # 차례가 중요하다. 스웨이드·트위드는 매장이 **대놓고 적은 소재**고, 「라이더」는 소재가
 # 레더라고 우리가 미루어 짐작하는 것이다. 짐작보다 적힌 쪽이 먼저다 —

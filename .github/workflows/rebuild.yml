@@ -1,0 +1,64 @@
+# 수집 없이 생성물만 다시 만든다 — products_full.csv(카탈로그) → 태그 → 사이즈 → 스타일.
+# 분류기 · 어휘를 고친 뒤 주간 갱신(전 매장 스캔 5시간)을 기다리지 않고 앱에 싣기 위해 쓴다(2026-10-03 품목 세분).
+# 단계는 weekly.yml 수집(collect) 잡의 「CSV 다시 만들기」부터 커밋까지와 같고, 스캔 · 신상 OCR 은 없다.
+name: rebuild
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: data-generated
+  cancel-in-progress: false
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    defaults:
+      run:
+        working-directory: work
+    steps:
+      - uses: actions/checkout@v4
+      - name: 데이터 저장소(비공개) 받기
+        uses: ./.github/actions/data-repo
+        with: {token: "${{ secrets.DATA_TOKEN }}"}
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: pip install -q requests beautifulsoup4 lxml pillow
+      - name: CSV 다시 만들기
+        run: python scripts/weekly_update.py --csv-only
+      - name: 태그 재생성
+        run: |
+          python scripts/tag_items.py > /tmp/tag.log
+          head -20 /tmp/tag.log
+      - name: 사이즈 재생성
+        run: |
+          python scripts/size_from_ocr.py > /tmp/size.log
+          tail -3 /tmp/size.log
+      - name: 스타일 묶기
+        continue-on-error: true
+        timeout-minutes: 20
+        run: python scripts/build_styles.py
+      - name: commit & push (rebase 후, 3회 재시도)
+        shell: bash
+        run: |
+          git add data/products_full.csv data/product_sizes.json data/product_tags_full.json
+          for f in data/styles.csv data/styles_stats.json; do if [ -f "$f" ]; then git add "$f"; fi; done
+          git diff --cached --quiet && { echo "변화 없음"; exit 0; }
+          git commit -m "생성물 다시 만들기 — 카탈로그 · 태그 · 사이즈 · 스타일 (Actions)"
+          for i in 1 2 3; do
+            git pull --rebase --autostash origin "crawl/cafe24-full-catalog" && git push && exit 0
+            if [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ]; then
+              for f in $(git diff --name-only --diff-filter=U \
+                         | grep -E '^data/(products_full\.csv|product_sizes\.json|product_tags_full\.json|styles\.csv|styles_stats\.json)$' || true); do
+                # rebase 중에는 --theirs 가 이 판의 커밋이다 — 이 워크플로는 다시 만든 쪽을 지키려고 도는 것이라 이쪽을 남긴다
+                git checkout --theirs -- "$f" && git add "$f"
+              done
+              if [ -z "$(git diff --name-only --diff-filter=U)" ]; then
+                git -c core.editor=true rebase --continue && git push && exit 0
+              fi
+              git rebase --abort 2>/dev/null || true
+            fi
+            echo "푸시 실패, 재시도 $i"; sleep 10
+          done
+          exit 1

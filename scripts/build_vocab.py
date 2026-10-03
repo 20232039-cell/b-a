@@ -28,7 +28,7 @@ import crawl_cafe24 as C  # noqa: E402
 import product_desc as P  # noqa: E402
 import tag_items as T  # noqa: E402
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 # ─── 품목 계층 ─────────────────────────────────────────────────────────────────
 # 갈래 → 큰 분류 → 세부(카탈로그 subtype 값 그대로).
@@ -38,13 +38,14 @@ VERSION = "1.0.0"
 _HIER = [
     ("아우터", "코트", "코트", ["싱글코트", "더블코트", "발마칸", "트렌치", "맥코트", "피코트", "더플코트"]),
     ("아우터", "재킷", "재킷", ["블레이저", "트러커", "MA-1/봄버", "블루종", "레더자켓", "스웨이드자켓", "트위드자켓",
-                          "워크자켓", "필드자켓", "해링턴", "바시티", "코치자켓", "퀼팅자켓", "사파리자켓"]),
+                          "워크자켓", "필드자켓", "해링턴", "바시티", "코치자켓", "퀼팅자켓", "사파리자켓",
+                          "트랙재킷", "오버셔츠"]),
     ("아우터", "점퍼·패딩", "점퍼", ["패딩", "파카", "바람막이", "플리스"]),
     ("상의", "니트", "니트", ["가디건", "케이블니트", "아가일니트"]),
     ("상의", "셔츠", "셔츠", ["웨스턴셔츠"]),
     ("상의", "티셔츠", "티셔츠", ["반팔", "롱슬리브", "링거티", "저지", "피케", "라글란"]),
     ("상의", "맨투맨·후드", None, ["맨투맨", "후드", "집업", "후드집업"]),
-    ("상의", "탑", "탑", ["바디수트"]),
+    ("상의", "탑", "탑", ["뷔스티에", "바디수트"]),
     ("상의", "베스트", "베스트", []),
     ("상의", "이너·홈·스윔", None, ["수영복", "파자마"]),
     ("하의", "팬츠", "팬츠", ["숏팬츠", "스웨트팬츠", "치노", "카고팬츠", "트랙팬츠", "카펜터팬츠", "파티그팬츠",
@@ -56,11 +57,14 @@ _HIER = [
     ("기타 의류", "슈트", None, []),
 ]
 # 코파일럿 GROUPS 에 없던 것(이 사전이 더한 것)
-_NOT_IN_COPILOT = {"바디수트", "이너·홈·스윔", "수영복", "파자마", "이너·스윔 하의", "수영복하의", "언더웨어", "기타 의류", "슈트"}
+_NOT_IN_COPILOT = {"바디수트", "뷔스티에", "트랙재킷", "오버셔츠", "이너·홈·스윔", "수영복", "파자마", "이너·스윔 하의", "수영복하의", "언더웨어", "기타 의류", "슈트"}
 _COPILOT_CATEGORY = {"코트": "Outerwear", "재킷": "Outerwear", "점퍼·패딩": "Outerwear", "니트": "Knitwear",
                      "셔츠": "Shirts", "티셔츠": "Tops", "맨투맨·후드": "Tops", "탑": "Tops", "베스트": "Tops",
                      "이너·홈·스윔": "Tops", "팬츠": "Pants", "데님": "Denim", "스커트": "Skirts",
                      "이너·스윔 하의": "Pants", "원피스": "Dresses", "슈트": "Suiting"}
+# 함께 보일 갈래(also) — 2026-10-03 갈래 결정(코파일럿 세션 추천 · 사람 전달). 대표 갈래는 하나(비교군이 겹치지 않게),
+# 탐색 화면은 also 갈래에서도 찾히게. 원피스는 독립 갈래(크롤러 group 칸은 아직 상의 — 앱 · 크롤러 반영은 따로).
+_ALSO = {"가디건": ["아우터"], "베스트": ["아우터"], "집업": ["아우터"], "후드집업": ["아우터"], "오버셔츠": ["상의"]}
 _SECTION_ID = {"상의": "tops", "하의": "bottoms", "아우터": "outer", "원피스": "dress", "기타 의류": "other-apparel",
                "가방": "bags", "신발": "shoes", "모자": "headwear", "액세서리": "accessories", "주얼리": "jewelry"}
 
@@ -70,8 +74,8 @@ _WEB_ALIAS = {"후디": "후드", "슬리브리스": "탑", "래글런": "라글
               "데님팬츠": "데님", "쇼츠": "숏팬츠", "데님쇼츠": "숏팬츠", "미디스커트": "스커트", "미니스커트": "스커트",
               "치노팬츠": "치노", "조거": "조거팬츠", "슬랙스": "팬츠", "파라슈트": "파라슈트팬츠",
               "레더/라이더스": "레더자켓", "플리스/뽀글이": "플리스", "다운재킷": "패딩", "나일론/코치재킷": "코치자켓",
-              "트레이닝재킷": "재킷", "트렌치코트": "트렌치", "아노락": "바람막이", "바시티/스타디움": "바시티",
-              "오버셔츠": "셔츠", "아우터셔츠": "셔츠"}
+              "트레이닝재킷": "트랙재킷", "트렌치코트": "트렌치", "아노락": "바람막이", "바시티/스타디움": "바시티",
+              "오버셔츠": "오버셔츠", "아우터셔츠": "오버셔츠"}
 # 앱 TABLE 의 값(tops/bottoms/outer/null) — 어긋남 표를 만들 때 쓴다. layer-web master 의 garmentCategory.ts 를 옮겨 적었다.
 _WEB_TABLE = {
     **{k: "tops" for k in "티셔츠 셔츠 니트 슬리브리스 후디 롱슬리브 저지 반팔 탑 래글런 라글란 링거티 케이블니트 아가일니트 스웨터 블라우스 폴로 맨투맨 상의 웨스턴셔츠".split()},
@@ -125,6 +129,7 @@ def build_items(counts: Counter, cat_of: dict[str, Counter]) -> tuple[list[dict]
                 "crawler_category_code": C.ITEM_TO_CATEGORY.get(s),
                 "catalog_rows": counts.get(s, 0),
                 "copilot": s not in _NOT_IN_COPILOT,
+                "also_sections": _ALSO.get(s, []),
             })
     # 잡화 — 크롤러 ACC_TYPE_VOCAB · 신발 품목. 갈래 = 큰 분류 하나.
     acc_sec = {"Bags": "가방", "Shoes": "신발", "Headwear": "모자", "Accessories": "액세서리", "Jewelry": "주얼리"}
@@ -136,6 +141,14 @@ def build_items(counts: Counter, cat_of: dict[str, Counter]) -> tuple[list[dict]
     for s in ("스니커즈", "부츠", "샌들", "구두"):
         if s not in acc.get("신발", []):
             acc.setdefault("신발", []).append(s)
+    # 잡화 세부의 동의어 — 신발 「구두」는 크롤러 옷 어휘(ITEM_TYPE_VOCAB)에 loafer · derby · maryjane 을 품고 있는데,
+    # 이것들은 잡화 어휘의 로퍼 · 더비 · 메리제인이 먼저 잡는다(구두는 그 뒤의 받침). 사전에서는 먼저 잡는 쪽에만 둔다.
+    acc_claimed = {w.strip().lower() for vs in C.ACC_TYPE_VOCAB.values() for w in vs}
+
+    def acc_syn(s):
+        if s in C.ACC_TYPE_VOCAB:
+            return _syn(C.ACC_TYPE_VOCAB[s])
+        return _syn(w for w in vocab.get(s, []) if w.strip().lower() not in acc_claimed)
     for sec in ("가방", "신발", "모자", "액세서리", "주얼리"):
         sid = f"section:{_SECTION_ID[sec]}"
         items.append({"id": sid, "level": "section", "name": sec, "parent": None, "accessory": True, "synonyms": []})
@@ -147,11 +160,16 @@ def build_items(counts: Counter, cat_of: dict[str, Counter]) -> tuple[list[dict]
                 continue
             seen.add(s)
             items.append({"id": f"subtype:{s}", "level": "subtype", "name": s, "parent": cid, "accessory": True,
-                          "synonyms": _syn(C.ACC_TYPE_VOCAB.get(s, []) or vocab.get(s, [])),
+                          "synonyms": acc_syn(s),
                           "sub_code": C.ACC_SUB_CODE.get(s), "catalog_rows": counts.get(s, 0)})
     # 카탈로그에 실제로 나온 subtype 가운데 표에 없는 것 — 사람이 manual_items.csv 로 직접 적은 값들이다.
     # 그 행들의 category 로 자리를 찾아 넣고 표시해 둔다(빠뜨린 게 있으면 바로 보이게).
     missing = sorted(s for s in counts if s and s not in seen)
+    # 사람이 manual_items 에 적은 이름이 다른 세부의 동의어면(「캡」 → 볼캡) 세부를 따로 세우지 않고 그 동의어로 둔다
+    syn_of = {w.strip().lower(): i["name"] for i in items if i["level"] == "subtype" for w in i["synonyms"]}
+    manual_alias = {s: syn_of[s.lower()] for s in missing if s.lower() in syn_of}
+    seen |= set(manual_alias)
+    missing = [s for s in missing if s not in manual_alias]
     for s in missing:
         sec = acc_sec.get(cat_of[s].most_common(1)[0][0]) if cat_of.get(s) else None
         if not sec:
@@ -179,10 +197,14 @@ def build_items(counts: Counter, cat_of: dict[str, Counter]) -> tuple[list[dict]
         if mine == "원피스":
             mine_en = "dress"
         if web != mine_en:
-            conflicts.append({"name": name, "subtype": canon, "vocab_section": mine, "web_table": web,
+            also_en = [_SEC_EN.get(a) for a in _ALSO.get(canon, [])]
+            conflicts.append({"name": name, "subtype": canon, "vocab_section": mine,
+                              "vocab_also": _ALSO.get(canon, []), "web_table": web,
                               "web_also_tops": name in _WEB_ALSO_TOPS,
-                              "crawler_group": C.GROUP_OF.get(_crawler_label(canon), "")})
-    return items, [{"missing_subtypes_in_catalog": missing}] + conflicts
+                              "crawler_group": C.GROUP_OF.get(_crawler_label(canon), ""),
+                              "resolution": ("앱은 대표 갈래를 사전대로 바꾸고 지금 갈래를 also 로 읽는다" if web in also_en
+                                             else "앱 · 크롤러 group 을 사전 갈래로 바꾼다")})
+    return items, [{"missing_subtypes_in_catalog": missing, "manual_alias": manual_alias}] + conflicts
 
 
 def _crawler_label(s: str) -> str:
@@ -287,7 +309,6 @@ _HW_CANDIDATES = [
     ("후크", 113, None, ["hook", "훅"]), ("D링", 80, None, ["d-ring", "d ring", "디링"]),
     ("가죽패치", 67, None, ["가죽 패치", "leather patch"]), ("황동", 63, None, ["brass"]),
     ("토글", 52, None, ["toggle", "떡볶이 단추"]), ("와펜", 44, None, ["wappen"]),
-    ("니켈프리", 28, None, ["nickel free", "니켈 프리"]),
 ]
 
 
