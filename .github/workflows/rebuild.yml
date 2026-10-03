@@ -13,7 +13,7 @@ concurrency:
 jobs:
   rebuild:
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: 330
     defaults:
       run:
         working-directory: work
