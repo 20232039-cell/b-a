@@ -27,8 +27,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import crawl_cafe24 as C  # noqa: E402
 import product_desc as P  # noqa: E402
 import tag_items as T  # noqa: E402
+import grade_origin as GO  # noqa: E402
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 # ─── 품목 계층 ─────────────────────────────────────────────────────────────────
 # 갈래 → 큰 분류 → 세부(카탈로그 subtype 값 그대로).
@@ -392,6 +393,7 @@ def main() -> None:
             "part": "product_desc._MIX_PART_CANON · _MIX_MC_NAME",
             "hardware": "data/vocab_aliases.json hardware · _groups.hardware (+ 후보)",
             "color": "crawl_cafe24.COLOR_VOCAB(세밀) · vocab_aliases _color_rollup(거친) · _groups.color(무리)",
+            "grade · fabric_origin": "scripts/grade_origin.py(GRADES · MILLS · COUNTRY_FABRIC)",
         },
         "item": {"levels": ["section", "category", "subtype"], "entries": items,
                  "lookup": {**{s: i["name"] for i in items if i["level"] == "subtype" for s in i["synonyms"]},
@@ -404,6 +406,12 @@ def main() -> None:
         "color": {"entries": colors, "rollup": color_rollup,
                   "groups": [{"name": g, "members": ms} for g, ms in ((vocab.get("_groups") or {}).get("color") or {}).items()]},
         "photo_type": {"entries": PHOTO_TYPES},
+        # 소재 등급 · 원단 출처(v1.2, 코파일럿 세션 부탁 2026-10-03) — 어휘와 규칙은 scripts/grade_origin.py 한 곳에.
+        # 상품마다의 값은 product_tags_full.json 의 "grade"([{k: 축, v: 값, of: 상위 섬유}]) · "origin"([{mill, country}]).
+        "grade": {"axes": {"울": "울 등급", "캐시미어": "캐시미어 등급", "원피": "가죽을 낸 짐승", "가공": "가죽 가공"},
+                  "entries": GO.vocab_entries()["grade"], "faux_guard": GO.vocab_entries()["faux_guard"],
+                  "rules": GO.vocab_entries()["rules"]},
+        "fabric_origin": {"entries": GO.vocab_entries()["fabric_origin"]},
     }
     Path(a.out).parent.mkdir(parents=True, exist_ok=True)
     Path(a.out).write_text(json.dumps(out, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")

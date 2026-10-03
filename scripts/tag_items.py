@@ -27,6 +27,7 @@ layer-web scripts/build-discover-products.mjs 가 읽는 product_tags_seed.json 
 """
 from __future__ import annotations
 
+import grade_origin  # noqa: E402  소재 등급 · 원단 출처
 import argparse
 import csv
 import json
@@ -1838,7 +1839,7 @@ def main():
 
     out: dict[str, dict] = {}
     q_count, src_count = Counter(), Counter()
-    mat_count = 0
+    mat_count = grade_count = origin_count = 0
     ax_count, cat_count = Counter(), Counter()
     manual_mat = load_manual_mat()
     if manual_mat:
@@ -1858,6 +1859,16 @@ def main():
             # 태그 파일) 설명글에서 읽는다 — 새 판이 버린 것이 되살아나지 않게.
             out[r["source_url"]]["mat"] = mats.get(r["source_url"]) or []
             mat_count += bool(mats.get(r["source_url"]))
+            # 소재 등급 · 원단 출처 — grade_origin 주석. 매장 되풀이 줄을 걷은 글 + 상품명에서 뽑고, 상품 증거(혼용률 · 소재 태그)와
+            # 어긋나는 것은 버린다. 혼용률의 섬유 함량(mat)은 그대로 — 등급은 별도 칸이다(코파일럿 세션 부탁 2026-10-03).
+            gtext = without_lines(body, store_lines) + "\n" + (r.get("name") or "")
+            gr = grade_origin.with_evidence(grade_origin.grades(gtext), out[r["source_url"]]["mat"],
+                                            (tags.get("material") if isinstance(tags, dict) else None) or [], r.get("name") or "")
+            og = grade_origin.origins(gtext)
+            out[r["source_url"]]["grade"] = gr
+            out[r["source_url"]]["origin"] = og
+            grade_count += bool(gr)
+            origin_count += bool(og)
             q_count[quality] += 1
             for s in sources:
                 src_count[s] += 1
@@ -1886,7 +1897,7 @@ def main():
     print(f"상품 {len(out)} (이번에 돌린 것 {n}) → {args.out}")
     print("품질:", dict(q_count))
     print("본문 출처:", dict(src_count))
-    print(f"혼용률(mat) {mat_count} ({mat_count / max(n, 1):5.1%})")
+    print(f"혼용률(mat) {mat_count} ({mat_count / max(n, 1):5.1%}) · 소재 등급(grade) {grade_count} · 원단 출처(origin) {origin_count}")
     print("축 커버리지:")
     for ax in AXES:
         print(f"  {ax:15s} {ax_count[ax]:6d} ({ax_count[ax] / n:5.1%})")
