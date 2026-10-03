@@ -1087,7 +1087,8 @@ ACC_TYPE_VOCAB = {
     "크로스백": ["크로스백", "cross bag", "crossbag", "crossbody", "크로스 백", "크로스", "sling bag", "슬링백",
               "sacoche", "사코슈"],
     # 허리에 두르는 가방 — 크로스백과 다른 품목(코덱스 244: hipbelt 는 크로스백이 아니다)
-    "웨이스트백": ["fanny pack", "hip pack", "waist pack", "wrap pack", "hipbelt", "hip belt", "힙색", "웨이스트백",
+    # 「hipbelt」 홀로는 웨이스트백이 아니다 — cayl 「hipbelt (태백2, 백두2 힙벨트)」는 배낭의 허리 지지대다(코덱스 285). 「hip belt bag」만 받는다.
+    "웨이스트백": ["fanny pack", "hip pack", "waist pack", "wrap pack", "hip belt bag", "hipbelt bag", "힙색", "웨이스트백",
               "웨이스트 백", "waist bag", "belt bag", "벨트백", "벨트 백", "힙백", "hip bag"],
     # 「daypack」·「roll top」 — cayl 「mari roll top / xpac」·espionage 「Utility Daypack」이
     # 가방 낱말이 없어 설명글의 치수 낱말 하나로 상의가 됐다(2026-09-26).
