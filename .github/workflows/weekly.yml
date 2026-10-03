@@ -109,7 +109,11 @@ jobs:
           python-version: "3.11"
       - run: pip install -q requests beautifulsoup4 lxml
       - name: 묶음 ${{ matrix.bucket }} 목록 스캔 (상품 ${{ matrix.load }})
+        # 로그는 이 판에 **새로 붙은 줄만** 넘긴다. 예전엔 파일 통째로 넘겨, 묶음 20개가 저마다
+        # 옛 로그 전부를 collect 에 다시 붙였다 — 판마다 20배로 불어 2026-10-03 에 402MB 가 되어
+        # 푸시가 GitHub 100MB 상한에 막혔다(고유한 줄은 478개뿐이었다).
         run: |
+          (wc -l < data/crawl/_weekly_log.jsonl 2>/dev/null || echo 0) > _log_base
           python scripts/weekly_update.py --brands ${{ matrix.brands }} --workers 8 --no-csv
       # 스캔이 시간 상한에 걸려 취소되면 이 단계와 업로드가 건너뛰어져, **이미 끝난 매장**의
       # 갱신까지 러너와 함께 버려진다(2026-09-13 에 OCR 조각이 그래서 5시간을 읽고 0을 남겼다).
@@ -123,7 +127,10 @@ jobs:
           for b in ${{ matrix.brands }}; do
             cp "data/crawl/$b.jsonl" _parts/ 2>/dev/null || echo "  $b 파일 없음"
           done
-          cp data/crawl/_weekly_log.jsonl "_parts/_weekly_log.b${{ matrix.bucket }}.log" 2>/dev/null || true
+          if [ -f data/crawl/_weekly_log.jsonl ]; then
+            tail -n +$(( $(cat _log_base 2>/dev/null || echo 0) + 1 )) data/crawl/_weekly_log.jsonl \
+              > "_parts/_weekly_log.b${{ matrix.bucket }}.log"
+          fi
           ls _parts | wc -l
       - uses: actions/upload-artifact@v4
         if: always()
@@ -170,6 +177,11 @@ jobs:
           n=0
           for f in _parts/*.jsonl; do cp "$f" data/crawl/ ; n=$((n+1)); done
           for f in _parts/_weekly_log.b*.log; do cat "$f" >> data/crawl/_weekly_log.jsonl ; done
+          # 같은 줄이 겹쳐 붙어도 한 번만 남긴다(순서는 그대로).
+          if [ -f data/crawl/_weekly_log.jsonl ]; then
+            awk '!seen[$0]++' data/crawl/_weekly_log.jsonl > _log.tmp && mv _log.tmp data/crawl/_weekly_log.jsonl
+            wc -lc data/crawl/_weekly_log.jsonl
+          fi
           echo "브랜드 파일 $n개 올림"
       - name: CSV 다시 만들기
         run: python scripts/weekly_update.py --csv-only
