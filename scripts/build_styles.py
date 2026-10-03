@@ -44,7 +44,8 @@ MULTI = re.compile(r"(?i)^\s*\d{1,2}\s*(?:colou?rs?|컬러|색상?)\s*$")
 # 끝 조각을 가르는 구분자. 오른쪽 것부터 본다 — 「S/S 슬림핏 쿨 슬랙스 - 블랙」(legacy)은 맨 왼쪽 「/」가 시즌 표기라
 # 왼쪽부터 자르면 이름이 「S」만 남는다. 「NAME_BLACK_UDPA6B230BK」는 맨 오른쪽 조각(품번)이 색이 아니니 하나 왼쪽으로 간다.
 SEP = re.compile(r"\s*(?:_|\s/\s|/|\s-\s|\s–\s|\s—\s)\s*")
-TAIL_PAREN = re.compile(r"^(.*?\S)\s*[(\[]([^()\[\]]{1,40})[)\]]\s*$")
+# 괄호 뒤에 품번 꼬리가 붙기도 한다 — and-you 「홀터넥 린넨 맥시 원피스 (Black)_2GMUOP09」
+TAIL_PAREN = re.compile(r"^(.*?\S)\s*[(\[]([^()\[\]]{1,40})[)\]]\s*(?:[_-]\s*[A-Za-z0-9-]{2,20})?\s*$")
 
 
 @lru_cache(maxsize=None)
@@ -76,7 +77,10 @@ def split_color(name: str) -> tuple[str, str, str]:
     m = TAIL_PAREN.match(n)
     if m and _is_color(m.group(2)):
         return m.group(1).strip(), m.group(2).strip(), _is_color(m.group(2))
-    for sm in reversed(list(SEP.finditer(n))):
+    # 왼쪽부터 본다 — 꼬리 조각이 색으로 시작하고 낱말 넷 이하인 **가장 긴** 꼬리를 뗀다. 오른쪽부터 보면 years-ago 「KUVAIKA BASQUE
+    # TEE V2 - SOFT VIOLET/NAVY」가 「/」에서 잘려 「… - SOFT VIOLET」이 이름으로 남고, 색마다 이름이 달라 다섯 색이 다 홀로 섰다
+    # (코덱스 스타일 검증 245~264, 2026-10-03). 「S/S 슬림핏 쿨 슬랙스 - 블랙」의 맨 왼쪽 「/」 뒤는 색으로 시작하지 않아 지나간다.
+    for sm in SEP.finditer(n):
         base, seg = n[:sm.start()].strip(), n[sm.end():].strip()
         if not base or not seg or len(seg) > 40:
             continue
