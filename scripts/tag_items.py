@@ -1760,7 +1760,7 @@ def blend_of_brand(slug: str, items: list[dict], why: dict | None = None) -> dic
         checked = agree = 0
         for cs in cands.values():
             shop = [c for c in cs if (c["src"], c["ctx"]) == key]
-            other = [c for c in cs if c["src"] != key[0]]
+            other = [c for c in cs if (c["src"], c["ctx"]) != key and (c["src"], c["ctx"]) not in frequent]
             if not shop or not other:
                 continue
             checked += 1
