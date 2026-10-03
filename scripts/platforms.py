@@ -142,7 +142,10 @@ NEW_1001: set[str] = {"rolarola", "samo-ondoh", "sansan-gear", "savage", "sieg",
 # rolarola(실측이 그림뿐 — OCR 중) · we11done 은 코덱스 019 뒤에. travel 은 목록에서 뺐다(위 SIXSHOP 주석).
 # robots 가 * 를 막은 sieg · studio-tomboy · system(국내 한섬) · tngt 와 국외 403 인 imweb 넷은 보류 — 앞의 넷은 씨앗에서도 뺐다.
 RELEASED_1002: set[str] = {"thisisneverthat", "thug-club", "sansan-gear"}
-NEW_HOLD = (NEW_HOLD | NEW_1001) - RELEASED_1002   # thisisneverthat 은 PAGES 라 위 set(PAGES) 에서도 빼야 한다
+# 2026-10-03 사람이 「이제 두곳은 보류해제」 — rolarola · we11done. 코덱스 그림 비전으로 실측(rolarola 두 번 읽어 어긋난 상품은 뺐다) ·
+# 혼용률을 채웠고, 이번 주간 판에서 두 곳 모두 목록이 다 걷혔다(가드레일 통과).
+RELEASED_1003: set[str] = {"rolarola", "we11done"}
+NEW_HOLD = (NEW_HOLD | NEW_1001) - RELEASED_1002 - RELEASED_1003   # thisisneverthat 은 PAGES 라 위 set(PAGES) 에서도 빼야 한다
 # 「제외」 판정 가운데 이미 걷혀 있던 곳 — rocket-x-lunch(10-01) · bourie(9/27 판정인데 빠져 있었다, 950벌 전부 품절). 앱에만 안 내보낸다.
 APP_HOLD: set[str] = {"numbering", "kijun", "crump", "jeanbach", "maison-marais", "tripleroot",
                       "rocket-x-lunch", "bourie"} | NEW_HOLD

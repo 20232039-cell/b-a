@@ -34,7 +34,7 @@ on:
         required: false
         default: ""
       select:
-        description: "short(설명 짧은 것) | no-size(사이즈 표 없는 옷) | gaps(사이즈·소재·색·디테일 중 하나라도 빈 옷) | ocr(그림에서 읽은 옷 다시) | bad-size(사이즈가 커지는데 값이 작아지는 표만) | capped(옛 6,000자 상한에 잘린 기록 다시) | thin-table(표 칸이 사이즈 수보다 적은 옷) | all"
+        description: "short(설명 짧은 것) | no-size(사이즈 표 없는 옷) | gaps(사이즈·소재·색·디테일 중 하나라도 빈 옷) | ocr(그림에서 읽은 옷 다시) | bad-size(사이즈가 커지는데 값이 작아지는 표만) | capped(옛 6,000자 상한에 잘린 기록 다시) | thin-table(표 칸이 사이즈 수보다 적은 옷) | no-mat(혼용률 % 가 빈 옷) | all"
         required: false
         default: "short"
       redo:
@@ -102,7 +102,7 @@ jobs:
           # 그때 수율은 99%(100벌 읽어 99벌에서 글)라 포기할 자리가 아니다. 설명글을 노리는
           # 판만 상한을 올려 조각을 잘게 낸다.
           MAXSH=12
-          if [ "$SEL" = "no-detail" ]; then MAXSH=40; fi
+          if [ "$SEL" = "no-detail" ] || [ "$SEL" = "no-mat" ]; then MAXSH=40; fi
           python3 scripts/ocr_detail_images.py --plan --per-shard "$PER" --max-shards "$MAXSH" \
             --max-images "$MAXI" --select "$SEL" --procs 4 "${ARGS[@]}"
 

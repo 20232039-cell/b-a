@@ -1150,7 +1150,7 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
     done: set[int] = set()
     if main.exists():
         done = {json.loads(l)["product_no"] for l in main.read_text(encoding="utf-8").splitlines() if l.strip()}
-    cats = load_categories() if select in ("no-size", "ocr", "gaps", "bad-size", "no-detail") else {}
+    cats = load_categories() if select in ("no-size", "ocr", "gaps", "bad-size", "no-detail", "no-mat") else {}
     # select=ocr: 사이즈를 「그림에서」 읽어 둔 옷을 다시 읽는다. 머리줄을 낱말 단위로
     # 읽게 바꾼 뒤 kirsh 10440 은 라벨이 한 칸씩 밀려 있던 것이 바로잡혔다(밑위 49cm·
     # 허벅지 25.5cm → 밑위 25.5·허벅지 33.8, 2026-09-05). 빠진 것뿐 아니라 틀린 것도 있다.
@@ -1231,6 +1231,17 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
             if (u not in have_size or not t.get("material") or not t.get("color")
                     or not (t.get("design_element") or t.get("construction") or t.get("hardware"))):
                 gap_urls.add(u)
+
+    # select=no-mat: **혼용률(%)이 빈 옷.** gaps 는 소재 「이름」만 보므로(판매중 의류 97%가 이름은 있다) 혼용률이 빈
+    # 2만 벌을 못 부른다. 태그 파일의 mat 이 빈 목록인 상품을 고른다(열쇠가 없는 옛 판은 건너뛴다). 이미 그림을 다 읽은
+    # 상품은 다시 안 읽고, 앞 몇 장만 읽은 상품은 --max-images 까지 더 읽는다 — 상세 그림 맨 아래 「FABRIC」 칸을 노린다.
+    # (2026-10-03 검증 표본 100벌: 코덱스가 「표기 없음」이라던 6벌 중 4벌이 우리 그림 글에 「FABRIC COTTON 100%」로 있었다.)
+    nomat_urls: set[str] = set()
+    if select == "no-mat":
+        tp4 = CRAWL_DIR.parent / "product_tags_full.json"
+        for u, p in (json.loads(tp4.read_text(encoding="utf-8")) if tp4.exists() else {}).items():
+            if "mat" in (p or {}) and not p["mat"]:
+                nomat_urls.add(u)
 
     # select=no-detail: **상품 설명(디테일)이 없는 옷.** 사이즈·소재는 이미 있어도 상관없다 —
     # 우리가 찾는 것은 「이 옷이 어떤 옷인가」를 말하는 문장이다. detail_from_ocr 이 읽어 둔
@@ -1385,6 +1396,9 @@ def process_brand(slug: str, only_short: bool, max_images: int, delay: float, lo
                 continue
         elif select == "thin-table":
             if d.get("source_url") not in thin_urls:
+                continue
+        elif select == "no-mat":
+            if d.get("source_url") not in nomat_urls or cats.get((slug, int(no)), "") not in GARMENTS:
                 continue
         elif select == "no-detail":
             if no not in nodetail_nos or cats.get((slug, int(no)), "") not in GARMENTS:
@@ -1609,7 +1623,7 @@ def main():
     ap.add_argument("--max-jobs", type=int, default=60,
                     help="--plan: matrix 잡 수 상한 (GitHub 은 256잡을 넘기면 잡을 아예 안 만든다)")
     ap.add_argument("--allow-empty", action="store_true", help="--plan: 대상이 0이어도 죽지 않는다")
-    ap.add_argument("--select", default="short", choices=["short", "all", "no-size", "ocr", "gaps", "bad-size", "capped", "thin-table", "no-detail"], help="short=설명 짧은 것(기본) · all=전부 · no-size=사이즈 표 없는 옷 · ocr=사이즈를 그림에서 읽은 옷 다시 · gaps=사이즈·소재·색·디테일 중 하나라도 빈 옷 · bad-size=사이즈가 커지는데 값이 작아지는 표만 다시 · capped=옛 6,000자 상한에 잘린 기록만 다시 · thin-table=표 칸 수가 매장 사이즈 수보다 적은 옷 · no-detail=상품 설명이 없는 옷")
+    ap.add_argument("--select", default="short", choices=["short", "all", "no-size", "ocr", "gaps", "bad-size", "capped", "thin-table", "no-detail", "no-mat"], help="short=설명 짧은 것(기본) · all=전부 · no-size=사이즈 표 없는 옷 · ocr=사이즈를 그림에서 읽은 옷 다시 · gaps=사이즈·소재·색·디테일 중 하나라도 빈 옷 · bad-size=사이즈가 커지는데 값이 작아지는 표만 다시 · capped=옛 6,000자 상한에 잘린 기록만 다시 · thin-table=표 칸 수가 매장 사이즈 수보다 적은 옷 · no-detail=상품 설명이 없는 옷 · no-mat=혼용률(%)이 빈 옷")
     args = ap.parse_args()
     OCR_DIR.mkdir(parents=True, exist_ok=True)
     k, n = (int(x) for x in args.shard.split("/"))
