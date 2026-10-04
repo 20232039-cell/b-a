@@ -1666,6 +1666,8 @@ _MAT_SYN = {"비스코스": "레이온", "폴리아미드": "나일론", "엘라
             "메리노 울": "울", "메리노울": "울", "램스울": "울", "라이오셀": "텐셀", "리오셀": "텐셀", "라이크라": "스판덱스",
             "캐시 나일론": "나일론", "캐시 폴리에스터": "폴리에스터", "재생 울": "울", "재생 모헤어": "모헤어", "야크 울": "야크"}
 
+MANUAL_MAT_RAW: dict[str, list[str]] = {}   # 링크 → 옮겨 적힌 그대로(「겉감 메리노 울 70%」) — mat_raw
+
 
 def load_manual_mat() -> dict[str, list]:
     """data/manual_mat.csv — 한 줄이 한 섬유: 브랜드,링크,부위,섬유,퍼센트,왜.
@@ -1689,6 +1691,7 @@ def load_manual_mat() -> dict[str, list]:
         part = re.sub(r"^(겉감|안감|배색|충전재|시보리|포켓감|부분)\s*(\d)$", r"\1 \2", part)   # 「겉감1」 → 「겉감 1」(코덱스 표기)
         # 설명글 해석(product_desc)과 같은 이름으로 — 반이 안 되는 폴리우레탄은 늘어나는 실(스판덱스)이고, 비스코스 ·
         # 폴리아미드 · 엘라스테인은 우리 표준 이름이 따로 있다(코덱스가 원문 그대로 옮긴 belier 3801 「폴리우레탄 16」).
+        MANUAL_MAT_RAW.setdefault(u, []).append(f"{part} {f} {int(v) if v == int(v) else v}%".strip())
         f = _MAT_SYN.get(f, f)
         if f == "폴리우레탄" and v < 50:
             f = "스판덱스"
@@ -1701,8 +1704,9 @@ def load_manual_mat() -> dict[str, list]:
     return out
 
 
-def blend_of_brand(slug: str, items: list[dict], why: dict | None = None) -> dict[str, list]:
-    """source_url → 혼용률(mat). 못 읽었거나 버린 상품은 없다. why 를 주면 상품마다 (까닭, 고른 출처)를 적는다(전후 대조용)."""
+def blend_of_brand(slug: str, items: list[dict], why: dict | None = None, raw: dict | None = None) -> dict[str, list]:
+    """source_url → 혼용률(mat). 못 읽었거나 버린 상품은 없다. why 를 주면 상품마다 (까닭, 고른 출처)를 적는다(전후 대조용).
+    raw 를 주면 고른 혼용률을 읽어 낸 원문 줄을 적는다(mat_raw — 표준 이름으로 합치기 전 「Superfine Merino Wool 100%」)."""
     import product_desc
     crawl = load_latest(CRAWL / f"{slug}.jsonl")
     ocr = load_latest(OCR / f"{slug}.jsonl")
@@ -1753,6 +1757,7 @@ def blend_of_brand(slug: str, items: list[dict], why: dict | None = None) -> dic
                 ev_seen.update({key for _, key in lp["ev"]})
             for c in got:
                 c["src"], c["ctx"] = k, _mat_ctx(t, c["span"])
+                c["raw"] = re.sub(r"\s+", " ", t[c["span"][0]:c["span"][1]]).strip()
                 cs.append(c)
         cands[r["source_url"]] = cs
         lost_parts[r["source_url"]] = lost
@@ -1819,6 +1824,8 @@ def blend_of_brand(slug: str, items: list[dict], why: dict | None = None) -> dic
                 m, st = [], "conflict"
         if m:
             out[u] = m
+            if raw is not None:
+                raw[u] = next((c["raw"] for c in kept if c["m"] == m and c.get("raw")), "")
         if why is not None:
             if not m and len(kept) < len(cs) and not kept:
                 st = "common" if any((c["src"], c["ctx"]) in common for c in cs) else "copied"
@@ -1852,7 +1859,8 @@ def main():
         print(f"사람 · 코덱스가 옮겨 적은 혼용률 {len(manual_mat)}벌 (data/manual_mat.csv)")
     for slug, items in sorted(by_brand.items()):
         prepared, store_lines = prepare_brand(slug, items)
-        mats = {**blend_of_brand(slug, items),
+        mat_raw: dict[str, str] = {}
+        mats = {**blend_of_brand(slug, items, raw=mat_raw),
                 **{r["source_url"]: manual_mat[r["source_url"]] for r in items if r["source_url"] in manual_mat}}
         for r, body, sources, quality, color_text in prepared:
             tags = tagger.tag(r["category"], r["name"], body, color_text, quality,
@@ -1864,6 +1872,12 @@ def main():
             # 혼용률 — blend_of_brand 주석. 못 읽은 것도 빈 목록으로 싣는다: export 는 열쇠가 있으면 그대로 쓰고, 없을 때만(옛 판
             # 태그 파일) 설명글에서 읽는다 — 새 판이 버린 것이 되살아나지 않게.
             out[r["source_url"]]["mat"] = mats.get(r["source_url"]) or []
+            # 혼용률을 읽은 원문 — 함량(mat)은 표준 이름(메리노 울 → 울)으로 합치지만 원래 이름은 여기 남긴다(사람 2026-10-04
+            # 「섬유이름은 통일해도 코파일럿을 위해서 기록은 해둬야 돼」). 사람 · 코덱스가 옮겨 적은 것이 이기면 그 기록을 싣는다.
+            if r["source_url"] in manual_mat:
+                out[r["source_url"]]["mat_raw"] = " / ".join(MANUAL_MAT_RAW.get(r["source_url"], []))
+            elif out[r["source_url"]]["mat"]:
+                out[r["source_url"]]["mat_raw"] = mat_raw.get(r["source_url"], "")
             mat_count += bool(mats.get(r["source_url"]))
             # 소재 등급 · 원단 출처 — grade_origin 주석. 매장 되풀이 줄을 걷은 글 + 상품명에서 뽑고, 상품 증거(혼용률 · 소재 태그)와
             # 어긋나는 것은 버린다. 혼용률의 섬유 함량(mat)은 그대로 — 등급은 별도 칸이다(코파일럿 세션 부탁 2026-10-03).

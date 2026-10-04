@@ -4674,6 +4674,55 @@ def size_set_gender(rows: list[dict], meta: dict[tuple[str, str], tuple[bool, st
     return changed
 
 
+# ─── 남성복 실측의 큰 총장 차이 → 유니섹스 ───
+#
+# 사람이 짚어 준 잣대다(2026-10-04): 「남성복은 총장이 68 70 72 74 처럼 조금씩 일정하게 커진다 · S 58 → M 66 처럼 한 칸에
+# 크게 뛰면 여성 치수와 남성 치수를 한 표에 담은 남녀 공용이다」. 코덱스가 글 근거로만 판정했다(부탁 286~295, 2026-10-03):
+#     브랜드 기본값 남성인 후보 판정 8벌 → 유니섹스 6 · 남성 1 · 여성 1
+#     브랜드 기본값 여성인 후보 판정 23벌 → 유니섹스 10 · 여성 11 · 남성 2   ← 반반이라 안 쓴다
+# 그래서 **남성만** 바꾼다. 남성 → 유니섹스는 틀려도 남성 필터에 그대로 남아 잃는 것이 적다.
+# 조건: 이름 · 설명 · 매장 칸이 아무 말도 안 해 브랜드 값을 받은 상의 · 아우터, 이웃한 두 치수 사이에 총장 ≥ 5cm 이고
+# 같은 자리에서 가슴(없으면 어깨)도 ≥ 3cm. 실측은 앞선 판의 data/product_sizes.json 을 쓴다(사이즈 단계가 CSV 다음이다).
+JUMP_LEN_CM = 5.0
+JUMP_WIDTH_CM = 3.0
+_JUMP_LEN_KEYS = ("총장", "총길이")
+_JUMP_WIDTH_KEYS = ("가슴", "가슴단면", "가슴둘레", "chest", "어깨", "어깨단면", "어깨너비", "shoulder")
+_JUMP_LABELS = {"Tops", "Shirts", "Knitwear", "Outerwear"}
+
+
+def length_jump(sizes: dict) -> bool:
+    L = next((sizes[k] for k in _JUMP_LEN_KEYS if sizes.get(k)), None)
+    W = next((sizes[k] for k in _JUMP_WIDTH_KEYS if sizes.get(k)), None)
+    if not L or not W or len(L) < 2 or len(L) != len(W):
+        return False
+    if not all(isinstance(x, (int, float)) for x in L + W) or not all(30 <= x <= 120 for x in L):
+        return False
+    return any(abs(b - a) >= JUMP_LEN_CM and abs(d - c) >= JUMP_WIDTH_CM
+               for a, b, c, d in zip(L, L[1:], W, W[1:]))
+
+
+def length_jump_unisex(rows: list[dict], meta: dict[tuple[str, str], tuple[bool, str | None]]) -> int:
+    path = DATA / "product_sizes.json"
+    if not path.exists():
+        return 0
+    try:
+        sz = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return 0
+    changed = 0
+    for r in rows:
+        if r.get("gender_target") != "MENSWEAR" or r.get("category") not in _JUMP_LABELS:
+            continue
+        m = meta.get((r["brand_slug"], str(r["product_no"])))
+        if not m or not m[0]:
+            continue
+        p = sz.get(r.get("source_url") or "")
+        if p and length_jump(p.get("sizes") or {}):
+            r["gender_target"] = "UNISEX"
+            changed += 1
+    return changed
+
+
 def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
     import product_desc
     rows = []
@@ -4956,6 +5005,9 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
     n_size = size_set_gender(rows, gender_meta)
     if n_size:
         print(f"치수 조합(매장 안에서 배운 것)으로 성별 {n_size}벌을 정했다", file=sys.stderr)
+    n_jump = length_jump_unisex(rows, gender_meta)
+    if n_jump:
+        print(f"남성복 실측의 큰 총장 차이로 유니섹스 {n_jump}벌", file=sys.stderr)
     fill_season_gaps(rows)
     # 번호 보간으로도 안 채워진 것은 사진 날짜로 한 번 더 — 브랜드마다 먼저 맞혀 보고서만.
     n_img = season_from_image_date(rows)
