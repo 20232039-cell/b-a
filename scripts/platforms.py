@@ -145,7 +145,10 @@ RELEASED_1002: set[str] = {"thisisneverthat", "thug-club", "sansan-gear"}
 # 2026-10-03 사람이 「이제 두곳은 보류해제」 — rolarola · we11done. 코덱스 그림 비전으로 실측(rolarola 두 번 읽어 어긋난 상품은 뺐다) ·
 # 혼용률을 채웠고, 이번 주간 판에서 두 곳 모두 목록이 다 걷혔다(가드레일 통과).
 RELEASED_1003: set[str] = {"rolarola", "we11done"}
-NEW_HOLD = (NEW_HOLD | NEW_1001) - RELEASED_1002 - RELEASED_1003   # thisisneverthat 은 PAGES 라 위 set(PAGES) 에서도 빼야 한다
+# 2026-10-04 사람 제보 「인더로우 문닫았네」 — 인더로우 공지가 새 브랜드 두 곳을 안내한다(레어토라 · 더 로즈, 둘 다 카페24).
+# 새로 걷는 곳이라 사람이 값 · 설명 · 실측을 보기 전까지 앱에 안 내보낸다.
+NEW_1004: set[str] = {"raretora", "the-rhodes"}
+NEW_HOLD = (NEW_HOLD | NEW_1001 | NEW_1004) - RELEASED_1002 - RELEASED_1003   # thisisneverthat 은 PAGES 라 위 set(PAGES) 에서도 빼야 한다
 # 「제외」 판정 가운데 이미 걷혀 있던 곳 — rocket-x-lunch(10-01) · bourie(9/27 판정인데 빠져 있었다, 950벌 전부 품절). 앱에만 안 내보낸다.
 APP_HOLD: set[str] = {"numbering", "kijun", "crump", "jeanbach", "maison-marais", "tripleroot",
                       "rocket-x-lunch", "bourie"} | NEW_HOLD
