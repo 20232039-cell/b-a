@@ -79,7 +79,7 @@ jobs:
             python scripts/size_from_ocr.py | tail -4
             python scripts/tag_items.py | tail -3
           }
-          GEN="data/products_full.csv data/product_sizes.json data/product_tags_full.json"
+          GEN="data/products_full.csv data/product_sizes.json data/product_tags_full.json data/gender_basis.json"
           # 생성물을 만든 원본의 자리. 밀기가 막혔을 때 그 사이 원본이 바뀌었는지 이것과 견준다.
           BASE=$(git rev-parse HEAD)
           INPUTS="data/crawl data/manual_sizes.csv data/manual_items.csv data/size_labels.json data/vocab_aliases.json"
@@ -107,7 +107,7 @@ jobs:
             if git diff --quiet "$BASE" "origin/$DATA_BRANCH" -- $INPUTS; then
               echo "밀기 막힘 $i — 원본은 그대로다. 남의 커밋을 받고 **우리 생성물을 그 위에 얹는다**"
               git reset --hard "origin/$DATA_BRANCH"
-              cp /tmp/gen/products_full.csv /tmp/gen/product_sizes.json /tmp/gen/product_tags_full.json data/
+              cp /tmp/gen/products_full.csv /tmp/gen/product_sizes.json /tmp/gen/product_tags_full.json /tmp/gen/gender_basis.json data/
               mkdir -p data/crawl/detail && cp -r /tmp/gen/detail/. data/crawl/detail/
             else
               echo "밀기 막힘 $i — 그 사이 원본이 바뀌었다. 합친 나무에서 CSV · 사이즈를 다시 만든다"

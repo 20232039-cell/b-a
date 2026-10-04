@@ -2064,10 +2064,19 @@ def cate_gender(category_names: list[str]) -> str | None:
     return hit[0] if hit else None
 
 
+def _why(why: list | None, basis: str, g: str) -> str:
+    """classify_gender 가 어느 층에서 정했는지 적는다(gender_basis.json) — 앱 · 코파일럿이 「브랜드 기본값 유니섹스」를
+    진짜 유니섹스와 가를 수 있게(사람 2026-10-04 「성별 판정 안된 애들도 있잖아」)."""
+    if why is not None:
+        why.append(basis)
+    return g
+
+
 def classify_gender(category_names: list[str], brand_default: str, name: str = "",
                     item_type: str = "", top_len: float | None = None,
                     shoulder: float | None = None, category_code: str = "",
-                    waist: tuple[float, float] | None = None, description: str = "") -> str:
+                    waist: tuple[float, float] | None = None, description: str = "",
+                    why: list | None = None) -> str:
     """칸 이름 → 브랜드 기본값 순으로 성별을 정하되, 상품 이름이 말하면 그게 이긴다.
 
     지금까지는 이름을 안 봤다. 그래서 여성복 매장의 「UNISEX PADDED DENIM BOMBER JACKET」이
@@ -2086,23 +2095,23 @@ def classify_gender(category_names: list[str], brand_default: str, name: str = "
     """
     if name:
         if NAME_UNISEX.search(name):
-            return "UNISEX"
+            return _why(why, "이름", "UNISEX")
         if category_code in APPAREL_CODES and NAME_M_PAREN.search(name) \
                 and not NAME_WOMEN.search(name):
-            return "MENSWEAR"
+            return _why(why, "이름", "MENSWEAR")
         if NAME_W_HEAD.match(name):
-            return "WOMENSWEAR"
+            return _why(why, "이름", "WOMENSWEAR")
         if NAME_M_HEAD.match(name):
-            return "MENSWEAR"
+            return _why(why, "이름", "MENSWEAR")
         w, m = NAME_WOMEN.search(name), NAME_MEN.search(name)
         if w and not m:
-            return "WOMENSWEAR"
+            return _why(why, "이름", "WOMENSWEAR")
         if m and not w:
-            return "MENSWEAR"
+            return _why(why, "이름", "MENSWEAR")
     # 이름이 아무 말도 안 하면, 설명글의 선언을 본다 — 칸보다 앞이다.
     # 칸은 매장이 상품을 어디 **진열**했나이고, 설명은 무엇을 **만들었나**이다.
     if description and DESC_UNISEX.search(description):
-        return "UNISEX"
+        return _why(why, "설명", "UNISEX")
     cg = cate_gender(category_names)
     # 매장이 남성 칸과 여성 칸에 **둘 다** 넣어 둔 상품이 있다. 그건 매장이 「둘 다 입는
     # 옷」이라고 말한 것이지 둘 중 하나가 아니다. 지금까지는 GENDER_RULES 차례에 따라
@@ -2122,7 +2131,7 @@ def classify_gender(category_names: list[str], brand_default: str, name: str = "
     #     ulkin    100벌 전부                                                      → 여성
     # 남녀 칸에 둘 다 든 것을 유니섹스로 보는 것과 같은 까닭이다. (가르는 일은 cate_gender 가 한다)
     if cg:
-        return cg
+        return _why(why, "매장 칸", cg)
     # 매장이 아무 말도 안 했으면 품목이 말한다. 짐작이 아니라 센 값이다 — 매장이 제 손으로
     # 성별 칸에 넣어 둔 22,714벌에서 품목별로 어느 칸에 들어갔는지 셌다(2026-09-18):
     #
@@ -2133,23 +2142,23 @@ def classify_gender(category_names: list[str], brand_default: str, name: str = "
     # 기준선이 61% 여성이라 「여성 비율이 높다」만으로는 아무 말도 아니다. 남성 칸이 0인
     # 둘만 받는다. 탑(남성 105/1763 = 6%)·플랫·샌들은 0이 아니라 뺐다 — 확신 없으면 비운다.
     if item_type in WOMEN_ONLY_ITEM or (name and NAME_WOMEN_ONLY.search(name)):
-        return "WOMENSWEAR"
+        return _why(why, "품목", "WOMENSWEAR")
     if (category_code == "bottoms" and waist is not None
             and item_type not in WAIST_UNRELIABLE_ITEM
             and not (name and WAIST_UNRELIABLE.search(name))):
         lo, hi = waist
         if hi < WAIST_WOMEN_MAX:
-            return "WOMENSWEAR"
+            return _why(why, "허리", "WOMENSWEAR")
         if lo >= WAIST_MEN_MIN:
-            return "MENSWEAR"
+            return _why(why, "허리", "MENSWEAR")
     if item_type in TOP_ITEMS or item_type in OUTER_ITEMS:
         if top_len is not None:
             if top_len < TOP_SHORT_CM:
-                return "WOMENSWEAR"
+                return _why(why, "실측(총장 · 어깨)", "WOMENSWEAR")
         elif shoulder is not None and shoulder < SHOULDER_NARROW_CM:
             # 총장을 모를 때만 어깨를 본다 — 총장이 있는데 어깨로 덮으면 98%로 떨어진다
-            return "WOMENSWEAR"
-    return brand_default or "UNISEX"
+            return _why(why, "실측(총장 · 어깨)", "WOMENSWEAR")
+    return _why(why, "브랜드 기본값", brand_default or "UNISEX")
 
 
 # ─── HTTP — 호스트당 1초, 재시도 ───
@@ -4723,10 +4732,57 @@ def length_jump_unisex(rows: list[dict], meta: dict[tuple[str, str], tuple[bool,
     return changed
 
 
+def _mark_basis(rows: list[dict], before: dict, basis_of: dict, label: str) -> None:
+    for r in rows:
+        k = (r["brand_slug"], str(r["product_no"]))
+        if before.get(k) != r["gender_target"]:
+            basis_of[k] = label
+
+
+# ─── 신발 사이즈 폭 → 성별 ───
+#
+# 신발은 mm 로 사이즈를 판다. 매장이 MEN/WOMEN 칸에 직접 넣은 판매중 신발로 쟀다(2026-10-04):
+#     사이즈가 250 이하에서 끝나면 여성   105/105
+#     사이즈가 250 이상에서 시작하면 남성   72/72
+#     240 이하부터 270 이상까지 걸치면 유니섹스(매장 한쪽 칸 14벌 — 한 칸에 둔 공용 신발)
+# 아무 층도 말하지 않아 브랜드 값을 받은 신발에만 쓴다(158벌이 바뀐다 — 유니섹스 → 남성 95 등).
+_SHOE_MM = re.compile(r"(?<!\d)(2[1-9]\d|30\d)(?!\d)")
+
+
+def shoe_gender(options: str) -> str | None:
+    v = [int(x) for o in (options or "").split("|") for x in _SHOE_MM.findall(o) if int(x) % 5 == 0]
+    if len(v) < 2:
+        return None
+    lo, hi = min(v), max(v)
+    if hi <= 250:
+        return "WOMENSWEAR"
+    if lo >= 250:
+        return "MENSWEAR"
+    if lo <= 240 and hi >= 270:
+        return "UNISEX"
+    return None
+
+
+def shoe_size_gender(rows: list[dict], meta: dict[tuple[str, str], tuple[bool, str | None]]) -> int:
+    changed = 0
+    for r in rows:
+        if r.get("category_code") != "shoes":
+            continue
+        m = meta.get((r["brand_slug"], str(r["product_no"])))
+        if not m or not m[0]:
+            continue
+        g = shoe_gender(r.get("options") or "")
+        if g and g != r["gender_target"]:
+            r["gender_target"] = g
+            changed += 1
+    return changed
+
+
 def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
     import product_desc
     rows = []
     gender_meta: dict[tuple[str, str], tuple[bool, str | None]] = {}
+    basis_of: dict[tuple[str, str], str] = {}      # 성별을 정한 층 — gender_basis.json
     per_brand: dict[str, int] = {}
     seen_images: dict[str, list[tuple[str, set]]] = {}   # 대표컷 → [(매장, 이름 · 옵션의 색)]
     dropped_dupe = 0
@@ -4956,12 +5012,13 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
                 classify_gender(cats, "?", *g_args) == "?",
                 cate_gender(cats) if classify_gender([], "?", d["name"], "", None, None, "", None,
                                                      d.get("description") or "") == "?" else None)
+            _gb: list = []
             rows.append({
                 "brand_slug": slug,
                 "category_code": code,
                 "item_type": item,
                 "name": d["name"],
-                "gender_target": classify_gender(cats, brand_gender.get(slug, "UNISEX"), *g_args),
+                "gender_target": classify_gender(cats, brand_gender.get(slug, "UNISEX"), *g_args, why=_gb),
                 "price": d["price"],
                 "representative_color": pick_color(d["name"], d.get("description", ""), d.get("spec"),
                                                    d.get("options")),
@@ -4997,17 +5054,27 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
                 x for x in (d.get("gallery") or []) + (d.get("detail_images") or []) + [d.get("image_url")] if x}
             tbl_of[(slug, str(d["product_no"]))] = json.dumps(d.get("size_table"), ensure_ascii=False, sort_keys=True) if d.get("size_table") else ""
             per_brand[slug] = per_brand.get(slug, 0) + 1
+            basis_of[(slug, str(d["product_no"]))] = _gb[-1] if _gb else ""
     url_of = {(r["brand_slug"], str(r["product_no"])): _url_stem(r.get("source_url") or "") for r in rows}
     opt_of = {(r["brand_slug"], str(r["product_no"])): tuple(o.strip() for o in (r.get("options") or "").split("|") if o.strip())
               for r in rows}
     dropped_kidline = drop_kids_line(rows)
     dropped_rerun = fold_reruns(rows, gal_of, tbl_of, url_of, opt_of, meas=_measurer(tbl_of))
+    _g0 = {(r["brand_slug"], str(r["product_no"])): r["gender_target"] for r in rows}
     n_size = size_set_gender(rows, gender_meta)
+    _mark_basis(rows, _g0, basis_of, "치수 조합(매장 안)")
     if n_size:
         print(f"치수 조합(매장 안에서 배운 것)으로 성별 {n_size}벌을 정했다", file=sys.stderr)
+    _g0 = {(r["brand_slug"], str(r["product_no"])): r["gender_target"] for r in rows}
     n_jump = length_jump_unisex(rows, gender_meta)
+    _mark_basis(rows, _g0, basis_of, "실측(총장 점프)")
     if n_jump:
         print(f"남성복 실측의 큰 총장 차이로 유니섹스 {n_jump}벌", file=sys.stderr)
+    _g0 = {(r["brand_slug"], str(r["product_no"])): r["gender_target"] for r in rows}
+    n_shoe = shoe_size_gender(rows, gender_meta)
+    _mark_basis(rows, _g0, basis_of, "신발 사이즈(mm)")
+    if n_shoe:
+        print(f"신발 사이즈 폭으로 성별 {n_shoe}벌", file=sys.stderr)
     fill_season_gaps(rows)
     # 번호 보간으로도 안 채워진 것은 사진 날짜로 한 번 더 — 브랜드마다 먼저 맞혀 보고서만.
     n_img = season_from_image_date(rows)
@@ -5025,6 +5092,10 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
         w = csv.DictWriter(f, fieldnames=CSV_FIELDS)
         w.writeheader()
         w.writerows(rows)
+    # 성별을 어느 층이 정했나 — 상품표 칸을 늘리지 않고 곁 파일로 둔다(앱 · 코파일럿 적재가 칸 수에 묶여 있다)
+    (DATA / "gender_basis.json").write_text(json.dumps(
+        {r["source_url"]: basis_of.get((r["brand_slug"], str(r["product_no"])), "") for r in rows if r.get("source_url")},
+        ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
     return len(rows), {"per_brand": per_brand, "dropped_dupe_image": dropped_dupe, "dropped_no_image": dropped_noimg, "dropped_junk_name": dropped_junk, "dropped_kids_pet": dropped_kidpet, "dropped_demo_shop": dropped_demo, "dropped_gone": dropped_gone, "dropped_rerun": dropped_rerun,
             "dropped_alias_shop": dropped_alias}
 

@@ -211,6 +211,7 @@ jobs:
           git config user.email "refetch@layer.invalid"
           git add data/crawl/ data/products_full.csv data/product_sizes.json data/product_tags_full.json \
                   data/_audit.json data/_audit.csv
+          if [ -f data/gender_basis.json ]; then git add data/gender_basis.json; fi
           git diff --cached --quiet && { echo "변화 없음"; exit 0; }
           git commit -m "상세 보정 $(date -u +%Y-%m-%d) — ${{ inputs.select }} · ${{ inputs.fields }} (Actions)"
           for i in 1 2 3; do
