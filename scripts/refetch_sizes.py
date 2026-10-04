@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 import sys
 import threading
 import time
@@ -130,6 +131,9 @@ def wants(d: dict, select: str, cat: str) -> bool:
         return cat in GARMENT_CATS          # 옷 전부(액세서리·가방·신발 제외) — 파서를 고친 뒤 한 번 다시 받을 때
     if select == "no-size":
         return not d.get("size_table")
+    if select == "soldout-unmarked":
+        # 매장 딱지는 품절인데 옵션에 품절 표시가 없어 판매중으로 내보낸 상품 — 재고 숫자로 다시 가린다(2026-10-04)
+        return bool(d.get("soldout")) and not d.get("delisted") and not cc.is_soldout(d)
     if select == "dups":
         # 같은 이름·색·값으로 여러 벌 남은 상품 — 옵션을 받아 접을지 말지를 가린다
         return d.get("source_url") in _dup_urls()
@@ -186,6 +190,17 @@ def refetch(http: cc.PoliteSession, shop: cc.Shop, only_missing: bool, log, fiel
         if r is None or r.status_code != 200:
             fail += 1
             continue
+        if "stock" in fields and "text" not in fields:
+            # 가벼운 판: 품절 딱지와 재고 숫자만 다시 읽는다(설명·표는 건드리지 않는다)
+            m = re.search(r"(?:is_)?soldout_icon\s*=\s*'(\w)'", r.text)
+            if m:
+                d["soldout"] = m.group(1) == "T"
+            d["stock"] = cc.stock_state(r.text)
+            d["stock_checked_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+            touched.append(no)
+            if d["stock"] == "all0":
+                got += 1
+            continue
         if "text" in fields:
             nd = cc.parse_detail(r.text, url, shop)
             # 예전에는 「값이 있을 때만」 받아 적었다. 값이 사라진 줄은 통째로 건너뛰었으니
@@ -201,7 +216,7 @@ def refetch(http: cc.PoliteSession, shop: cc.Shop, only_missing: bool, log, fiel
                 # 빈 값은 안 받으므로(아래 조건) 새로 읽어 한 장도 못 얻으면 옛것이 남는다 —
                 # 줄어드는 쪽으로만 바뀌니 안전하다(2026-09-21 사람 제보로 고침).
                 for key in ("description", "description_source", "detail_text", "spec", "detail_images",
-                            "gallery", "size_table", "soldout", "price", "options", "soldout_options", "options_all"):
+                            "gallery", "size_table", "soldout", "price", "options", "soldout_options", "options_all", "stock"):
                     if nd.get(key) not in (None, "", [], {}):
                         d[key] = nd[key]
                 if not nd.get("price"):
@@ -240,7 +255,7 @@ def main():
     ap.add_argument("--brands", nargs="+", required=True)
     ap.add_argument("--only-missing", action="store_true")
     ap.add_argument("--workers", type=int, default=6)
-    ap.add_argument("--fields", default="size", help="size 또는 size,text")
+    ap.add_argument("--fields", default="size", help="size · size,text · stock(품절 딱지와 재고 숫자만)")
     ap.add_argument("--select", default="no-size", choices=["no-size", "no-size-name", "dups", "short-desc-or-no-size", "no-detail-images", "garments", "gaps", "all"])
     ap.add_argument("--shard", default="1/1", help="k/n (Actions 샤딩)")
     ap.add_argument("--out-dir", help="갱신 행만 조각 파일로 (collect 가 합침)")

@@ -844,6 +844,9 @@ def is_soldout(d: dict) -> bool:
     # 295벌이 값 없는 판매중으로 나갔다(2026-09-28 코덱스 검증 004 — 페이지는 SOLD OUT · 0원).
     if d.get("price_missing"):
         return True
+    # 재고를 쓰는 매장에서 모든 옵션 재고가 0 이면 옵션 표시와 상관없이 품절이다(위 stock_state).
+    if d.get("stock") == "all0":
+        return True
     # 예전에 받아 둔 옵션은 값 꼬리·딱지가 붙은 채다 — 여기서 다시 갈라 읽는다(split_option).
     opts, dead = [], set(d.get("soldout_options") or [])
     for o in d.get("options") or []:
@@ -3579,6 +3582,41 @@ def table_is_better(new: dict, old: dict) -> bool:
 _OPT_STOCK_DATA = re.compile(r"option_stock_data\s*=\s*'((?:[^'\\]|\\.)*)'")
 
 
+def _option_stock_rows(html_text: str) -> list[dict] | None:
+    m = _OPT_STOCK_DATA.search(html_text or "")
+    if not m:
+        return None
+    try:
+        data = json.loads(json.loads('"' + m.group(1).replace("\\'", "'") + '"'))
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return [v for v in data.values() if isinstance(v, dict)]
+
+
+# 매장 딱지(soldout_icon)만으로는 품절을 못 믿어 「옵션에 품절 표시가 없으면 판다」로 두었는데(2026-09-20),
+# 그 18,118벌 중 표본 72벌을 살아 있는 페이지와 대조하니 53벌이 재고를 쓰는 매장에서 **모든 옵션 재고 0**,
+# 재고가 남은 것은 0벌이었다(2026-10-04, 코파일럿 제보 eastlogue 1712). 재고 숫자가 딱지보다 확실한 근거다.
+#   "all0" — 재고를 쓰는 옵션뿐이고 전부 0 이하(또는 판매 안 함) → 품절
+#   "some" — 하나라도 재고가 남았다
+#   None   — 재고 자료가 없거나, 재고를 안 쓰는 옵션이 섞였다(숫자로 판단 못 함)
+def stock_state(html_text: str) -> str | None:
+    rows = _option_stock_rows(html_text)
+    if not rows:
+        return None
+    if not all(r.get("use_stock") in (True, "T") for r in rows):
+        return None
+    left = 0
+    for r in rows:
+        n = r.get("stock_number")
+        if not isinstance(n, (int, float)):
+            return None
+        if n > 0 and r.get("is_selling", "T") != "F":
+            left += 1
+    return "some" if left else "all0"
+
+
 def option_values_all(html_text: str) -> list[str] | None:
     """option_stock_data 의 옵션 값 전부(숨긴 것 포함, 조합 옵션은 칸마다 떼어). 자료가 없거나 못 읽으면 None."""
     m = _OPT_STOCK_DATA.search(html_text or "")
@@ -4064,6 +4102,7 @@ def parse_detail(html_text: str, url: str, shop: Shop) -> dict | None:
         **({"price_listed": listed} if listed and price and listed > price else {}),
         **({"price_sale": sale} if sale and price and sale < price else {}),
         "soldout": soldout,
+        "stock": stock_state(html_text),
         "image_url": image,
         "gallery": gallery[:12],
         # 13장째부터는 앱 갤러리에 안 싣고 OCR 만 읽는다 — 상세 설명을 「추가 이미지」로 통째 올리는 매장은

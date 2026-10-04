@@ -26,11 +26,11 @@ on:
         required: false
         default: "all"
       fields:
-        description: "size 또는 size,text"
+        description: "size · size,text · stock(품절 딱지와 재고 숫자만)"
         required: false
         default: "size,text"
       select:
-        description: "no-size | no-size-name | short-desc-or-no-size | no-detail-images | garments | gaps | all"
+        description: "no-size | no-size-name | short-desc-or-no-size | no-detail-images | garments | gaps | soldout-unmarked | all"
         required: false
         default: "no-size"
       per_shard:
