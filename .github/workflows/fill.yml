@@ -36,6 +36,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: write   # 부르는 ocr · refetch 가 끝나고 아티팩트를 지운다
 
 jobs:
   pick:

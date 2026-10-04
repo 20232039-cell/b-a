@@ -47,6 +47,7 @@ env:
 
 permissions:
   contents: read
+  actions: write   # 이 판의 아티팩트를 지운다
 
 # 자물쇠를 **부르는 쪽**으로 가른다. 2026-09-17 에 정기 판(fill-gaps)의 나선 OCR 이 끝나지도
 # 죽지도 않은 채 아홉 시간을 버티며 자물쇠를 쥐었고, 그동안 손으로 띄운 판은 조각 0개로
@@ -148,13 +149,23 @@ jobs:
       # 조각이 시간 상한에 걸려 취소되면 이 단계가 건너뛰어져, 한 줄씩 append·flush 해 둔
       # 읽은 OCR 글이 러너와 함께 통째로 버려진다(2026-09-13, 한 조각이 300분을 읽고 0을 남겼다).
       # 부분 결과도 그 자체로 온전한 기록이라 합치면 그만큼 이득이다 — 잡은 그대로 빨갛게 둔다.
+      # 공개 저장소라 아티팩트는 누구나 받는다 — 잠가서 올리고 합치는 잡에서 푼다(2026-10-04).
+      - name: 조각 잠그기
+        if: always()
+        uses: ./.github/actions/parts-lock
+        with:
+          mode: lock
+          dir: work/_parts
+          files: "*.jsonl"
+          out: _enc/ocr-${{ matrix.brand }}-${{ matrix.shard }}.enc
+          key: ${{ secrets.DATA_TOKEN }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: ocr-${{ matrix.brand }}-${{ matrix.shard }}
-          path: work/_parts/*.jsonl
+          path: _enc/*.enc
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 1
 
   collect:
     needs: ocr
@@ -202,6 +213,12 @@ jobs:
           pattern: ocr-*
           path: work/_parts
           merge-multiple: true
+      - name: 조각 풀기
+        uses: ./.github/actions/parts-lock
+        with:
+          mode: unlock
+          dir: work/_parts
+          key: ${{ secrets.DATA_TOKEN }}
       - name: 조각을 data/crawl/ocr 로 합치기
         shell: bash
         run: |
@@ -408,3 +425,12 @@ jobs:
               push_loop || exit 1
             fi
           fi
+      # 잠근 조각이라도 남겨 둘 까닭이 없다 — 합쳐 밀고 나면 이 판의 아티팩트를 지운다.
+      # (실패한 판은 다시 돌릴 수 있게 남기고, 하루 뒤 저절로 사라진다.)
+      - name: 이 판의 조각(아티팩트) 지우기
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts" --jq '.artifacts[].id' |
+            while read -r id; do gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$id" >/dev/null && echo "지움 $id"; done

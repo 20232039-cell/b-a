@@ -37,6 +37,7 @@ env:
 
 permissions:
   contents: read
+  actions: write   # 이 판의 아티팩트를 지운다
 
 concurrency:
   group: weekly-${{ github.ref }}
@@ -132,13 +133,23 @@ jobs:
               > "_parts/_weekly_log.b${{ matrix.bucket }}.log"
           fi
           ls _parts | wc -l
+      # 공개 저장소라 아티팩트는 누구나 받는다 — 잠가서 올리고 합치는 잡에서 푼다(2026-10-04).
+      - name: 조각 잠그기
+        if: always()
+        uses: ./.github/actions/parts-lock
+        with:
+          mode: lock
+          dir: work/_parts
+          files: "*"
+          out: _enc/weekly-b${{ matrix.bucket }}.enc
+          key: ${{ secrets.DATA_TOKEN }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: weekly-b${{ matrix.bucket }}
-          path: work/_parts/*
+          path: _enc/*.enc
           if-no-files-found: ignore
-          retention-days: 3
+          retention-days: 1
 
   collect:
     needs: scan
@@ -170,6 +181,12 @@ jobs:
           pattern: weekly-*
           path: work/_parts
           merge-multiple: true
+      - name: 조각 풀기
+        uses: ./.github/actions/parts-lock
+        with:
+          mode: unlock
+          dir: work/_parts
+          key: ${{ secrets.DATA_TOKEN }}
       - name: 조각을 본 파일에 올리기
         shell: bash
         run: |
@@ -242,3 +259,12 @@ jobs:
             echo "푸시 실패, 재시도 $i"; sleep 10
           done
           exit 1
+      # 잠근 조각이라도 남겨 둘 까닭이 없다 — 합쳐 밀고 나면 이 판의 아티팩트를 지운다.
+      # (실패한 판은 다시 돌릴 수 있게 남기고, 하루 뒤 저절로 사라진다.)
+      - name: 이 판의 조각(아티팩트) 지우기
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts" --jq '.artifacts[].id' |
+            while read -r id; do gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$id" >/dev/null && echo "지움 $id"; done
