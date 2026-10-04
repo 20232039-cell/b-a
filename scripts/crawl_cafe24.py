@@ -1839,6 +1839,12 @@ _FIELD_COLOR = {
 }
 
 
+# 이름 끝에서만 받는 매장 색이름 — 어휘에 새 값을 만들지 않고 가장 가까운 기존 값으로 옮긴다(위 COLOR_VOCAB 주석).
+# 「sky」·「forest」는 이름 가운데서는 주제어(SKY HOODIE · FOREST GRAPHIC TEE)라 끝자리에서만 쓴다.
+_TAIL_COLOR = {"sky": "스카이블루", "sax": "스카이블루", "forest": "그린", "midnight": "네이비",
+               "concrete": "그레이", "pewter": "그레이", "jade": "그린", "sumi": "차콜"}
+
+
 def field_color(text: str) -> str:
     """색을 적어 둔 칸(spec 의 색상·옵션)에서만 쓰는 읽기. 먼저 정식 어휘로 보고,
     안 걸리면 줄임말 표를 본다."""
@@ -1936,6 +1942,14 @@ def pick_color(name: str, description: str, spec: dict | None = None,
     c = match_color(name)
     if c:
         return c
+    # 이름 **맨 끝**에 구분자(_ / ( - ,)를 두고 붙인 줄임말 · 매장 색이름 — 「TAILORED COAT (BK)」, 「Blouse_BG」,
+    # 「TOP_SKY」, 「Knit Polo Cardigan (Forest)」. 이름 가운데에는 대지 않는다(_FIELD_COLOR 주석 — 「NV」가 낱말 속에
+    # 걸린다). 끝자리 + 구분자로 묶으면 그 걱정이 없다. 판매중 색 빈칸 6,171벌 중 397벌이 이것이었다(2026-10-04 감사).
+    m = re.search(r"[_/(\-,]\s*([A-Za-z.]{2,12})\s*\)?\s*$", name or "")
+    if m:
+        c = _FIELD_COLOR.get(m.group(1).lower()) or _TAIL_COLOR.get(m.group(1).lower(), "")
+        if c:
+            return c
     # 이름에 색을 안 적는 매장(9999archive: 203 중 202)이 설명에 「Color: Washed Black」으로 적는다.
     m = re.search(r"(?:colou?r|색상|컬러)\s*[:：]\s*([^▪•|/\n]{1,40})", description or "", re.I)
     if m:
