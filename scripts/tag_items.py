@@ -321,10 +321,14 @@ def strip_reviews(text: str) -> str:
 # 그래서 한글 쪽만 낱말 사이 잡글자를 봐주고, 영문 쪽은 구분기호만 허락한다. 영문에 글자를
 # 허락하면 진짜 설명글이 잘린다 — 「Relaxed fit with a wide leg and a slim taper」.
 # 자에는 「오버핏」이 아니라 「오버」로만 적히기도 한다(blr 「타이트 슬림 레글러 세미 오버 오버」).
-_FIT_KO = (r"(?:타이트|슬림\s*핏|슬림핏|슬림|레귤러|레글러|세미\s*와이드|세미|와이드|"
-           r"오버\s*핏|오버핏|오버|루즈\s*핏|루즈핏|루즈)")
+# 눈금 가운데 칸 이름도 낱말로 센다 — 「슬림핏 스탠다드 오버핏」(ava-molli), 「오버핏 @ 기본 슬림」(ronron),
+# 「슬림핏 레글러핏 루즈핏」(concepts1one). 이 셋이 빠져 자가 두 칸으로만 읽혀 안 걸렀고, 판매중 700벌 넘게
+# 슬림핏과 오버핏 · 루즈핏을 한꺼번에 받았다(2026-10-04 감사).
+_FIT_KO = (r"(?:타이트|슬림\s*핏|슬림핏|슬림|레귤러\s*핏|레글러\s*핏|레귤러|레글러|스탠다드\s*핏|스탠다드|기본|노멀|"
+           r"세미\s*와이드|세미\s*오버\s*핏|세미|와이드|오버\s*핏|오버핏|오버|루즈\s*핏|루즈핏|루즈)")
+# 「Fit Slim Fit True to Size Loose Fit」(till-i-die 눈금) — fit · true to size · standard 도 칸 이름이다.
 _FIT_EN = (r"(?:regular|slim|tapered|straight|relaxed|loose|oversized?|wide|skinny|baggy|"
-           r"crop(?:ped)?|ankle|semi|tight)")
+           r"crop(?:ped)?|ankle|semi|tight|true\s+to\s+size|standard|normal|fit)")
 SCALE_BAR = re.compile(
     rf"{_FIT_KO}(?:[^\n가-힣]{{0,12}}{_FIT_KO}){{2,}}"
     rf"|{_FIT_EN}(?:[^\n가-힣A-Za-z0-9]{{1,8}}{_FIT_EN}){{2,}}"
@@ -418,6 +422,23 @@ def strip_negated(text: str) -> str:
         g = m.group(1) or m.group(2)
         return m.group(0).replace(g, " " * len(g), 1)
     return NEGATED.sub(cut, text or "")
+
+
+# 매장 공용 「사이즈 측정 가이드」 탭 메뉴 — 품목 이름이 낱말 사이 아무것도 없이 줄줄이 이어진다.
+#   years-ago 「사이즈 측정 가이드 Outwear Top Dress Bottom Acc Coat Parka Jacket & Blazer Jumper & Blouson
+#   Sleeveless Short Sleeve Long Sleeve Shirt 1/2 Shirt Vest One-piece Chino & Denim Shorts Skirt watch」
+# 이 메뉴가 모든 상품 글에 붙어 판매중 726벌(66%)이 슬리브리스 · 반팔 · 롱슬리브를 한꺼번에 받았다(2026-10-04 감사).
+# 상품 글이 품목 이름만 다섯 개 넘게 잇달아 적는 일은 없다 — 그런 줄만 지운다.
+_NAV_WORD = (r"(?:outwear|outer|tops?|dress|bottoms?|acc|accessor(?:y|ies)|coats?|parkas?|jackets?|blazers?|jumpers?|"
+             r"blousons?|sleeveless|short\s+sleeves?|long\s+sleeves?|1/2\s+shirts?|shirts?|vests?|one-?piece|chinos?|"
+             r"denim|shorts|skirts?|watch|pants|knit(?:wear)?|cardigans?|hoodies?|sweat(?:shirts?)?|bags?|shoes|caps?|"
+             r"아우터|상의|하의|원피스|스커트|팬츠|셔츠|니트|가디건|자켓|재킷|코트|패딩|베스트|반팔|긴팔|민소매|슬리브리스|액세서리)")
+NAV_MENU = re.compile(rf"(?<![\w])(?:{_NAV_WORD}(?:\s*&\s*|\s+|\s*/\s*)){{5,}}{_NAV_WORD}(?![\w])", re.I)
+
+
+def strip_nav_menu(text: str) -> str:
+    """품목 이름이 여섯 개 넘게 잇달아 나오는 매장 메뉴 줄을 지운다."""
+    return NAV_MENU.sub(" ", text or "")
 
 
 def strip_other_products(text: str, back: int = 60) -> str:
@@ -1610,7 +1631,7 @@ def prepare_brand(slug: str, items: list[dict]) -> tuple[list[tuple], frozenset]
         else:
             btext = ""
         gtext = sgmat.get(str(r["product_no"]), "")
-        body = "\n".join(t for t in (desc, sbody, otext, btext, gtext) if t)
+        body = strip_nav_menu("\n".join(t for t in (desc, sbody, otext, btext, gtext) if t))
         sources = [s for s, t in (("json-ld" if d.get("description_source") == "json-ld" else "html", desc), ("spec", sbody), ("ocr", otext), ("browser", btext), ("sizeguide", gtext)) if t]
         quality = quality_of(body)
         # 상품 이름은 색을 고르는 데 쓰지 않는다. 수집기의 pick_color 가 이미 이름을
