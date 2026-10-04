@@ -256,7 +256,7 @@ def main():
     ap.add_argument("--only-missing", action="store_true")
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--fields", default="size", help="size · size,text · stock(품절 딱지와 재고 숫자만)")
-    ap.add_argument("--select", default="no-size", choices=["no-size", "no-size-name", "dups", "short-desc-or-no-size", "no-detail-images", "garments", "gaps", "all"])
+    ap.add_argument("--select", default="no-size", choices=["no-size", "no-size-name", "dups", "short-desc-or-no-size", "no-detail-images", "garments", "gaps", "soldout-unmarked", "all"])
     ap.add_argument("--shard", default="1/1", help="k/n (Actions 샤딩)")
     ap.add_argument("--out-dir", help="갱신 행만 조각 파일로 (collect 가 합침)")
     ap.add_argument("--max-minutes", type=float, default=0, help="브랜드 하나에 쓸 시간 상한(분) — 넘으면 그 브랜드만 접는다")
