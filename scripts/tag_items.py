@@ -1693,7 +1693,10 @@ def load_manual_mat() -> dict[str, list]:
         part = re.sub(r"^(겉감|안감|배색|충전재|시보리|포켓감|부분)\s*(\d)$", r"\1 \2", part)   # 「겉감1」 → 「겉감 1」(코덱스 표기)
         # 설명글 해석(product_desc)과 같은 이름으로 — 반이 안 되는 폴리우레탄은 늘어나는 실(스판덱스)이고, 비스코스 ·
         # 폴리아미드 · 엘라스테인은 우리 표준 이름이 따로 있다(코덱스가 원문 그대로 옮긴 belier 3801 「폴리우레탄 16」).
-        MANUAL_MAT_RAW.setdefault(u, []).append(f"{part} {f} {int(v) if v == int(v) else v}%".strip())
+        # 코덱스는 섬유 칸을 표준 이름으로 적고 원문을 왜 칸에 남길 때가 많다(「상품 페이지 소재 표기의 LAMBS WOOL」) — 그 꼬리도 싣는다
+        why = re.sub(r"\s*[—-]\s*코덱스.*$", "", (r.get("왜") or "").strip())
+        MANUAL_MAT_RAW.setdefault(u, []).append(
+            f"{part} {f} {int(v) if v == int(v) else v}%".strip() + (f" [{why}]" if why else ""))
         f = _MAT_SYN.get(f, f)
         if f == "폴리우레탄" and v < 50:
             f = "스판덱스"
