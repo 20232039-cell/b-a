@@ -48,7 +48,7 @@ GRADES: list[tuple[str, str, str, str, tuple[str, ...]]] = [
 LINING_BEFORE = re.compile(r"(?:내피|안감|안쪽|lining|라이닝|insole|인솔|까래|깔창|바닥\s?까래|내부|trim|contrast|배색|트림|sole|밑창|홍창|sub(?![a-z])|서브|부속|트리밍|trimming)"
                            r"(?:\s?\d)?\s*[)\]]?\s*[,/:：·\-]?\s*(?:\d{1,3}(?:\.\d)?\s?%\s*)?(?:[가-힣A-Za-z]+\s*){0,2}[,/:：·\-]?\s*$", re.I)
 # 가죽 낱말 바로 뒤에 붙은 쓰임 — 「이태리산 소가죽 홍창」 「cow leather sole」은 밑창 가죽이지 상품 원피가 아니다(코덱스 부탁 336)
-PART_AFTER = re.compile(r"^\s*(?:\d{1,3}\s?%\s*)?(?:홍창|밑창|창(?![가-힣])|안창|깔창|인솔|sole|insole|outsole|lining|라이닝|안감|내피|trim|트림|배색|piping|파이핑|패치|patch|라벨|label|로고|logo|태그|tag|트리밍|trimming|손잡이|핸들|handle|지퍼|zipper|풀러|puller)", re.I)
+PART_AFTER = re.compile(r"^\s*(?:\d{1,3}\s?%\s*)?(?:홍창|밑창|창(?![가-힣])|안창|깔창|인솔|sole|insole|outsole|lining|라이닝|안감|내피|trim|트림|배색|piping|파이핑|패치|patch|라벨|label|로고|logo|태그|tag|트리밍|trimming|손잡이|핸들|handle|지퍼|zipper|풀러|puller|ribbing|rib(?![a-z])|시보리)", re.I)
 # 견줌 — 「일반 메리노 울보다 부드러운」은 이 상품 소재가 아니다(코덱스 부탁 340)
 COMPARE_AFTER = re.compile(r"^\s*(?:울|wool|가죽|leather)?\s*(?:보다|대비|만큼|처럼|같은|like|than)", re.I)
 # 가공 낱말 뒤의 관리 안내 — 「스웨이드 브러시로 관리」 「스웨이드/누벅 소재는 물에 약해」(코덱스 부탁 336 · 337)
@@ -171,7 +171,7 @@ def vocab_entries() -> dict:
 
 HIDE_OF_FIBER = {"소가죽": "소", "송아지가죽": "소(송아지)", "양가죽": "양", "염소가죽": "염소", "말가죽": "말", "돼지가죽": "돼지"}
 # 본체가 아닌 부위 — 이 부위의 가죽은 상품 원피가 아니다
-NON_MAIN_PART = re.compile(r"sub(?![a-z])|서브|안감|내피|충전|배색|트림|trim|장식|밑창|아웃솔|인솔|깔창|안창|창(?![가-힣])|sole|lining|리브|심지|부속|패치|라벨|파이핑|바이어스", re.I)
+NON_MAIN_PART = re.compile(r"sub(?![a-z])|서브|시보리|부분|안감|내피|충전|배색|트림|trim|장식|밑창|아웃솔|인솔|깔창|안창|창(?![가-힣])|sole|lining|리브|심지|부속|패치|라벨|파이핑|바이어스", re.I)
 LEATHER_FIBERS = {"가죽", "천연가죽", "소가죽", "양가죽", "송아지가죽", "염소가죽", "말가죽", "돼지가죽", "스웨이드", "누벅"}
 WOOL_NAME = re.compile(r"wool|울(?![가-힣])|merino|메리노|lambswool|램스울|cashmere|캐시미어", re.I)
 
