@@ -262,7 +262,9 @@ ITEM_TYPE_VOCAB = {
     # diafvine 가죽 겉옷 17벌은 「기타」로 남는다 — 모자·가방을 잃는 값보다 싸다.
     "재킷": ["jacket", "자켓", "재킷", "jk",
              # 「N-1 Deck jkt」처럼 jkt 로 줄여 쓰는 이름 10벌이 품목 빈칸이었다(2026-09-08). 다른 이름은 한 개도 안 움직인다.
-             "jkt"],
+             "jkt",
+             # lekim 「BIKER WASHING LEATHER JAKET」 3벌 — 철자 틀림(2026-10-05)
+             "jaket"],
     "코트": ["coat", "코트", "raincoat", "레인코트"],
     "패딩": ["padding", "puffer", "푸퍼", "패딩", "다운", "duck down", "덕다운",
             "구스다운", "goose down",
@@ -354,22 +356,26 @@ ITEM_TYPE_VOCAB = {
     # ── 굵은 통을 가른다 (사람 요청 2026-09-20, 전수 조사로 고른 것만) ──────────────
     # 「재킷」 10,021벌의 64%가 아우터 전체였다. 이름을 전수로 헤아려 **진짜 다른 옷**만
     # 골랐다 — 소재(울·코듀로이)와 핏(와이드·스트레이트)은 이미 태그에 있으니 안 넣는다.
-    # 다만 레더·스웨이드·트위드는 소재이면서 그 자체로 옷 갈래다(사람 판단: 「레더 자켓
-    # 트위드 자켓은 넣는게 맞아. 라이더 자켓은 다 레더 소재야. 무신사에선 레더/라이더로 할걸」).
+    # 레더 · 스웨이드 · 트위드는 품목이 아니라 소재 태그다(사람 2026-10-05: 「레더 자켓 · 블루종 · 트러커가 거의 같이 생겼는데
+    # 어떻게 묶지」→ 모양이 품목, 소재는 태그). 「레더 블루종」은 블루종 + 가죽, 「레더 자켓」은 재킷 + 가죽이다.
+    # 무스탕만 소재이면서 생김새(털 안감 · 두툼한 코트꼴)가 따로 있어 품목으로 남긴다.
     #
     # match_head 는 이름에서 **가장 뒤에 끝나는** 낱말을 고른다. 그래서 「TRUCKER JACKET」은
     # jacket 이 뒤라 계속 재킷이 이긴다 — 붙은꼴을 통째로 넣어야 갈린다.
-    "레더자켓": ["레더 자켓", "레더자켓", "레더 재킷", "레더재킷", "가죽 자켓", "가죽자켓",
-             "leather jacket", "leather jk", "라이더 자켓", "라이더자켓", "라이더 재킷",
-             "rider jacket", "biker jacket", "바이커 자켓", "라이더", "rider", "biker"],
-    "스웨이드자켓": ["스웨이드 자켓", "스웨이드자켓", "스웨이드 재킷", "suede jacket", "suede jk"],
+    # 라이더(바이커)는 모양이다 — 비대칭 지퍼 · 짧은 기장. 소재는 가죽이 많지만 스웨이드 · 인조가죽도 있어 태그에 맡긴다.
+    # 홀로 선 「라이더 · 바이커 · rider · biker」는 넣지 않는다 — 무늬 · 그래픽 · 핏 이름일 때가 많았다
+    # (outstanding 「MOT SERIES TEE(HOONING BIKER)」 6벌이 아우터로 섰던 일, 코덱스 감사 023 26번 2026-10-02).
+    # 홀로 선 「라이더스」도 넣지 않는다 — noice 「WAVE RIDERS CLUB TWIST T-SHIRT」 · vibrate 「RIDERS JOGGER PANTS」(코덱스 2026-10-05).
+    "라이더자켓": ["라이더 자켓", "라이더자켓", "라이더 재킷", "라이더재킷", "라이더스 자켓", "라이더스 재킷", "라이더스자켓", "라이더스재킷",
+              "rider jacket", "riders jacket", "rider jk", "riders jk", "biker jacket", "biker jk", "바이커 자켓", "바이커자켓", "바이커 재킷", "바이커재킷",
+              # 「싱글 · 더블 라이더」는 겉옷 낱말 없이도 라이더 재킷이다(diafvine 「Fringe Single Rider Vegetable Calfskin」)
+              "싱글 라이더", "싱글라이더", "더블 라이더", "더블라이더", "single rider", "double rider"],
     # 무스탕(시어링 · 무톤)은 스웨이드 겉면에 털 안감이라 「스웨이드 자켓」에 섞여 있었다 — 스웨이드자켓 332벌 중 19벌,
     # 품목 빈칸에 87벌(2026-10-05 익명 평가 사유 「스웨이드가 아니라 무스탕인가」). shearling · 시어링은 홀로 두지 않는다 —
     # 「Teddy Shearling Fleece Zip Up」은 집업이고 「시어링 링클 셔츠」의 시어링은 주름(shirring)이다.
     "무스탕": ["무스탕", "mustang", "mouton", "무톤", "무스탕 자켓", "무스탕자켓", "무스탕 재킷", "무스탕 코트", "무스탕코트",
              "mustang jacket", "mustang coat", "shearling jacket", "shearling jk", "shearling coat", "shearling jumper",
              "shearling blouson", "시어링 자켓", "시어링자켓", "시어링 재킷", "시어링 코트", "시어링 점퍼", "시어링 블루종"],
-    "트위드자켓": ["트위드 자켓", "트위드자켓", "트위드 재킷", "tweed jacket", "tweed jk"],
     "레이서자켓": ["레이서 자켓", "레이서자켓", "레이서 재킷", "racer jacket", "racer jk", "레이싱 자켓", "레이싱 재킷", "racing jacket", "모터사이클 자켓", "motorcycle jacket"],
     # 「데님 자켓」은 트러커로 보내지 않는다 — 데님 트러커 · 워크자켓 · 셔츠자켓 어느 것도 될 수 있다(사람 2026-10-05). 일반 재킷.
     "트러커": ["트러커", "trucker", "트러커 자켓", "트러커자켓", "트러커 재킷", "trucker jacket"],
@@ -427,7 +433,7 @@ ITEM_TO_CATEGORY = {
     "바디수트": "tops",
     "파카": "outer", "MA-1/봄버": "outer", "플리스": "outer",
     # 2026-09-20 에 가른 품목들 — 갈래는 바뀌지 않는다
-    "레더자켓": "outer", "스웨이드자켓": "outer", "트위드자켓": "outer", "트러커": "outer",
+    "라이더자켓": "outer", "트러커": "outer",
     "무스탕": "outer", "레이서자켓": "outer", "블라우스": "tops", "하프셔츠": "tops",
     "하프집업": "tops", "하프집업니트": "tops", "니트집업": "tops", "폴로니트": "tops", "니트베스트": "tops", "패딩베스트": "tops",
     "슬리브리스": "tops", "캐미솔": "tops", "브라탑": "tops", "튜브탑": "tops",
@@ -565,7 +571,7 @@ TOP_ITEMS = {"티셔츠", "맨투맨", "셔츠", "블라우스", "하프셔츠",
              "케이블니트", "아가일니트", "링거티", "라글란", "웨스턴셔츠", "뷔스티에"}
 OUTER_ITEMS = {"재킷", "코트", "점퍼", "블레이저", "패딩", "파카", "바람막이",
                "MA-1/봄버", "트렌치",
-               "레더자켓", "스웨이드자켓", "트위드자켓", "무스탕", "레이서자켓", "로브코트", "트러커", "워크자켓", "필드자켓",
+               "라이더자켓", "무스탕", "레이서자켓", "로브코트", "트러커", "워크자켓", "필드자켓",
                "해링턴", "바시티", "코치자켓", "사파리자켓", "퀼팅자켓", "블루종",
                "발마칸", "더플코트", "맥코트", "피코트", "싱글코트", "더블코트", "트랙재킷", "오버셔츠"}
 TOP_SHORT_CM = 57.0          # 총장 중앙이 이보다 짧으면 여성
@@ -1375,60 +1381,31 @@ def match_head(text: str, vocab: dict) -> str:
 
 
 # 겉옷은 **소재가 품목 이름이 되는** 갈래가 있다(레더/라이더·스웨이드·트위드).
-# 「스웨이드 트러커 재킷」처럼 소재와 모양이 함께 오면 소재가 앞선다 — 사람 판단이다
-# (2026-09-20: 「스웨이드 트러커 자켓에선 스웨이드가 우선이긴해」). 매장 이름도 소재를
-# 앞세운다(「[REAL SUEDE]마우어 더블 스웨이드 자켓」).
-# match_head 는 뒤에서 끝나는 낱말을 고르므로 모양 쪽이 이긴다 — 여기서 되돌린다.
-# 모양 낱말은 사라지지 않는다. 상품 이름에 그대로 남아 검색으로 잡힌다.
-# 소재 갈래 자신도 넣는다 — 「Suede Biker Jacket」은 「biker jacket」에 걸려 이미
-# 레더자켓으로 서 있었고, 그러면 아래 차례가 돌 기회가 없었다(2026-09-20 표본 검사).
+# 소재는 품목을 바꾸지 않는다 — 「레더 블루종」은 블루종, 「스웨이드 트러커 재킷」은 트러커, 「트위드 자켓」은 재킷이고 소재는
+# 태그(material)에 남는다(사람 2026-10-05, 「모양이 품목, 소재는 태그」). 2026-09-20 의 「스웨이드가 우선」 판단을 뒤집은 것이다.
+# 무스탕만 예외다. 소재이면서 생김새가 따로 있고 사람들이 품목처럼 찾는다. match_head 는 뒤에서 끝나는 낱말을 고르므로
+# 「무스탕 블루종」은 블루종이 이긴다 — 여기서 되돌린다. 모양 낱말은 상품 이름에 그대로 남아 검색으로 잡힌다.
 # 트러커는 뺀다 — 소재가 다양해서 모양으로 따로 둔 품목이다(「레더 트러커」는 트러커, 사람 2026-10-05).
 OUTER_SHAPE_ITEMS = {"재킷", "워크자켓", "필드자켓", "코치자켓", "사파리자켓",
-                     "퀼팅자켓", "블루종", "바시티", "해링턴",
-                     # 2026-10-03 세운 모양 품목 — 「스웨이드 셔츠 자켓」 7벌 · 레더 6 · 트위드 5가 오버셔츠로 갔다. 소재가 앞선다.
+                     "퀼팅자켓", "블루종", "바시티", "해링턴", "라이더자켓",
+                     # 2026-10-03 세운 모양 품목 — 「시어링 셔츠 자켓」은 무스탕이다.
                      "오버셔츠", "트랙재킷",
-                     "레더자켓", "스웨이드자켓", "트위드자켓", "무스탕"}
-# 차례가 중요하다. 스웨이드·트위드는 매장이 **대놓고 적은 소재**고, 「라이더」는 소재가
-# 레더라고 우리가 미루어 짐작하는 것이다. 짐작보다 적힌 쪽이 먼저다 —
-# 「Incision Suede Crop Biker Jacket」이 레더자켓으로 가고 있었다(2026-09-20 표본 검사).
+                     "무스탕"}
 MATERIAL_OUTER = (
-    # 무스탕이 스웨이드보다 먼저다 — 「스웨이드 라인 무스탕 자켓」「Reversible Suede Half Mustang」은 무스탕이다(2026-10-05).
     # shearling · 시어링은 모양 품목(재킷 · 블루종 …)에 붙었을 때만 여기 온다 — 집업 · 셔츠 · 파카는 OUTER_SHAPE_ITEMS 밖이다.
-    # 「shearling collar denim jacket」의 시어링은 카라 장식이라 트러커 그대로.
+    # 「shearling collar denim jacket」의 시어링은 카라 장식이라 재킷 그대로.
+    # 「스웨이드 라인 무스탕 자켓」「Reversible Suede Half Mustang」은 무스탕이다(2026-10-05).
     (re.compile(r"무스탕|mustang|mouton|무톤|shearling(?!\s*collar)|시어링(?!\s*카라)", re.I), "무스탕"),
-    (re.compile(r"스웨이드|suede", re.I), "스웨이드자켓"),
-    (re.compile(r"트위드|tweed", re.I), "트위드자켓"),
-    (re.compile(r"레더|가죽|leather|라이더|rider|biker|바이커", re.I), "레더자켓"),
 )
 
 
-# 「라이더」 「바이커」가 홀로 선 것은 **무늬 · 그래픽 · 핏 이름**일 때가 많다 — 품목 낱말이 따로 있으면 그쪽이 이긴다.
-# match_head 는 가장 뒤에서 끝나는 낱말을 고르는데, 그래픽 이름은 괄호 안 · 뒤쪽에 붙는다:
-#   outstanding 「MOT SERIES TEE(HOONING BIKER)」 · 「… TEE(BORN AGAIN BIKER)」 6벌이 레더자켓(아우터)으로 섰다
-#   (코덱스 감사 023 26번, 2026-10-02). 창고 전수로 이름에 TEE 가 있는데 아우터인 것은 이 6벌뿐이다.
-# 품목 낱말이 아예 없으면(modnine 「Rider Morrison - MOD1w」 「Night Rider - MOD8sb」 「[Digital Print] Biker Haeran - MOD1」
-# — 청바지 · vunque 「Toque Rider Cover」 — 지갑 칸) 매장 칸 이름이 아우터가 아닌 다른 갈래를 말할 때 그쪽을 따른다
-# (classify_category). 「biker jacket」 「라이더 자켓」처럼 겉옷 낱말이 붙은 꼴은 그대로 레더자켓이다.
-WEAK_RIDER = re.compile(r"(?<![a-z가-힣])(?:riders?|bikers?|라이더|바이커)(?![a-z가-힣])", re.I)
-
-
 def garment_head(name: str) -> str:
-    """ITEM_TYPE_VOCAB 의 match_head — 홀로 선 「라이더 · 바이커」가 다른 품목 낱말을 이기지 않게(WEAK_RIDER 주석)."""
-    item = match_head(name, ITEM_TYPE_VOCAB)
-    if item == "레더자켓" and WEAK_RIDER.search(name or ""):
-        alt = match_head(WEAK_RIDER.sub(" ", name), ITEM_TYPE_VOCAB)
-        if alt and ITEM_TO_CATEGORY.get(alt) not in (None, "outer"):
-            return alt
-    return item
-
-
-def bare_rider(name: str) -> bool:
-    """레더자켓의 근거가 홀로 선 「라이더 · 바이커」뿐인가(다른 품목 낱말 · 겉옷 낱말이 없다)."""
-    return bool(WEAK_RIDER.search(name or "")) and not match_head(WEAK_RIDER.sub(" ", name), ITEM_TYPE_VOCAB)
+    """ITEM_TYPE_VOCAB 의 match_head. 홀로 선 「라이더 · 바이커」는 어휘에 없으므로(라이더자켓 주석) 따로 거를 것이 없다."""
+    return match_head(name, ITEM_TYPE_VOCAB)
 
 
 def material_outer(head_name: str, item: str) -> str:
-    """겉옷 이름에 소재 갈래가 적혀 있으면 그쪽이 품목이다."""
+    """겉옷 이름에 무스탕이 적혀 있으면 그쪽이 품목이다(다른 소재는 태그로만)."""
     if item not in OUTER_SHAPE_ITEMS:
         return item
     for rx, lab in MATERIAL_OUTER:
@@ -1781,11 +1758,6 @@ def classify_category(name: str, category_names: list[str], description: str = "
         return "bags"
     item = garment_head(name)
     if item in ITEM_TO_CATEGORY:
-        # 홀로 선 「라이더 · 바이커」뿐이면 매장 칸 이름이 먼저다 — 칸이 아우터가 아닌 갈래를 말하면 그쪽(WEAK_RIDER 주석)
-        if item == "레더자켓" and bare_rider(name):
-            by_cat = category_code_of(category_names)
-            if by_cat and by_cat != "outer":
-                return by_cat
         return ITEM_TO_CATEGORY[item]
     # 이름에 옷 낱말이 없고 설명글이 「…버킷 햇입니다」 · 「…스크런치입니다」라고 못박으면 그 물건이다(misu-a-barbe 「AMULET STRAW」 ·
     # 「BIG EARS BLUE」). 옷 낱말 뒤에 둔다 — 티셔츠 설명의 「…신체일부와 같은 모자입니다」(horlisun)가 모자가 되지 않게.
@@ -5073,9 +5045,6 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
             # 다시 고른다 — 지우기만 하면 「데님」·「팬츠」가 제 차례에 걸린다.
             item_name = SHOE_FALSE.sub(" ", head_name)
             item = acc or garment_head(item_name)
-            # 홀로 선 「라이더 · 바이커」로 레더자켓이 됐는데 갈래가 아우터가 아니면(칸 이름이 하의 · 지갑이라 했다) 품목도 비운다
-            if item == "레더자켓" and code != "outer" and bare_rider(item_name):
-                item = ""
             item = material_outer(item_name, item)
             if fix and fix.get("품목"):
                 item, acc = fix["품목"], fix["품목"]
