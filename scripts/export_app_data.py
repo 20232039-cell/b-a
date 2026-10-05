@@ -32,7 +32,7 @@ from pathlib import Path
 import product_desc
 import size_from_ocr
 import tag_items
-from build_vocab import _HIER as HIER   # 품목 계층(갈래 → 큰 품목 → 세부) — catalog.json 에 싣는다
+from item_hier import HIER   # 품목 계층(갈래 → 큰 품목 → 세부) — catalog.json 에 싣는다. build_vocab 을 거치면 크롤러 의존성이 딸려 온다
 
 WITH_DESC = False
 # 그림에서 읽어 둔 상품 글 — (brand_slug, product_no) → detail_from_ocr 이 뽑아 둔 줄.
@@ -601,21 +601,37 @@ def main() -> int:
     if sim_path.exists():
         sim = json.loads(sim_path.read_text(encoding="utf-8"))
         sidx = sim.get("index") or []
+        exported = {f'{r["brand_slug"]}-{r["product_no"]}' for r in rows}   # APP_HOLD 매장 등 앱에 안 나가는 상품은 이웃에서도 뺀다(코덱스 2026-10-05)
+        dropped_nb = 0
         for pid, nb in (sim.get("items") or {}).items():
+            if pid not in exported:
+                continue
             slug = pid.rsplit("-", 1)[0]
-            sim_of[slug][pid] = [[sidx[j], sc / 1000] for j, sc in zip(nb[0::2], nb[1::2]) if 0 <= j < len(sidx)]
+            pairs = []
+            for j, sc in zip(nb[0::2], nb[1::2]):
+                if 0 <= j < len(sidx) and sidx[j] in exported:
+                    pairs.append([sidx[j], min(1.0, max(0.0, sc / 1000))])   # 세부 품목 가산으로 1 을 살짝 넘을 수 있어 0~1 로 자른다
+                else:
+                    dropped_nb += 1
+            if pairs:
+                sim_of[slug][pid] = pairs
         for slug, m in sorted(sim_of.items()):
             raw = len(json.dumps(m, ensure_ascii=False, separators=(",", ":")).encode())
             sp = max(1, -(-raw // SIM_PART_BYTES))
+            while True:   # product_no % sp 가 고르지 않으면 한 조각이 상한을 넘는다 — 넘으면 조각 수를 늘려 다시 나눈다
+                buckets_s: list[dict] = [{} for _ in range(sp)]
+                for k, v in m.items():
+                    buckets_s[int(k.rsplit("-", 1)[1]) % sp][k] = v
+                if sp == 1 or sp >= 64 or all(len(json.dumps(b_, ensure_ascii=False, separators=(",", ":")).encode()) <= SIM_PART_BYTES for b_ in buckets_s):
+                    break
+                sp += 1
             sim_parts_of[slug] = sp
             if sp == 1:
                 sim_bytes += write(out / "similar" / f"{slug}.json", m, args.dry)
                 continue
-            buckets_s: list[dict] = [{} for _ in range(sp)]
-            for k, v in m.items():
-                buckets_s[int(k.rsplit("-", 1)[1]) % sp][k] = v
             for i, b_ in enumerate(buckets_s):
                 sim_bytes += write(out / "similar" / f"{slug}.{i}.json", b_, args.dry)
+        print(f"   앱에 안 나가는 상품이라 뺀 이웃 {dropped_nb:,}")
         print(f"비슷한 옷 조각 {len(sim_of)}곳 · 상품 {sum(len(m) for m in sim_of.values()):,}벌 · 합계 {sim_bytes/1048576:.1f} MB · "
               f"쪼갠 매장 {sum(1 for n in sim_parts_of.values() if n > 1)}곳 · version {sim.get('version')}")
     else:

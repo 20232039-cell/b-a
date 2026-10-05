@@ -32,7 +32,6 @@ import argparse
 import collections
 import csv
 import hashlib
-import importlib.util
 import io
 import json
 import re
@@ -74,12 +73,12 @@ for fam, names in {
 
 
 def load_hier() -> dict[str, str]:
-    """build_vocab._HIER → 세부 품목 → 큰 품목."""
-    spec = importlib.util.spec_from_file_location("build_vocab", HERE / "build_vocab.py")
-    bv = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(bv)  # type: ignore[union-attr]
+    """item_hier.HIER → 세부 품목 → 큰 품목."""
+    import sys
+    sys.path.insert(0, str(HERE))
+    from item_hier import HIER
     big = {}
-    for _sec, cat, base, subs in bv._HIER:
+    for _sec, cat, base, subs in HIER:
         if base:
             big[base] = cat
         for x in subs:
@@ -173,6 +172,10 @@ def main() -> int:
         args.out = str(OUT.with_suffix(".partial.json"))   # 연기 시험이 진짜 결과를 덮지 않게
     t0 = time.time()
     seed = {r["slug"] for r in csv.DictReader(io.StringIO((DATA / "brands_seed.csv").read_text(encoding="utf-8-sig")))}
+    import sys
+    sys.path.insert(0, str(HERE))
+    import platforms
+    seed -= set(platforms.APP_HOLD)   # 앱에 안 나가는 매장은 기준에서도 후보에서도 뺀다 — 자리 2.5%를 헛되이 차지하고 있었다(2026-10-05)
     pool = set(Path(args.pool).read_text(encoding="utf-8").split()) if args.pool else None
     rows = [r for r in csv.DictReader(io.StringIO((DATA / "products_full.csv").read_text(encoding="utf-8-sig")))
             if r["status"] == "ON_SALE" and r["category_code"] in CATS and r["brand_slug"] in seed and r["item_type"] and r["price"]
