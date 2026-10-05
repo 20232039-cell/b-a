@@ -77,6 +77,7 @@ jobs:
             python scripts/detail_from_ocr.py | tail -3
             python scripts/crawl_cafe24.py --build-csv | tail -3
             python scripts/size_from_ocr.py | tail -4
+            python scripts/refine_items.py | tail -2   # 소매 실측 · 태그로 반팔 · 롱슬리브 · 하프셔츠 다듬기(2026-10-05)
             python scripts/tag_items.py | tail -3
           }
           GEN="data/products_full.csv data/product_sizes.json data/product_tags_full.json data/gender_basis.json"
@@ -117,6 +118,7 @@ jobs:
               python scripts/detail_from_ocr.py | tail -3
               python scripts/crawl_cafe24.py --build-csv | tail -3
               python scripts/size_from_ocr.py | tail -4
+              python scripts/refine_items.py | tail -2   # 소매 실측 · 태그로 반팔 · 롱슬리브 · 하프셔츠 다듬기(2026-10-05)
               cp /tmp/gen/product_tags_full.json data/
             fi
             sleep 5

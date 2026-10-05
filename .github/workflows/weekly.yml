@@ -219,6 +219,7 @@ jobs:
       - name: 사이즈 재생성 (실측 표 → product_sizes.json)
         run: |
           python scripts/size_from_ocr.py > /tmp/size.log
+          python scripts/refine_items.py | tail -2   # 소매 실측 · 태그로 반팔 · 롱슬리브 · 하프셔츠 다듬기(2026-10-05)
           tail -3 /tmp/size.log
       - name: 스타일 묶기 (색상 행 → style_id)
         # 있으면 좋은 것 — 여기서 죽어도 수집 결과는 커밋한다

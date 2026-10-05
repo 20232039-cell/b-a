@@ -212,6 +212,7 @@ jobs:
           python scripts/crawl_cafe24.py --build-csv > /tmp/csv.log
           head -1 /tmp/csv.log
           python scripts/size_from_ocr.py > /tmp/size.log
+          python scripts/refine_items.py | tail -2   # 소매 실측 · 태그로 반팔 · 롱슬리브 · 하프셔츠 다듬기(2026-10-05)
           head -2 /tmp/size.log
           python scripts/tag_items.py > /tmp/tag.log
           head -16 /tmp/tag.log
