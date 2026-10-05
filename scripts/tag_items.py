@@ -929,6 +929,9 @@ class Tagger:
         self.blocklist = [b.lower() for b in vocab.get("_color_blocklist", [])]
         self.text_blocklist = [b.lower() for b in vocab.get("_text_blocklist", [])]
         self.bottoms_only = [tuple(x.split(".", 1)) for x in vocab.get("_bottoms_only", [])]
+        # 치마 · 원피스 모양(티어드 · 벌룬 · 머메이드 · 펜슬 · 랩 · 플리츠 · 슬립)은 그 둘에만 — 「wrap top」「pleated pants」의
+        # 실루엣이 아니다(2026-10-05: 치마 실루엣 관측 44%, 이름에 pleat 374 · wrap 144 · tiered 70 · balloon 82 가 실루엣 없이 남아 있었다).
+        self.skirt_dress_only = [tuple(x.split(".", 1)) for x in vocab.get("_skirt_dress_only", [])]
         # 옷의 소재가 금속·보석일 수는 없다 — 아래 tag() 주석 참고
         self.not_garment_material = set(vocab.get("_not_garment_material", []))
         # 축 전체를 한 목록으로 — 길이 내림차순으로 매칭하고 매칭 구간을 마스킹한다
@@ -1049,6 +1052,9 @@ class Tagger:
             hits.pop("sleeve_length", None)
         if category not in BOTTOMS | {""}:
             for ax, val in self.bottoms_only:  # 하의 전용 값이 코디 문장으로 상의에 붙는 것 방지
+                hits.get(ax, set()).discard(val)
+        if category not in SKIRTY:
+            for ax, val in self.skirt_dress_only:
                 hits.get(ax, set()).discard(val)
         # 옷(상의·하의·아우터·니트·셔츠·스커트·데님·드레스)의 소재가 메탈·진주·황동·유리일 수는 없다.
         # 「ykk metal buttons」「mother of pearl buttons」가 material/메탈·진주가 됐다 — 부자재 설명이
