@@ -42,6 +42,8 @@ IMG = EMB / "_imgs"
 UA = {"User-Agent": "Mozilla/5.0 (compatible; LayerCatalog/0.2; +https://github.com/20232039-cell/layer-brand-agent)"}
 APPAREL = ("tops", "bottoms", "outer", "skirt", "dress", "suiting")
 BLOCKED_HOSTS = ("musinsa", "29cm")
+# 매장 서버가 아니라 여러 쇼핑몰 사진을 대신 내보내는 공용 이미지 CDN — 여기만 동시 2(간격은 줄마다 0.5초 그대로).
+CDN_HOSTS = ("cafe24img.com", "poxo.com", "cdn.imweb.me", "cdn.shopify.com", "wisacdn.com", "cdn-nhncommerce.com", "cloudfront.net", "amazonaws.com")
 
 MODELS = {
     "fashionclip": ("transformers-clip", "patrickjohncyh/fashion-clip"),
@@ -54,12 +56,13 @@ MODELS = {
 
 # ── 예의 바른 내려받기 ──────────────────────────────────────────────────────────
 class Polite:
-    """호스트마다 robots.txt 를 한 번 읽고, 동시 1 · 요청 간격 0.5초를 지킨다."""
+    """호스트마다 robots.txt 를 한 번 읽고, 동시 1(공용 CDN 은 2) · 줄마다 요청 간격 0.5초를 지킨다."""
 
     def __init__(self):
         self.robots: dict[str, robotparser.RobotFileParser | None] = {}
         self.locks: dict[str, threading.Lock] = defaultdict(threading.Lock)
         self.last: dict[str, float] = defaultdict(float)
+        self.sessions: dict[str, requests.Session] = defaultdict(requests.Session)  # 줄마다 연결 유지 — 장마다 TLS 인사를 다시 하지 않게
         self.meta = threading.Lock()
 
     def host(self, url: str) -> str:
@@ -85,16 +88,16 @@ class Polite:
         except Exception:
             return True
 
-    def get(self, url: str) -> bytes | None:
+    def get(self, url: str, lane: int = 0) -> bytes | None:
         if any(b in url for b in BLOCKED_HOSTS) or not self.allowed(url):
             return None
-        h = self.host(url)
+        h = f"{self.host(url)}#{lane}"
         with self.locks[h]:
             wait = 0.5 - (time.time() - self.last[h])
             if wait > 0:
                 time.sleep(wait)
             try:
-                r = requests.get(url, headers=UA, timeout=20)
+                r = self.sessions[h].get(url, headers=UA, timeout=20)
             except Exception:
                 return None
             finally:
@@ -106,11 +109,11 @@ def img_path(url: str) -> Path:
     return IMG / (hashlib.sha1(url.encode()).hexdigest()[:16] + ".jpg")
 
 
-def fetch(polite: Polite, url: str) -> bool:
+def fetch(polite: Polite, url: str, lane: int = 0) -> bool:
     p = img_path(url)
     if p.exists():
         return True
-    raw = polite.get(url)
+    raw = polite.get(url, lane)
     if not raw:
         return False
     try:
@@ -181,7 +184,7 @@ def main() -> int:
     ap.add_argument("--sample", help="표본 목록 JSON([{u,img,b,c,t}]) — 모델 비교용")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--batch", type=int, default=0, help="기본: GPU 64 · CPU 16")
-    ap.add_argument("--threads", type=int, default=8, help="사진 내려받기 동시 수(호스트마다는 늘 1)")
+    ap.add_argument("--threads", type=int, default=64, help="동시에 받는 호스트 수 상한(호스트마다는 늘 1)")
     args = ap.parse_args()
 
     import torch
@@ -193,7 +196,7 @@ def main() -> int:
     out = EMB / args.model
     out.mkdir(parents=True, exist_ok=True)
     IMG.mkdir(parents=True, exist_ok=True)
-    jobs = json.load(open(args.sample, encoding="utf-8")) if args.sample else all_jobs(args.limit)
+    jobs = json.load(open(args.sample, encoding="utf-8"))[:args.limit or None] if args.sample else all_jobs(args.limit)
     # 결과는 조각(part_NNNN.npz: E + meta)으로 쌓는다 — 한 파일이 GitHub 100MB 상한에 걸리지 않게(12만 × 1152차원이면 280MB).
     parts = sorted(out.glob("part_*.npz"))
     done = {m["u"] for pth in parts for m in json.loads(str(np.load(pth, allow_pickle=False)["meta"]))}
@@ -204,13 +207,37 @@ def main() -> int:
 
     embed = load_model(args.model, device)
     polite = Polite()
+    # 호스트를 번갈아 섞는다 — 브랜드 순이면 묶음마다 한 호스트만 일하고 나머지는 논다(전량 13시간 → 5시간).
+    turn = defaultdict(int)
+
+    def rr(j):
+        turn[polite.host(j["img"])] += 1
+        return turn[polite.host(j["img"])]
+
+    todo.sort(key=rr)
+    fails = defaultdict(int)
     t0 = time.time()
     CH = 2000
     for c0 in range(0, len(todo), CH):
         chunk = todo[c0:c0 + CH]
-        with ThreadPoolExecutor(args.threads) as ex:
-            ok = list(ex.map(lambda j: fetch(polite, j["img"]), chunk))
-        chunk = [j for j, o in zip(chunk, ok) if o]
+        # 호스트마다 일꾼 하나 — 스레드가 한 호스트 앞에 줄 서서 다른 호스트가 노는 일을 막는다.
+        by_host = defaultdict(list)
+        n = defaultdict(int)
+        for j in chunk:
+            h = polite.host(j["img"])
+            n[h] += 1
+            by_host[h, n[h] % 2 if any(c in h for c in CDN_HOSTS) else 0].append(j)
+
+        def fetch_host(item):
+            (h, lane), js = item
+            for j in js:
+                if fails[h] >= 5:  # ponytail: 5번 연속 실패한 호스트는 이번 실행 내내 건너뛴다 — 다시 돌리면 그때 또 시도
+                    break
+                fails[h] = 0 if fetch(polite, j["img"], lane) else fails[h] + 1
+
+        with ThreadPoolExecutor(min(args.threads, len(by_host))) as ex:
+            list(ex.map(fetch_host, by_host.items()))
+        chunk = [j for j in chunk if img_path(j["img"]).exists()]
         Es, metas = [], []
         for i in range(0, len(chunk), batch):
             ims, keep = [], []
