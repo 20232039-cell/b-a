@@ -342,7 +342,10 @@ ITEM_TYPE_VOCAB = {
     "MA-1/봄버": ["bomber", "ma-1", "봄버", "봄버 자켓", "봄버자켓", "봄버 재킷",
                "bomber jacket", "ma-1 jacket"],
     "플리스": ["fleece", "플리스"],
-    "후드집업": ["hood zip-up", "hood zipup", "hood zip up", "hooded zip-up", "hooded zipup", "hooded zip up", "후드 집업", "후디 집업", "hoodie zip-up", "hoodie zip up", "hood zip", "hooded zip", "후드집업", "hoodie zip"],
+    # 「hood zipup parka」는 파카가 아니라 후드집업이다 — 일본식 쓰임(パーカー = 후드티)을 따르는 매장(izm 24벌). 사람 3차 메모 q357(2026-10-05).
+    # 후드 · 집업 낱말이 둘 다 붙었을 때만. 「hoody down parka」(102벌)는 진짜 파카라 그대로.
+    "후드집업": ["hood zip-up", "hood zipup", "hood zip up", "hooded zip-up", "hooded zipup", "hooded zip up", "후드 집업", "후디 집업", "hoodie zip-up", "hoodie zip up", "hood zip", "hooded zip", "후드집업", "hoodie zip",
+             "hood zipup parka", "hood zip-up parka", "hood zip up parka", "hooded zipup parka", "hooded zip-up parka", "후드집업 파카", "후드 집업 파카"],
     "반팔": ["half sleeve", "short sleeve", "half t", "half tee", "반팔", "하프 슬리브", "하프슬리브", "s/s tee", "ss tee",
            # 「숏슬리브」를 낱말 그 자체로 품목처럼 쓰는 매장이 있다(「헨리넥 숏슬리브」 「스쿱넥 포켓 숏슬리브」).
            # 하프슬리브는 있는데 숏슬리브가 없어서 15벌이 품목 빈칸이었다(2026-09-08). 이름 37,519개에서
