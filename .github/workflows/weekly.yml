@@ -173,7 +173,7 @@ jobs:
           # pillow 를 빼먹어 신상 OCR 이 ModuleNotFoundError 로 죽었고, 그 뒤 태그·사이즈
           # 재생성과 커밋이 통째로 건너뛰어졌다 — 스캔 20갈래 1시간 35분이 커밋 없이 날아갔다
           # (2026-09-12 run 34681341194). ocr.yml 은 pillow 를 깔고 있었다.
-          pip install -q requests beautifulsoup4 lxml pillow numpy
+          pip install -q requests beautifulsoup4 lxml pillow numpy scipy
           sudo apt-get update -q
           sudo apt-get install -y -q tesseract-ocr tesseract-ocr-kor
       - uses: actions/download-artifact@v4
@@ -221,6 +221,7 @@ jobs:
           python scripts/size_from_ocr.py > /tmp/size.log
           python scripts/photo_fill.py | tail -4   # 사진으로 소매 · 넥라인 채우기(확신 ≥0.8, 2026-10-05)
           python scripts/refine_items.py | tail -2   # 소매 실측 · 태그로 반팔 · 롱슬리브 · 하프셔츠 다듬기(2026-10-05)
+          python scripts/similar_items.py | tail -3   # 상품마다 비슷한 옷 40벌(v3, 2026-10-05) — 10분 · 3GB
           tail -3 /tmp/size.log
       - name: 스타일 묶기 (색상 행 → style_id)
         # 있으면 좋은 것 — 여기서 죽어도 수집 결과는 커밋한다
@@ -234,6 +235,7 @@ jobs:
           git config user.email "weekly@layer.invalid"
           git add data/crawl/ data/products_full.csv data/product_sizes.json data/product_tags_full.json
           if [ -f data/photo_pred.json ]; then git add data/photo_pred.json; fi   # 사진 판정(photo_fill, 2026-10-05)
+          if [ -f data/similar_items.json ]; then git add data/similar_items.json; fi   # 비슷한 옷(similar_items, 2026-10-05)
           for f in data/styles.csv data/styles_stats.json data/gender_basis.json; do if [ -f "$f" ]; then git add "$f"; fi; done
           git diff --cached --quiet && { echo "변화 없음"; exit 0; }
           git commit -m "주간 갱신 $(date -u +%Y-%m-%d) — 신상·품절·재입고·삭제 (Actions)"

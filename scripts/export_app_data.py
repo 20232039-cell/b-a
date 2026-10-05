@@ -32,6 +32,7 @@ from pathlib import Path
 import product_desc
 import size_from_ocr
 import tag_items
+from build_vocab import _HIER as HIER   # 품목 계층(갈래 → 큰 품목 → 세부) — catalog.json 에 싣는다
 
 WITH_DESC = False
 # 그림에서 읽어 둔 상품 글 — (brand_slug, product_no) → detail_from_ocr 이 뽑아 둔 줄.
@@ -587,6 +588,39 @@ def main() -> int:
     print(f"설명 조각 {len(desc_of)}곳 · 합계 {desc_bytes/1048576:.1f} MB · "
           f"쪼갠 매장 {len(split)}곳 ({', '.join(f'{s}×{parts_of[s]}' for s in sorted(split))})")
 
+    # ── 비슷한 옷 — 브랜드별 조각, 상세를 열 때만 받는다 ─────────────────────────
+    # data/similar_items.json(similar_items.py, 상품마다 40벌 · 점수)을 상세 · 설명 조각과 같은 잣대로 매장별로 자른다.
+    # 앱은 `product_no % sp` 로 어느 조각인지 안다(sp 는 brands 에 적는다. 1 이면 안 쪼갠 것, 0 이면 그 매장은 없음).
+    # 줄 모양: {상품 id: [[이웃 상품 id, 점수 0~1], …]} — 이웃은 다른 브랜드일 수 있으니 id 를 그대로 적는다(앱 세션 2026-10-05).
+    # 원본은 [번호, 점수×1000, 번호, 점수×1000 …] 로 평평하게 적혀 있다(크기 때문) — 여기서 앱이 읽기 쉬운 짝으로 푼다.
+    SIM_PART_BYTES = 500_000
+    sim_parts_of: dict[str, int] = {}
+    sim_bytes = 0
+    sim_of: dict[str, dict[str, list]] = defaultdict(dict)
+    sim_path = DATA / "similar_items.json"
+    if sim_path.exists():
+        sim = json.loads(sim_path.read_text(encoding="utf-8"))
+        sidx = sim.get("index") or []
+        for pid, nb in (sim.get("items") or {}).items():
+            slug = pid.rsplit("-", 1)[0]
+            sim_of[slug][pid] = [[sidx[j], sc / 1000] for j, sc in zip(nb[0::2], nb[1::2]) if 0 <= j < len(sidx)]
+        for slug, m in sorted(sim_of.items()):
+            raw = len(json.dumps(m, ensure_ascii=False, separators=(",", ":")).encode())
+            sp = max(1, -(-raw // SIM_PART_BYTES))
+            sim_parts_of[slug] = sp
+            if sp == 1:
+                sim_bytes += write(out / "similar" / f"{slug}.json", m, args.dry)
+                continue
+            buckets_s: list[dict] = [{} for _ in range(sp)]
+            for k, v in m.items():
+                buckets_s[int(k.rsplit("-", 1)[1]) % sp][k] = v
+            for i, b_ in enumerate(buckets_s):
+                sim_bytes += write(out / "similar" / f"{slug}.{i}.json", b_, args.dry)
+        print(f"비슷한 옷 조각 {len(sim_of)}곳 · 상품 {sum(len(m) for m in sim_of.values()):,}벌 · 합계 {sim_bytes/1048576:.1f} MB · "
+              f"쪼갠 매장 {sum(1 for n in sim_parts_of.values() if n > 1)}곳 · version {sim.get('version')}")
+    else:
+        print("비슷한 옷 조각 없음 — data/similar_items.json 이 없다(similar_items.py 가 아직 안 돌았다)")
+
     # ── catalog.json — 앱이 제일 먼저 읽는 도장 ────────────────────────────────
     # 하루 한 번 데이터가 바뀌는데 앱이 「새 게 나왔는지」를 알 길이 없었다. 받아 둔 걸
     # 계속 쓰거나 매번 4MB 를 다시 받거나 둘 중 하나가 된다. `v` 한 줄이 그걸 푼다 —
@@ -606,6 +640,9 @@ def main() -> int:
     for slug, dp in parts_of.items():
         files[f"descs/{slug}.json" if dp == 1 else f"descs/{slug}.<0..{dp-1}>.json"] = {
             "n": len(desc_of[slug]), "parts": dp}
+    for slug, sp in sim_parts_of.items():
+        files[f"similar/{slug}.json" if sp == 1 else f"similar/{slug}.<0..{sp-1}>.json"] = {
+            "n": len(sim_of[slug]), "parts": sp}
     catalog = {
         "v": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),
         "count": len(rows),
@@ -621,12 +658,19 @@ def main() -> int:
         },
         # 무드는 **브랜드에만** 있다 — 상품마다 붙일 것이 아니다(아래 fold_mood 참고)
         "brand_fields": {"mo": "무드 — moods 안의 말만 쓴다",
-                         "p": "사진 주소 앞머리", "up": "상품 주소 앞머리"},
+                         "p": "사진 주소 앞머리", "up": "상품 주소 앞머리",
+                         "bp": "brands 조각 수", "dp": "descs 조각 수(0 이면 없음)", "sp": "similar 조각 수(0 이면 없음)"},
         # 상세 조각(brands/<slug>.json) 한 벌에만 있는 열쇠
         "detail_fields": {"u": "상품 주소 — brands[b].up 을 앞에 붙인다",
                           "mat": "혼용률 — [{p: 부위(빈칸이면 구분 없음), v: [[소재, %], …]}, …]"},
+        # 비슷한 옷 조각(similar/<slug>.json) — 상품 id → [[이웃 상품 id, 점수 0~1], …] 최대 40, 점수 높은 순.
+        # 큰 품목 안 · 사진 반 태그 반 · 브랜드 무드 · 가격. 같은 브랜드 · 같은 옷 다른 색은 없다. 노션 「유사도·추천 설계」 2절.
+        "similar_fields": {"<id>": "[[이웃 id, 점수], …] — 이웃은 다른 매장일 수 있다. 앱은 보일 때 브랜드당 2벌로 섞는다"},
+        # 품목 계층 — 갈래 → 큰 품목 → 세부 품목(subtype 값). 앱은 손으로 쓴 품목 표 대신 이걸 읽는다(앱 세션 2026-10-05).
+        # 원칙 「모양이 품목, 소재는 태그」 — 레더 · 스웨이드 · 트위드는 품목이 아니라 ma(대표소재) · 태그로 거른다. 무스탕만 품목.
+        "hier": [{"sec": sec, "cat": cat, **({"base": base} if base else {}), "subs": subs} for sec, cat, base, subs in HIER],
         "brands": [{"i": bi[s], "s": s, "n": brand_name.get(s, s), "p": pref.get(s, ""),
-                    "c": len(by.get(s, [])), "bp": shards_of.get(s, 1), "dp": parts_of.get(s, 0),
+                    "c": len(by.get(s, [])), "bp": shards_of.get(s, 1), "dp": parts_of.get(s, 0), "sp": sim_parts_of.get(s, 0),
                     "im": next((r.get("image_url") for r in by.get(s, []) if r.get("image_url")), ""),
                     **({"up": upref[s]} if upref.get(s) else {}),
                     **({"mo": brand_mood[s]} if brand_mood.get(s) else {})}
