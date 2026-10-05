@@ -219,7 +219,9 @@ ITEM_TYPE_VOCAB = {
            "hood", "hoodysuit", "후디수트"],
     "집업": ["zip-up", "zipup", "zip up", "집업", "half zip", "하프집업", "full zip", "풀집업", "quarter zip", "쿼터 집", "쿼터집"],
     # 스웻은 별도 품목이 아니다(사람 결정 2026-09-02): 스웻셔츠=맨투맨, 스웻팬츠=스웨트팬츠. 품목 단어 없는 「스웻」은 build_csv 가 상의일 때만 맨투맨
-    "맨투맨": ["sweatshirt", "sweat shirt", "맨투맨", "crewneck", "crew neck", "스웻셔츠", "스웨트셔츠", "스웨트 셔츠", "스웻 셔츠", "스웻 크루넥", "sweat crew", "mtm", "엠티엠", "sweat", "스웻", "스웨트"],
+    "맨투맨": ["sweatshirt", "sweat shirt", "맨투맨", "crewneck", "crew neck", "스웻셔츠", "스웨트셔츠", "스웨트 셔츠", "스웻 셔츠", "스웻 크루넥", "sweat crew", "mtm", "엠티엠", "sweat", "스웻", "스웨트",
+             # 「SWEATSHIRT RAGLAN LILIES」는 뒤의 raglan 이 이겨 라글란(티셔츠 묶음)이 됐다 — 라글란 맨투맨은 맨투맨이다(2026-10-05 매장 분류 대조).
+             "sweatshirt raglan", "raglan sweatshirt", "라글란 맨투맨", "래글런 맨투맨", "raglan sweat"],
     "티셔츠": ["t-shirt", "tshirt", "tee", "티셔츠", "t",
              # 「WAFFLE HENLEY NECK」처럼 henley 가 머리 낱말인 이름 15벌 — 헨리넥은 넥라인이고 옷은 티셔츠다.
              "henley",
@@ -319,7 +321,8 @@ ITEM_TYPE_VOCAB = {
            # 하프슬리브는 있는데 숏슬리브가 없어서 15벌이 품목 빈칸이었다(2026-09-08). 이름 37,519개에서
            # 바뀌는 것은 그 13벌(빈칸 → 반팔)뿐이다 — 「숏슬리브 셔츠」는 뒤 낱말이 이겨 셔츠로 남는다.
            "숏슬리브", "숏 슬리브"],
-    "피케": ["polo", "pique", "피케", "폴로"],
+    # 「폴로 셔츠」「POLO SHIRT」는 뒤의 셔츠가 이겨 셔츠로 갔다(441벌, 2026-10-05 매장 분류 대조 — 매장은 TEE 로 둔다). 붙은꼴로 되돌린다.
+    "피케": ["polo", "pique", "피케", "폴로", "polo shirt", "polo shirts", "폴로 셔츠", "폴로셔츠", "polo tee", "폴로 티", "폴로티", "pique shirt", "피케 셔츠", "피케셔츠"],
     "레깅스": ["leggings", "레깅스"],
     "조거팬츠": ["jogger", "조거"],
 
@@ -1310,7 +1313,10 @@ def _head_patterns(vocab: dict) -> dict[str, list]:
                 elif re.fullmatch(r"[a-z0-9 /\-]+", k, re.I):
                     # 복수형은 같은 낱말이다 — 「HALF SHIRTS」·「T-Shirts」·「LOAFERS」가
                     # 뒤에 s 가 붙었다는 이유로 통째로 빠졌다(2026-09-05).
-                    body = r"(?<![a-z])" + body + (r"(?:es)?(?![a-z])" if k.endswith("s") else r"(?:es|s)?(?![a-z])")
+                    # 한 글자 열쇠(「t」)는 숫자 옆에서도 막는다 — 품번 「RMBLG4TS11」의 ts 가 티셔츠로 잡혀
+                    # 블라우스 68벌이 티셔츠가 됐다(2026-10-05 매장 분류 대조).
+                    edge = r"[a-z0-9]" if len(k) == 1 else r"[a-z]"
+                    body = f"(?<!{edge})" + body + ((r"(?:es)?" if k.endswith("s") else r"(?:es|s)?") + f"(?!{edge})")
                 pats.append(re.compile(body, re.I))
             out[label] = pats
         _HEAD_RX[key] = out
