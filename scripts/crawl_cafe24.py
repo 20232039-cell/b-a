@@ -291,13 +291,15 @@ ITEM_TYPE_VOCAB = {
     "원피스": ["dress", "원피스", "드레스", "one-piece", "onepiece", "one piece", "ops"],
     "파자마": ["파자마", "pajama", "pyjama", "잠옷", "홈웨어", "라운지웨어", "loungewear"],
     "베스트": ["vest", "베스트"],
-    "바람막이": ["windbreak", "windbreaker", "바람막이", "윈드브레이커", "윈드스토퍼", "windstopper",
+    "바람막이": ["windbreak", "windbreaker", "wind breaker", "바람막이", "윈드브레이커", "윈드스토퍼", "windstopper",
               "wind stopper", "윈드 스토퍼", "아노락", "anorak"],
     "숏팬츠": ["shorts", "숏팬츠", "반바지", "숏츠", "쇼츠"],
     "점프수트": ["jumpsuit", "점프수트", "overall", "오버올"],
     # 영문 「cardigan」 · 「카디건」 표기가 니트 쪽 어휘에 있어 3,643벌이 가디건이 아니라 니트로 서 있었다(코덱스 사전 검증 244 ·
     # 2026-10-03). 「Knit Cardigan」은 뒤 낱말 cardigan 이 이겨 가디건이 된다.
-    "가디건": ["가디건", "cardigan", "카디건", "shrug", "슈러그", "볼레로", "bolero"],
+    "가디건": ["가디건", "cardigan", "카디건", "shrug", "슈러그", "볼레로", "bolero",
+            # 카우치안은 두꺼운 니트 가디건 — 이름에 cardigan 이 없으면 빈칸이었다(10벌, 2026-10-05 앱 세션 제보)
+            "cowichan", "카우치안", "코위찬"],
     "블레이저": ["blazer", "블레이저", "블레이져", "브레이저", "2버튼 재킷", "3버튼 재킷", "2버튼 자켓", "3버튼 자켓", "2 버튼 재킷", "3 버튼 재킷", "2 버튼 자켓", "3 버튼 자켓", "투버튼 재킷", "쓰리버튼 재킷", "투버튼 자켓", "쓰리버튼 자켓", "two button jacket", "three button jacket", "2b jacket", "3b jacket", "2-button jacket", "3-button jacket", "테일러드 자켓", "테일러드 재킷", "tailored jacket", "테일러드자켓"],
     # 「더블 하이넥 벨티드 트렌치 코트」가 트렌치가 아니라 코트로 갔다 — 뒤에 오는 「코트」가
     # 이기기 때문이다. 붙은꼴을 넣어야 끝나는 자리가 같아지고 긴 쪽이 이긴다(2026-09-20).
@@ -378,7 +380,10 @@ ITEM_TYPE_VOCAB = {
     # 「Teddy Shearling Fleece Zip Up」은 집업이고 「시어링 링클 셔츠」의 시어링은 주름(shirring)이다.
     "무스탕": ["무스탕", "mustang", "mouton", "무톤", "무스탕 자켓", "무스탕자켓", "무스탕 재킷", "무스탕 코트", "무스탕코트",
              "mustang jacket", "mustang coat", "shearling jacket", "shearling jk", "shearling coat", "shearling jumper",
-             "shearling blouson", "시어링 자켓", "시어링자켓", "시어링 재킷", "시어링 코트", "시어링 점퍼", "시어링 블루종"],
+             "shearling blouson", "시어링 자켓", "시어링자켓", "시어링 재킷", "시어링 코트", "시어링 점퍼", "시어링 블루종",
+             # 홀로 선 shearling — 「DV.LOT 692 Type B-6 Sheep Shearling 18-20mm」(diafvine 11벌)처럼 모양 낱말이 없는 이름.
+             # 모양 낱말이 있으면 match_head 가 뒤에 오는 그쪽(zip up · coat)을 고르므로 안전하다.
+             "shearling", "sheep shearling"],
     "레이서자켓": ["레이서 자켓", "레이서자켓", "레이서 재킷", "racer jacket", "racer jk", "레이싱 자켓", "레이싱 재킷", "racing jacket", "모터사이클 자켓", "motorcycle jacket"],
     # 「데님 자켓」은 트러커로 보내지 않는다 — 데님 트러커 · 워크자켓 · 셔츠자켓 어느 것도 될 수 있다(사람 2026-10-05). 일반 재킷.
     "트러커": ["트러커", "trucker", "트러커 자켓", "트러커자켓", "트러커 재킷", "trucker jacket"],
