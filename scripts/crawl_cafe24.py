@@ -228,7 +228,11 @@ ITEM_TYPE_VOCAB = {
              # 「INSIDE-OUT T SHIRTS」「Tee shirt fox head」처럼 띄어 쓴 꼴은 뒤의 shirt(s) 가 이겨 셔츠가 됐다 — 491벌
              # (2026-10-05 3차 익명 평가 메모 「기준옷은 롱슬리브야 셔츠가 아니라」). 붙은꼴을 넣어 끝자리를 같게 한다.
              "t shirt", "t shirts", "t-shirts", "tshirts", "tee shirt", "tee shirts"],
-    "셔츠": ["shirt", "blouse", "셔츠", "블라우스", "오버셔츠"],
+    "셔츠": ["shirt", "셔츠", "오버셔츠"],
+    # 2026-10-05 사람 품목 확인 — 「블라우스인듯」 「정확힌 하프셔츠」. 셔츠 묶음 안의 세부 품목으로 갈라낸다(블라우스 1,946 · 하프셔츠 924).
+    "블라우스": ["blouse", "블라우스", "블라우스 셔츠", "blouse shirt"],
+    "하프셔츠": ["half shirt", "half shirts", "하프 셔츠", "하프셔츠", "반팔 셔츠", "반팔셔츠", "short sleeve shirt", "short-sleeve shirt",
+              "short sleeves shirt", "s/s shirt", "1/2 shirt", "하프 슬리브 셔츠", "하프슬리브 셔츠", "half sleeve shirt"],
     "니트": ["knit", "sweater", "니트", "스웨터", "pullover", "풀오버",
             "turtle neck", "turtleneck", "터틀넥", "mock neck", "모크넥", "하이넥", "high neck"],
     # 「fur」·「shearling」·「sheepskin」은 소재지 품목이 아니다. 품목으로 넣었더니
@@ -249,7 +253,7 @@ ITEM_TYPE_VOCAB = {
             "다운 코트", "다운코트", "down coat", "패딩 코트", "패딩코트", "puffer coat",
             "다운 블루종", "down blouson", "puffer blouson"],
     # 「진」은 홀로 두면 「진주」에 걸린다 — 앞뒤가 빈칸일 때만.
-    "데님": ["jeans", "denim", "데님", "청바지", "jean", "진스", "쟌", "데님팬츠",
+    "데님": ["jeans", "denim", "데님", "청바지", "jean", "진스", "쟌", "데님팬츠", "데님 팬츠", "denim pants", "denim pant", "데님 바지", "denim trousers", "진 팬츠", "jean pants",
             "셀비지", "selvedge", " 진 "],
     "팬츠": ["pants", "trousers", "trouser", "팬츠", "슬랙스", "slacks", "트라우저",
             "판타롱", "pantalon",
@@ -270,7 +274,7 @@ ITEM_TYPE_VOCAB = {
     # 영문 「cardigan」 · 「카디건」 표기가 니트 쪽 어휘에 있어 3,643벌이 가디건이 아니라 니트로 서 있었다(코덱스 사전 검증 244 ·
     # 2026-10-03). 「Knit Cardigan」은 뒤 낱말 cardigan 이 이겨 가디건이 된다.
     "가디건": ["가디건", "cardigan", "카디건", "shrug", "슈러그", "볼레로", "bolero"],
-    "블레이저": ["blazer", "블레이저", "블레이져", "브레이저"],
+    "블레이저": ["blazer", "블레이저", "블레이져", "브레이저", "2버튼 재킷", "3버튼 재킷", "2버튼 자켓", "3버튼 자켓", "2 버튼 재킷", "3 버튼 재킷", "2 버튼 자켓", "3 버튼 자켓", "투버튼 재킷", "쓰리버튼 재킷", "투버튼 자켓", "쓰리버튼 자켓", "two button jacket", "three button jacket", "2b jacket", "3b jacket", "2-button jacket", "3-button jacket"],
     # 「더블 하이넥 벨티드 트렌치 코트」가 트렌치가 아니라 코트로 갔다 — 뒤에 오는 「코트」가
     # 이기기 때문이다. 붙은꼴을 넣어야 끝나는 자리가 같아지고 긴 쪽이 이긴다(2026-09-20).
     "트렌치": ["trench", "트렌치", "트렌치 코트", "트렌치코트", "trench coat", "trenchcoat"],
@@ -315,7 +319,7 @@ ITEM_TYPE_VOCAB = {
     "MA-1/봄버": ["bomber", "ma-1", "봄버", "봄버 자켓", "봄버자켓", "봄버 재킷",
                "bomber jacket", "ma-1 jacket"],
     "플리스": ["fleece", "플리스"],
-    "후드집업": ["hood zip", "hooded zip", "후드집업", "hoodie zip"],
+    "후드집업": ["hood zip-up", "hood zipup", "hood zip up", "hooded zip-up", "hooded zipup", "hooded zip up", "후드 집업", "후디 집업", "hoodie zip-up", "hoodie zip up", "hood zip", "hooded zip", "후드집업", "hoodie zip"],
     "반팔": ["half sleeve", "short sleeve", "half t", "half tee", "반팔", "하프 슬리브", "하프슬리브", "s/s tee", "ss tee",
            # 「숏슬리브」를 낱말 그 자체로 품목처럼 쓰는 매장이 있다(「헨리넥 숏슬리브」 「스쿱넥 포켓 숏슬리브」).
            # 하프슬리브는 있는데 숏슬리브가 없어서 15벌이 품목 빈칸이었다(2026-09-08). 이름 37,519개에서
@@ -345,6 +349,7 @@ ITEM_TYPE_VOCAB = {
              "mustang jacket", "mustang coat", "shearling jacket", "shearling jk", "shearling coat", "shearling jumper",
              "shearling blouson", "시어링 자켓", "시어링자켓", "시어링 재킷", "시어링 코트", "시어링 점퍼", "시어링 블루종"],
     "트위드자켓": ["트위드 자켓", "트위드자켓", "트위드 재킷", "tweed jacket", "tweed jk"],
+    "레이서자켓": ["레이서 자켓", "레이서자켓", "레이서 재킷", "racer jacket", "racer jk", "레이싱 자켓", "레이싱 재킷", "racing jacket", "모터사이클 자켓", "motorcycle jacket"],
     "트러커": ["트러커", "trucker", "트러커 자켓", "트러커자켓", "트러커 재킷", "trucker jacket",
              "데님 자켓", "데님자켓", "데님 재킷", "denim jacket"],
     "워크자켓": ["워크 자켓", "워크자켓", "워크 재킷", "work jacket", "카바롤", "coverall"],
@@ -375,7 +380,7 @@ ITEM_TYPE_VOCAB = {
     "치노": ["치노", "chino", "치노 팬츠", "치노팬츠", "chino pants"],
     "카펜터팬츠": ["카펜터", "carpenter", "카펜터 팬츠", "카펜터팬츠", "carpenter pants"],
     "파티그팬츠": ["파티그", "fatigue", "파티그 팬츠", "fatigue pants"],
-    "파라슈트팬츠": ["파라슈트", "parachute", "파라슈트 팬츠", "parachute pants"],
+    "파라슈트팬츠": ["파라슈트", "parachute", "파라슈트 팬츠", "parachute pants", "파라수트", "파라수트 팬츠", "파라수트팬츠", "parasute pants"],
     "트랙팬츠": ["트랙 팬츠", "트랙팬츠", "track pants", "트랙팬트"],
     # 상의
     "케이블니트": ["케이블 니트", "케이블니트", "cable knit", "케이블 스웨터", "cable sweater"],
@@ -402,7 +407,7 @@ ITEM_TO_CATEGORY = {
     "파카": "outer", "MA-1/봄버": "outer", "플리스": "outer",
     # 2026-09-20 에 가른 품목들 — 갈래는 바뀌지 않는다
     "레더자켓": "outer", "스웨이드자켓": "outer", "트위드자켓": "outer", "트러커": "outer",
-    "무스탕": "outer",
+    "무스탕": "outer", "레이서자켓": "outer", "블라우스": "tops", "하프셔츠": "tops",
     "워크자켓": "outer", "필드자켓": "outer", "해링턴": "outer", "바시티": "outer",
     "코치자켓": "outer", "사파리자켓": "outer", "퀼팅자켓": "outer", "블루종": "outer",
     "발마칸": "outer", "더플코트": "outer", "맥코트": "outer", "피코트": "outer",
@@ -528,13 +533,13 @@ NAME_WOMEN_ONLY = re.compile(
 # **남성 쪽은 세울 수 없다.** 같은 정답지로 훑으면 가장 좋은 것이 상의 총장≥76 의 91.1%,
 # 어깨≥54 의 83.1%, 아우터 어깨≥58 의 67.7% 다. 여성 오버핏이 남성 치수를 통째로 덮는다.
 # 하의(허리)는 되는데 상의는 안 된다 — 억지로 넣지 않는다.
-TOP_ITEMS = {"티셔츠", "맨투맨", "셔츠", "니트", "후드", "롱슬리브", "반팔", "탑",
+TOP_ITEMS = {"티셔츠", "맨투맨", "셔츠", "블라우스", "하프셔츠", "니트", "후드", "롱슬리브", "반팔", "탑",
              "가디건", "집업", "베스트", "피케", "저지",
              # 2026-09-20 에 가른 것 — 여기 안 넣으면 총장 성별 규칙이 그 옷에서 꺼진다
              "케이블니트", "아가일니트", "링거티", "라글란", "웨스턴셔츠", "뷔스티에"}
 OUTER_ITEMS = {"재킷", "코트", "점퍼", "블레이저", "패딩", "파카", "바람막이",
                "MA-1/봄버", "트렌치",
-               "레더자켓", "스웨이드자켓", "트위드자켓", "무스탕", "트러커", "워크자켓", "필드자켓",
+               "레더자켓", "스웨이드자켓", "트위드자켓", "무스탕", "레이서자켓", "트러커", "워크자켓", "필드자켓",
                "해링턴", "바시티", "코치자켓", "사파리자켓", "퀼팅자켓", "블루종",
                "발마칸", "더플코트", "맥코트", "피코트", "싱글코트", "더블코트", "트랙재킷", "오버셔츠"}
 TOP_SHORT_CM = 57.0          # 총장 중앙이 이보다 짧으면 여성
