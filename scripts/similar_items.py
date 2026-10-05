@@ -354,6 +354,8 @@ def main() -> int:
             h.update(hashlib.sha1(fp.read_bytes()).digest())
     for p_ in sorted((DATA / "emb" / "siglip").glob("part_*.npz")):
         h.update(p_.name.encode()); h.update(str(p_.stat().st_size).encode())
+    h.update(f"n={len(index)}".encode())                      # 상품 집합이 바뀌면(보류 매장 제외 등) version 도 바뀐다 — 2026-10-05 에 같은 version 이 두 번 나왔다
+    h.update(json.dumps(sorted(platforms.APP_HOLD)).encode())
     if args.limit:
         h.update(f"limit={args.limit}".encode())
     version = h.hexdigest()[:12]
