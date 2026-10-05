@@ -29,6 +29,12 @@ SIZES = DATA / "product_sizes.json"
 SHORT_CM, LONG_CM = 38.0, 50.0
 TEES = {"티셔츠", "반팔", "롱슬리브"}
 SHIRTS = {"셔츠", "하프셔츠"}
+# 치마 · 원피스 기장(총장 실측, 가장 작은 사이즈) — 이름에 기장이 적힌 것으로 잰 분포(2026-10-05):
+#   스커트 미니 95% ≤48 · 미디 48~82 · 롱 5% ≥71 → ≤46 미니 · ≥78 롱 · 사이 미디
+#   원피스 미니 95% ≤90 · 롱 5% ≥98 → ≤90 미니 · ≥105 롱 · 사이 미디
+SKIRT_CUT = (46.0, 78.0)
+DRESS_CUT = (90.0, 105.0)
+LEN_TAG = {"미니": "미니", "미디": "미디", "맥시": "롱", "롱기장": "롱"}
 
 
 def sleeve_cm(sizes: dict, url: str) -> float | None:
@@ -40,6 +46,31 @@ def sleeve_tag(tags: dict, url: str) -> str | None:
     v = ((tags.get(url) or {}).get("tags") or {}).get("sleeve_length") or []
     v = [x for x in v if x in ("반팔", "롱슬리브")]
     return v[0] if len(v) == 1 else None   # 반팔 · 롱슬리브가 같이 적힌 것(코디 문장)은 안 믿는다
+
+
+def total_cm(sizes: dict, url: str) -> float | None:
+    v = [x for x in ((sizes.get(url) or {}).get("sizes") or {}).get("총장", []) if x is not None]
+    return min(v) if v else None
+
+
+def length_tag(tags: dict, url: str) -> str | None:
+    v = [LEN_TAG[x] for x in (((tags.get(url) or {}).get("tags") or {}).get("length") or []) if x in LEN_TAG]
+    return v[0] if len(set(v)) == 1 else None
+
+
+def decide_length(item: str, cm: float | None, tag: str | None) -> str:
+    """뭉뚱그린 스커트 · 원피스를 기장으로 미니 · 미디 · 롱으로 가른다(이름이 이미 말한 것은 두고)."""
+    if item == "스커트":
+        lo, hi, suf = *SKIRT_CUT, "스커트"
+    elif item == "원피스":
+        lo, hi, suf = *DRESS_CUT, "원피스"
+    else:
+        return item
+    if cm is not None:
+        return ("미니" if cm <= lo else "롱" if cm >= hi else "미디") + suf
+    if tag:
+        return tag + suf
+    return item
 
 
 def decide(item: str, cm: float | None, tag: str | None) -> str:
@@ -76,18 +107,25 @@ def main() -> int:
     by: Counter = Counter()
     for r in rows:
         it = r.get("item_type") or ""
-        if it not in TEES | SHIRTS:
-            continue
         u = r["source_url"]
-        cm, tag = sleeve_cm(sizes, u), sleeve_tag(tags, u)
-        new = decide(it, cm, tag)
+        if it in ("스커트", "원피스"):
+            cm, tag = total_cm(sizes, u), length_tag(tags, u)
+            new = decide_length(it, cm, tag)
+            if new != it:
+                by["실측" if cm is not None else "태그"] += 1
+        elif it in TEES | SHIRTS:
+            cm, tag = sleeve_cm(sizes, u), sleeve_tag(tags, u)
+            new = decide(it, cm, tag)
+            if new != it:
+                by["실측" if cm is not None and (cm <= SHORT_CM or cm >= LONG_CM) else "태그"] += 1
+        else:
+            continue
         if new != it:
             moved[(it, new)] += 1
-            by["실측" if cm is not None and (cm <= SHORT_CM or cm >= LONG_CM) else "태그"] += 1
             r["item_type"] = new
             if r.get("subtype") in (it, ""):
                 r["subtype"] = new
-    print(f"소매 길이로 다듬음 {sum(moved.values()):,}벌 (실측 {by['실측']:,} · 태그 {by['태그']:,})")
+    print(f"소매 · 기장으로 다듬음 {sum(moved.values()):,}벌 (실측 {by['실측']:,} · 태그 {by['태그']:,})")
     for (a, b), n in moved.most_common():
         print(f"  {a} → {b} {n:,}")
     if args.dry_run or not moved:
