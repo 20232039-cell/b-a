@@ -1461,6 +1461,16 @@ HEAD_ACC = re.compile(
 HEAD_MISC = re.compile(
     r"\brug\b|\bmat\b|\bglass\b|\btoy\b|머그|\bmug\b|텀블러|tumbler|포스터|poster|"
     r"스티커|sticker|엽서|postcard|캔들|candle|인센스|incense|방향제|디퓨저|diffuser", re.I)
+# 입지 않는 물건 — 폰 · 노트북 · 이어폰 케이스, 그립톡, 키링 · 키체인, 자석 · 달력 · 라이터 · 컵받침 · 인형 · 쿠션 · 수건 …
+# 매장 칸 이름이 ACC 라서 잡화(accessories)로 섰다(946벌, 2026-10-05 사람 「패션이랑 관련 없는 아이템은 아예 지워」).
+# 옷 낱말이 같이 있으면 옷이다 — 「Toy Puff T-Shirt」 「Sticker Hoodie」 「Postcard Tee」. 갈래는 lifestyle(앱에 안 나감).
+NONFASHION = re.compile(
+    r"(?<![a-z])(phone\s*cases?|iphone|galaxy|z[\s-]?flip|macbook|laptop|ipad|airpods?|buds|earphones?|keyrings?|key\s*rings?|"
+    r"keychains?|key\s*chains?|key\s*holders?|magnets?|calendars?|lighters?|coasters?|plates?|bowls?|notebooks?|puzzles?|"
+    r"dolls?|figures?|cushions?|blankets?|towels?|mouse\s*pads?|shoe\s*horns?|ornaments?|grip\s*toks?|smart\s*toks?|"
+    r"card\s*holders?\s*keyrings?|air\s*tags?|chargers?)(?![a-z])|"
+    r"폰\s*케이스|핸드폰|휴대폰|아이폰|갤럭시|맥북|노트북|아이패드|에어팟|버즈|이어폰|키링|키체인|키홀더|마그넷|자석|달력|캘린더|라이터|"
+    r"코스터|컵받침|접시|그릇|노트북|퍼즐|인형|쿠션|담요|블랭킷|타올|수건|마우스패드|구둣주걱|오너먼트|그립톡|스마트톡|에어태그|충전기", re.I)   # cable · 케이블은 니트 무늬라 넣지 않는다(CREST CABLE HALF-SLEEVE)
 
 
 
@@ -1714,6 +1724,8 @@ def classify_category(name: str, category_names: list[str], description: str = "
     if SHOE_FALSE.search(name):
         return "bottoms"
     name = clean_name_for_kind(name)
+    if NONFASHION.search(name) and not match_head(name, ITEM_TYPE_VOCAB):
+        return "lifestyle"
     # 잡화 세분류가 먼저다 — 옷 어휘와 겹치는 낱말(니트 스카프·플리스 베레·데님 캡)이 있고,
     # 상품명은 「무엇인지」를 뒤에 적으므로 뒤에 걸린 쪽이 머리 낱말이다.
     acc = match_acc(name)
@@ -1759,7 +1771,7 @@ def classify_category(name: str, category_names: list[str], description: str = "
         return "shoes"
     # 굿즈 낱말은 옷 낱말 뒤에 본다 — 「Toy Puff T-Shirt」는 장난감이 아니라 티셔츠다.
     if HEAD_MISC.search(name):
-        return "other"
+        return "lifestyle"   # 굿즈는 옷(other)이 아니라 생활용품 — 2026-10-05
     by_cat = category_code_of(category_names)
     if by_cat:
         return by_cat
