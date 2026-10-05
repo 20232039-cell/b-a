@@ -233,6 +233,7 @@ jobs:
           git config user.name "layer-weekly-bot"
           git config user.email "weekly@layer.invalid"
           git add data/crawl/ data/products_full.csv data/product_sizes.json data/product_tags_full.json
+          if [ -f data/photo_pred.json ]; then git add data/photo_pred.json; fi   # 사진 판정(photo_fill, 2026-10-05)
           for f in data/styles.csv data/styles_stats.json data/gender_basis.json; do if [ -f "$f" ]; then git add "$f"; fi; done
           git diff --cached --quiet && { echo "변화 없음"; exit 0; }
           git commit -m "주간 갱신 $(date -u +%Y-%m-%d) — 신상·품절·재입고·삭제 (Actions)"

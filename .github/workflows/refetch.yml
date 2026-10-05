@@ -231,6 +231,7 @@ jobs:
           git add data/crawl/ data/products_full.csv data/product_sizes.json data/product_tags_full.json \
                   data/_audit.json data/_audit.csv
           if [ -f data/gender_basis.json ]; then git add data/gender_basis.json; fi
+          if [ -f data/photo_pred.json ]; then git add data/photo_pred.json; fi   # 사진 판정(photo_fill, 2026-10-05)
           git diff --cached --quiet && { echo "변화 없음"; exit 0; }
           git commit -m "상세 보정 $(date -u +%Y-%m-%d) — ${{ inputs.select }} · ${{ inputs.fields }} (Actions)"
           for i in 1 2 3; do

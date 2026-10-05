@@ -375,7 +375,7 @@ jobs:
         run: |
           git config user.name "layer-ocr-bot"
           git config user.email "ocr@layer.invalid"
-          git add data/crawl/ocr/ data/product_sizes.json data/product_tags_full.json \
+          git add data/crawl/ocr/ data/product_sizes.json data/product_tags_full.json data/photo_pred.json \
                   data/_issues_existing_brands.csv data/size_unavailable.csv \
                   data/_missing.csv data/_missing_existing.csv \
                   data/_audit.json data/_audit.csv 2>/dev/null || true

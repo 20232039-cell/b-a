@@ -81,7 +81,7 @@ jobs:
             python scripts/photo_fill.py | tail -4   # 사진으로 소매 · 넥라인 채우기(확신 ≥0.8, 2026-10-05)
             python scripts/refine_items.py | tail -2   # 소매 실측 · 태그로 반팔 · 롱슬리브 · 하프셔츠 다듬기(2026-10-05)
           }
-          GEN="data/products_full.csv data/product_sizes.json data/product_tags_full.json data/gender_basis.json"
+          GEN="data/products_full.csv data/product_sizes.json data/product_tags_full.json data/gender_basis.json data/photo_pred.json"
           # 생성물을 만든 원본의 자리. 밀기가 막혔을 때 그 사이 원본이 바뀌었는지 이것과 견준다.
           BASE=$(git rev-parse HEAD)
           INPUTS="data/crawl data/manual_sizes.csv data/manual_items.csv data/size_labels.json data/vocab_aliases.json"

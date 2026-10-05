@@ -133,8 +133,8 @@ def main() -> int:
     E, EI = load_emb()
     print(f"사진 임베딩 {len(EI):,}장 ({time.time() - t0:.0f}s)")
     if not EI:
-        if OUT.exists() and not args.dry_run:
-            OUT.unlink()      # 임베딩이 없는데 옛 판정이 남아 있으면 refine_items 가 그걸 믿는다 — 지운다
+        if not args.dry_run:
+            OUT.write_text("{}\n", encoding="utf-8")   # 임베딩이 없는데 옛 판정이 남아 있으면 refine_items 가 그걸 믿는다 — 비운다(파일은 둬서 워크플로 cp 가 안 깨지게)
         return 0
     rows = list(csv.DictReader(io.StringIO(CSV.read_text(encoding="utf-8-sig"))))
     tags = json.loads(TAGS.read_text(encoding="utf-8")) if TAGS.exists() else {}
