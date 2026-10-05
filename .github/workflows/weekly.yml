@@ -108,7 +108,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install -q requests beautifulsoup4 lxml
+      - run: pip install -q requests beautifulsoup4 lxml numpy
       - name: 묶음 ${{ matrix.bucket }} 목록 스캔 (상품 ${{ matrix.load }})
         # 로그는 이 판에 **새로 붙은 줄만** 넘긴다. 예전엔 파일 통째로 넘겨, 묶음 20개가 저마다
         # 옛 로그 전부를 collect 에 다시 붙였다 — 판마다 20배로 불어 2026-10-03 에 402MB 가 되어
@@ -173,7 +173,7 @@ jobs:
           # pillow 를 빼먹어 신상 OCR 이 ModuleNotFoundError 로 죽었고, 그 뒤 태그·사이즈
           # 재생성과 커밋이 통째로 건너뛰어졌다 — 스캔 20갈래 1시간 35분이 커밋 없이 날아갔다
           # (2026-09-12 run 34681341194). ocr.yml 은 pillow 를 깔고 있었다.
-          pip install -q requests beautifulsoup4 lxml pillow
+          pip install -q requests beautifulsoup4 lxml pillow numpy
           sudo apt-get update -q
           sudo apt-get install -y -q tesseract-ocr tesseract-ocr-kor
       - uses: actions/download-artifact@v4
@@ -219,6 +219,7 @@ jobs:
       - name: 사이즈 재생성 (실측 표 → product_sizes.json)
         run: |
           python scripts/size_from_ocr.py > /tmp/size.log
+          python scripts/photo_fill.py | tail -4   # 사진으로 소매 · 넥라인 채우기(확신 ≥0.8, 2026-10-05)
           python scripts/refine_items.py | tail -2   # 소매 실측 · 태그로 반팔 · 롱슬리브 · 하프셔츠 다듬기(2026-10-05)
           tail -3 /tmp/size.log
       - name: 스타일 묶기 (색상 행 → style_id)

@@ -31,7 +31,7 @@ jobs:
         with: {token: "${{ secrets.DATA_TOKEN }}"}
       - uses: actions/setup-python@v5
         with: {python-version: "3.11"}
-      - run: pip install -q requests beautifulsoup4 lxml
+      - run: pip install -q requests beautifulsoup4 lxml numpy
       - name: 수집
         working-directory: work
         run: |
@@ -77,8 +77,9 @@ jobs:
             python scripts/detail_from_ocr.py | tail -3
             python scripts/crawl_cafe24.py --build-csv | tail -3
             python scripts/size_from_ocr.py | tail -4
+            python scripts/tag_items.py | tail -3   # 태그가 사진보다 먼저 — photo_fill 이 넥라인을 태그에 채우므로(2026-10-05)
+            python scripts/photo_fill.py | tail -4   # 사진으로 소매 · 넥라인 채우기(확신 ≥0.8, 2026-10-05)
             python scripts/refine_items.py | tail -2   # 소매 실측 · 태그로 반팔 · 롱슬리브 · 하프셔츠 다듬기(2026-10-05)
-            python scripts/tag_items.py | tail -3
           }
           GEN="data/products_full.csv data/product_sizes.json data/product_tags_full.json data/gender_basis.json"
           # 생성물을 만든 원본의 자리. 밀기가 막혔을 때 그 사이 원본이 바뀌었는지 이것과 견준다.
@@ -118,6 +119,7 @@ jobs:
               python scripts/detail_from_ocr.py | tail -3
               python scripts/crawl_cafe24.py --build-csv | tail -3
               python scripts/size_from_ocr.py | tail -4
+              python scripts/photo_fill.py | tail -4   # 사진으로 소매 · 넥라인 채우기(확신 ≥0.8, 2026-10-05)
               python scripts/refine_items.py | tail -2   # 소매 실측 · 태그로 반팔 · 롱슬리브 · 하프셔츠 다듬기(2026-10-05)
               cp /tmp/gen/product_tags_full.json data/
             fi

@@ -5,10 +5,13 @@
 판정 필요」라고 했다. 실측이 가장 확실하고(소매 말이 있는 이름 4,429벌로 재 보니 반팔은 95%가 36cm 이하, 롱슬리브는 95%가 55.5cm
 이상), 다음이 소매 태그(tag_items 가 글 · 실측에서 뽑은 값)다.
 
-  티셔츠 · 반팔 · 롱슬리브 : 실측 ≤38 → 반팔, ≥50 → 롱슬리브, 그 사이(칠부쯤)는 태그가 하나로 말할 때만
+  티셔츠 · 반팔 · 롱슬리브 : 실측 ≤38 → 반팔, ≥50 → 롱슬리브, 그 사이(칠부쯤)나 실측이 없으면 사진 판정(photo_fill, 확신 ≥0.8),
+                           그것도 없으면 태그가 하나로 말할 때만. 사진이 슬리브리스라 하면 티셔츠는 슬리브리스로 보낸다.
   셔츠 · 하프셔츠           : 같은 기준으로 하프셔츠 ↔ 셔츠. 블라우스는 소매와 무관하니 두지 않는다
+사진이 글 태그보다 앞인 까닭: 사진 판정은 브랜드 단위 검증에서 97%(확신 ≥0.8)인데, 글 태그의 소매 말은 코디 문장(「반팔 티와 함께」)에서
+온 것이 섞인다(2026-10-05).
 
-products_full.csv 의 item_type · subtype 을 고쳐 쓴다. 워크플로에서 size_from_ocr 다음에 돈다(태그 · 실측이 둘 다 최신일 때).
+products_full.csv 의 item_type · subtype 을 고쳐 쓴다. 워크플로에서 size_from_ocr · photo_fill 다음에 돈다(태그 · 실측 · 사진이 다 최신일 때).
   python scripts/refine_items.py            # 고쳐 쓴다
   python scripts/refine_items.py --dry-run  # 숫자만
 """
@@ -25,6 +28,7 @@ DATA = Path(__file__).resolve().parent.parent / "data"
 CSV = DATA / "products_full.csv"
 TAGS = DATA / "product_tags_full.json"
 SIZES = DATA / "product_sizes.json"
+PHOTO = DATA / "photo_pred.json"     # photo_fill.py 가 만든다(확신 ≥0.8 만 들어 있다)
 
 SHORT_CM, LONG_CM = 38.0, 50.0
 TEES = {"티셔츠", "반팔", "롱슬리브"}
@@ -46,6 +50,11 @@ def sleeve_tag(tags: dict, url: str) -> str | None:
     v = ((tags.get(url) or {}).get("tags") or {}).get("sleeve_length") or []
     v = [x for x in v if x in ("반팔", "롱슬리브")]
     return v[0] if len(v) == 1 else None   # 반팔 · 롱슬리브가 같이 적힌 것(코디 문장)은 안 믿는다
+
+
+def photo_sleeve(photo: dict, url: str) -> str | None:
+    v = (photo.get(url) or {}).get("sleeve")
+    return v[0] if v else None
 
 
 def total_cm(sizes: dict, url: str) -> float | None:
@@ -73,25 +82,32 @@ def decide_length(item: str, cm: float | None, tag: str | None) -> str:
     return item
 
 
-def decide(item: str, cm: float | None, tag: str | None) -> str:
+def decide(item: str, cm: float | None, tag: str | None, photo: str | None = None) -> tuple[str, str]:
+    """(새 품목, 근거) — 근거는 실측 · 사진 · 태그 · 없음."""
     # 이름이 이미 소매를 말한 것(반팔 · 롱슬리브 · 하프셔츠)은 두고, 뭉뚱그린 것(티셔츠 · 셔츠)만 가른다 —
     # 이름과 실측이 어긋난 31벌은 실측표를 잘못 읽은 쪽이 더 많아 보였다(2026-10-05 시험).
     if item == "티셔츠":
-        short, long_ = "반팔", "롱슬리브"
+        short, long_, none_ = "반팔", "롱슬리브", "슬리브리스"
     elif item == "셔츠":
-        short, long_ = "하프셔츠", "셔츠"
+        short, long_, none_ = "하프셔츠", "셔츠", "셔츠"     # 민소매 셔츠는 그냥 셔츠로 둔다
     else:
-        return item
+        return item, "없음"
     if cm is not None:
         if cm <= SHORT_CM:
-            return short
+            return short, "실측"
         if cm >= LONG_CM:
-            return long_
+            return long_, "실측"
+    if photo == "반팔":
+        return short, "사진"
+    if photo == "롱슬리브":
+        return long_, "사진"
+    if photo == "슬리브리스":
+        return none_, "사진"
     if tag == "반팔":
-        return short
+        return short, "태그"
     if tag == "롱슬리브":
-        return long_
-    return item
+        return long_, "태그"
+    return item, "없음"
 
 
 def main() -> int:
@@ -103,6 +119,7 @@ def main() -> int:
     fields = list(rows[0].keys())
     tags = json.loads(TAGS.read_text(encoding="utf-8")) if TAGS.exists() else {}
     sizes = json.loads(SIZES.read_text(encoding="utf-8")) if SIZES.exists() else {}
+    photo = json.loads(PHOTO.read_text(encoding="utf-8")) if PHOTO.exists() else {}
     moved: Counter = Counter()
     by: Counter = Counter()
     for r in rows:
@@ -114,10 +131,9 @@ def main() -> int:
             if new != it:
                 by["실측" if cm is not None else "태그"] += 1
         elif it in TEES | SHIRTS:
-            cm, tag = sleeve_cm(sizes, u), sleeve_tag(tags, u)
-            new = decide(it, cm, tag)
+            new, why = decide(it, sleeve_cm(sizes, u), sleeve_tag(tags, u), photo_sleeve(photo, u))
             if new != it:
-                by["실측" if cm is not None and (cm <= SHORT_CM or cm >= LONG_CM) else "태그"] += 1
+                by[why] += 1
         else:
             continue
         if new != it:
@@ -125,7 +141,7 @@ def main() -> int:
             r["item_type"] = new
             if r.get("subtype") in (it, ""):
                 r["subtype"] = new
-    print(f"소매 · 기장으로 다듬음 {sum(moved.values()):,}벌 (실측 {by['실측']:,} · 태그 {by['태그']:,})")
+    print(f"소매 · 기장으로 다듬음 {sum(moved.values()):,}벌 (실측 {by['실측']:,} · 사진 {by['사진']:,} · 태그 {by['태그']:,})")
     for (a, b), n in moved.most_common():
         print(f"  {a} → {b} {n:,}")
     if args.dry_run or not moved:

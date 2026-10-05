@@ -24,7 +24,7 @@ jobs:
         with: {token: "${{ secrets.DATA_TOKEN }}"}
       - uses: actions/setup-python@v5
         with: {python-version: "3.11"}
-      - run: pip install -q requests beautifulsoup4 lxml pillow
+      - run: pip install -q requests beautifulsoup4 lxml pillow numpy
       - name: CSV 다시 만들기
         run: python scripts/weekly_update.py --csv-only
       - name: 태그 재생성
@@ -34,6 +34,7 @@ jobs:
       - name: 사이즈 재생성
         run: |
           python scripts/size_from_ocr.py > /tmp/size.log
+          python scripts/photo_fill.py | tail -4   # 사진으로 소매 · 넥라인 채우기(확신 ≥0.8, 2026-10-05)
           python scripts/refine_items.py | tail -2   # 소매 실측 · 태그로 반팔 · 롱슬리브 · 하프셔츠 다듬기(2026-10-05)
           tail -3 /tmp/size.log
       - name: 스타일 묶기
