@@ -1889,7 +1889,9 @@ _FIELD_COLOR = {
 # 이름 끝에서만 받는 매장 색이름 — 어휘에 새 값을 만들지 않고 가장 가까운 기존 값으로 옮긴다(위 COLOR_VOCAB 주석).
 # 「sky」·「forest」는 이름 가운데서는 주제어(SKY HOODIE · FOREST GRAPHIC TEE)라 끝자리에서만 쓴다.
 _TAIL_COLOR = {"sky": "스카이블루", "sax": "스카이블루", "forest": "그린", "midnight": "네이비",
-               "concrete": "그레이", "pewter": "그레이", "jade": "그린", "sumi": "차콜"}
+               "concrete": "그레이", "pewter": "그레이", "jade": "그린", "sumi": "차콜",
+               # 2026-10-05: 색 빈 상품 이름 끝 낱말 집계 — coal 43 · slate 17(「slate blue」는 어휘 blue 가 먼저 이긴다)
+               "coal": "차콜", "slate": "그레이"}
 
 
 def field_color(text: str) -> str:
@@ -2027,6 +2029,23 @@ def pick_color(name: str, description: str, spec: dict | None = None,
             seen.append(c)
     if seen:
         return "·".join(seen[:6])
+    # 이름 끝에 **빈칸만** 두고 붙인 줄임말 · 매장 색이름 — 「HEART ROLA T-SHIRT SKY」 · 「Duck Jacket Coal」 ·
+    # 「TRIMMING PULLOVER BK+IV」. 위의 끝자리 규칙은 구분자(_ / ( - ,)를 요구해서 이런 꼴이 비어 있었다
+    # (판매중 색 빈칸 5,359벌 중 254벌, 2026-10-05 — 코덱스 40벌 점검에서 「WHITE 티셔츠의 이웃이 SKY」로 드러남).
+    # 다른 어떤 칸도 색을 못 낼 때만 쓴다 — 기존에 색이 있던 상품은 하나도 안 바뀐다.
+    #   · 두 색을 + / 로 붙인 꼴(NV+BL · BK/IV)은 앞의 색이 대표다(match_color 의 「앞의 색이 주색」과 같은 규칙).
+    #   · 줄임말(bk · nv …)은 **대문자로 쓴 것만** 받는다 — 소문자 be · bl 은 낱말일 수 있다.
+    #   · denim 계열은 안 받는다 — 이름 끝의 Denim 은 품목이지 색이 아니다(「Relaxed Bootscut Denim」).
+    m = re.search(r"[\s_/(\-,]([A-Za-z]{2,10})\s*[+/]\s*[A-Za-z]{2,10}\s*\)?\s*$", name or "") \
+        or re.search(r"\s([A-Za-z.]{2,12})\s*\)?\s*$", name or "")
+    if m:
+        raw = m.group(1)
+        key = raw.lower()
+        c = _TAIL_COLOR.get(key, "")
+        if not c and "denim" not in key and (raw.isupper() or len(key) > 3):
+            c = _FIELD_COLOR.get(key, "")
+        if c:
+            return c
     return ""
 
 
