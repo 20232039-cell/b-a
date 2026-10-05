@@ -222,7 +222,10 @@ ITEM_TYPE_VOCAB = {
     "맨투맨": ["sweatshirt", "sweat shirt", "맨투맨", "crewneck", "crew neck", "스웻셔츠", "스웨트셔츠", "스웨트 셔츠", "스웻 셔츠", "스웻 크루넥", "sweat crew", "mtm", "엠티엠", "sweat", "스웻", "스웨트"],
     "티셔츠": ["t-shirt", "tshirt", "tee", "티셔츠", "t",
              # 「WAFFLE HENLEY NECK」처럼 henley 가 머리 낱말인 이름 15벌 — 헨리넥은 넥라인이고 옷은 티셔츠다.
-             "henley"],
+             "henley",
+             # 「INSIDE-OUT T SHIRTS」「Tee shirt fox head」처럼 띄어 쓴 꼴은 뒤의 shirt(s) 가 이겨 셔츠가 됐다 — 491벌
+             # (2026-10-05 3차 익명 평가 메모 「기준옷은 롱슬리브야 셔츠가 아니라」). 붙은꼴을 넣어 끝자리를 같게 한다.
+             "t shirt", "t shirts", "t-shirts", "tshirts", "tee shirt", "tee shirts", "l/s tee", "s/s tee"],
     "셔츠": ["shirt", "blouse", "셔츠", "블라우스", "오버셔츠"],
     "니트": ["knit", "sweater", "니트", "스웨터", "pullover", "풀오버",
             "turtle neck", "turtleneck", "터틀넥", "mock neck", "모크넥", "하이넥", "high neck"],
