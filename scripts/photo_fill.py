@@ -13,9 +13,14 @@ numpy 만으로 학습한다(CI 에 sklearn 이 없다). 라벨은 믿을 만한
           — 안 그러면 두 번째 실행부터 제 예측을 정답으로 배워 검증이 부푼다(코덱스 2026-10-05)
 학습은 매번 새로 한다(카탈로그가 자라면 같이 자라게). 브랜드 10%를 떼어 정확도를 찍고, 전부로 다시 학습해 예측한다.
 
-결과: data/photo_pred.json — source_url → {"sleeve": [값, 확신], "neckline": [값, 확신]} (확신 ≥ MIN_P 인 것만, CI 생성물).
+디테일(2026-10-06): 카고포켓 · 퀼팅 · 리본 · 더블니 · 레이스 · 플리츠 · 케이블 · 아가일 · 크로셰 · 컷오프 — 글이 안 적은 옷에 사진 확신
+≥0.8 이면 붙인다. 대표님이 후보를 눈으로 봐서 90% 이상 맞은 값만 골랐다(PHOTO_DETAILS 주석).
+
+결과: data/photo_pred.json — source_url → {"sleeve": [값, 확신], "neckline": [값, 확신], "detail": [[축, 값, 확신] …]}
+(확신 ≥ MIN_P 인 것만, CI 생성물).
   · refine_items.py 가 sleeve 를 읽어 티셔츠 → 반팔 · 롱슬리브, 셔츠 → 하프셔츠 를 가른다(실측 다음, 글 태그 앞).
   · neckline 은 product_tags_full.json 의 빈 neckline 에 채워 넣고 text_sources 에 "photo" 를 적는다.
+  · detail 은 product_tags_full.json 의 그 축에 더하고, 사진에서 온 값을 "photo_tags" 에 적는다.
 사진이 없는 상품(임베딩에 없음)은 건드리지 않는다.
 
   python scripts/photo_fill.py            # 학습 · 예측 · 저장 · 태그에 넥라인 채움
@@ -49,6 +54,13 @@ SLEEVE_BY_ITEM = {"반팔": "반팔", "롱슬리브": "롱슬리브", "슬리브
 SLEEVE_TARGETS = {"티셔츠", "셔츠"}          # 뭉뚱그린 품목만 가른다(refine_items 와 같다)
 NECK_CATS = {"tops", "dress"}
 MIN_CLASS = 150           # 이보다 적은 갈래는 배우지 않는다
+# 사진으로 채우는 디테일 — 대표님이 확신 ≥0.8 후보를 눈으로 본 결과(2026-10-06, 177벌) 맞음 90% 이상인 것만:
+# 카고포켓 9/9 · 퀼팅 9/10 · 리본 11/12 · 더블니 12/12 · 레이스 10/11 · 플리츠 11/11 · 케이블 12/12 · 아가일 6/6 · 크로셰 12/12 · 컷오프 6/6.
+# 뺀 것: 러플 3/5 · 셔링 4/4(둘을 사람도 잘 못 가름 — 합쳐 7/9) · 드레이프 3/7 · 컷아웃 7/10 · 랩 6/7 · 레이어드 8/9.
+PHOTO_DETAILS = [("construction", "카고포켓"), ("construction", "퀼팅"), ("construction", "리본"), ("construction", "더블니"),
+                 ("construction", "레이스"), ("design_element", "플리츠"), ("pattern", "케이블"), ("pattern", "아가일"),
+                 ("material", "크로셰"), ("construction", "컷오프")]
+DETAIL_CATS = {"더블니": {"bottoms"}}     # 무릎 덧댐은 바지에만
 CLOTH_CATS = {"tops", "bottoms", "outer", "skirt", "dress", "suiting"}   # 옷 — 큰 품목을 사진으로 채우는 범위
 # 품목이 빈 옷은 **큰 품목**(팬츠 · 데님 · 티셔츠 …)만 사진으로 채운다 — 세부 52갈래는 69%(확신 ≥0.8 구간이 6%뿐)라
 # 못 쓰고, 큰 품목 14갈래는 83%, 확신 ≥0.8 구간(절반)에서 96.5%다(2026-10-06, 빈 품목 1,441벌 조사). 매장 갈래(아우터 ·
@@ -62,7 +74,8 @@ for _sec, _cat, _base, _subs in HIER:
     if _base:
         CAT_OF[_base] = _cat; BASE_OF[_cat] = _base
     SEC_OF[_cat] = _sec
-GROUP_OF_SEC = {"아우터": "아우터", "상의": "상의", "하의": "하의", "원피스": "상의"}   # products_full.csv 의 group 칸은 원피스를 상의에 둔다
+GROUP_OF_SEC = {"아우터": "아우터", "상의": "상의", "하의": "하의"}
+GROUP_OF_CAT = {"원피스": "상의"}   # products_full.csv 의 group 칸은 원피스를 상의에 둔다(갈래는 하의로 옮겼지만 크롤러 칸은 그대로)
 
 
 def load_emb() -> tuple[np.ndarray, dict[str, int]]:
@@ -101,6 +114,23 @@ def train(X: np.ndarray, y: np.ndarray, k: int, iters: int = 300, lr: float = 0.
         for prm, g, m, v in ((W, gW, mW, vW), (b, gb, mb, vb)):
             m *= 0.9; m += 0.1 * g
             v *= 0.999; v += 0.001 * g * g
+            prm -= lr * (m / (1 - 0.9 ** t)) / (np.sqrt(v / (1 - 0.999 ** t)) + 1e-8)
+    return W, b
+
+
+def train_multi(X: np.ndarray, Y: np.ndarray, M: np.ndarray, iters: int = 400, lr: float = 0.05, l2: float = 1e-4) -> tuple[np.ndarray, np.ndarray]:
+    """값마다 하나씩인 로지스틱 회귀를 한 번에(다중 라벨). M 은 학습에 쓰는 칸 — 그 축이 글에 관측된 옷만(축이 비면 모름)."""
+    K = Y.shape[1]
+    W = np.zeros((X.shape[1], K), np.float32); b = np.zeros(K, np.float32)
+    pos = (Y * M).sum(0); neg = ((1 - Y) * M).sum(0)
+    wpos = np.sqrt(neg / np.maximum(pos, 1)).astype(np.float32)     # 드문 양성에 무게(제곱근으로 누그러뜨림)
+    mW = np.zeros_like(W); vW = np.zeros_like(W); mb = np.zeros_like(b); vb = np.zeros_like(b)
+    for t in range(1, iters + 1):
+        P = 1 / (1 + np.exp(-(X @ W + b)))
+        G = (P - Y) * M * (1 + (wpos - 1) * Y) / np.maximum(M.sum(0), 1)
+        gW = X.T @ G + l2 * W; gb = G.sum(0)
+        for prm, g, m, v in ((W, gW, mW, vW), (b, gb, mb, vb)):
+            m *= 0.9; m += 0.1 * g; v *= 0.999; v += 0.001 * g * g
             prm -= lr * (m / (1 - 0.9 ** t)) / (np.sqrt(v / (1 - 0.999 ** t)) + 1e-8)
     return W, b
 
@@ -177,7 +207,7 @@ def main() -> int:
                 if p.max() < MIN_P:
                     n_drop["확신 부족"] += 1; continue
                 c = classes[int(p.argmax())]
-                if GROUP_OF_SEC.get(SEC_OF.get(c, ""), "") != (r.get("group") or ""):
+                if GROUP_OF_CAT.get(c, GROUP_OF_SEC.get(SEC_OF.get(c, ""), "")) != (r.get("group") or ""):
                     n_drop["매장 갈래와 어긋남"] += 1; continue
                 if c not in BASE_OF:
                     n_drop["품목 값 없는 묶음"] += 1; continue
@@ -248,11 +278,64 @@ def main() -> int:
                 n_neck += 1
         print(f"   넥라인 빈 상품 {len(tgt):,}벌 중 확신 ≥{MIN_P} {n_neck:,}벌 채움")
 
+    # ── 디테일(카고포켓 · 퀼팅 · 플리츠 · 케이블 …) ─────────────────────────────
+    # 글이 디테일을 안 적은 옷이 많다. 양성 = 글 태그에 그 값이 있는 옷, 음성 = 그 축 태그는 있는데 그 값이 없는 옷.
+    # 앞선 실행이 사진으로 붙인 값(photo_tags)은 라벨에서 빼고 다시 판정한다(넥라인과 같은 까닭).
+    photo_prev = lambda r: ((tags.get(r["source_url"]) or {}).get("photo_tags") or {})
+    def text_vals(r, ax):
+        return set(tg(r).get(ax) or []) - set(photo_prev(r).get(ax) or [])
+    Y = np.zeros((len(cloth), len(PHOTO_DETAILS)), np.float32); Mk = np.zeros_like(Y)
+    for i, r in enumerate(cloth):
+        for k, (ax, v) in enumerate(PHOTO_DETAILS):
+            vals = text_vals(r, ax)
+            if vals:
+                Mk[i, k] = 1; Y[i, k] = float(v in vals)
+    Xd = E[[EI[r["source_url"]] for r in cloth]]
+    hold = np.array([zlib.crc32(r["brand_slug"].encode()) % 10 == 0 for r in cloth])
+    W, b = train_multi(Xd[~hold], Y[~hold], Mk[~hold])
+    Ph = 1 / (1 + np.exp(-(Xd[hold] @ W + b)))
+    rep = []
+    for k, (ax, v) in enumerate(PHOTO_DETAILS):
+        mk = (Mk[hold, k] > 0) & (Ph[:, k] >= MIN_P)
+        if mk.sum():
+            rep.append(f"{v} {Y[hold, k][mk].mean():.0%}({int(mk.sum())})")
+    print("   디테일 검증(떼어 둔 브랜드, 확신 ≥0.8 인 것 중 글 태그와 맞음): " + " · ".join(rep))
+    W, b = train_multi(Xd, Y, Mk)
+    P = 1 / (1 + np.exp(-(Xd @ W + b)))
+    n_det = Counter()
+    for i, r in enumerate(cloth):
+        for k, (ax, v) in enumerate(PHOTO_DETAILS):
+            if P[i, k] < MIN_P or v in text_vals(r, ax):
+                continue
+            if v in DETAIL_CATS and r.get("category_code") not in DETAIL_CATS[v]:
+                continue
+            pred.setdefault(r["source_url"], {}).setdefault("detail", []).append([ax, v, round(float(P[i, k]), 3)])
+            n_det[v] += 1
+    print(f"   디테일 사진으로 채움 {sum(n_det.values()):,}건: " + " · ".join(f"{v} {n:,}" for v, n in n_det.most_common()))
+
     print(f"사진 판정 {len(pred):,}벌 ({time.time() - t0:.0f}s)")
     if args.dry_run:
         return 0
     OUT.write_text(json.dumps(pred, ensure_ascii=False, indent=0, sort_keys=True) + "\n", encoding="utf-8")
-    if n_neck and tags:
+    if tags:
+        # 디테일: 앞선 실행이 붙인 값을 걷고 이번 판정으로 다시 붙인다. 어느 값이 사진에서 왔는지 photo_tags 에 적는다
+        # (앱 · 코파일럿이 「사진으로 읽음」을 가릴 수 있게).
+        for u, e in tags.items():
+            prev = e.pop("photo_tags", None) or {}
+            t = e.get("tags") or {}
+            for ax, vs in prev.items():
+                if ax in t:
+                    t[ax] = [x for x in t[ax] if x not in vs]
+                    if not t[ax]:
+                        t.pop(ax)
+        for u, v in pred.items():
+            if "detail" in v and u in tags:
+                t = tags[u].setdefault("tags", {})
+                for ax, val, _ in v["detail"]:
+                    if val not in (t.get(ax) or []):
+                        t.setdefault(ax, []).append(val)
+                        tags[u].setdefault("photo_tags", {}).setdefault(ax, []).append(val)
+    if (n_neck or any("detail" in v for v in pred.values())) and tags:
         for u, e in tags.items():
             src = e.get("text_sources") or []
             if "photo" in src:                      # 앞선 실행이 채운 것은 비우고 이번 판정으로 다시 채운다

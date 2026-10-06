@@ -28,6 +28,7 @@ layer-web scripts/build-discover-products.mjs 가 읽는 product_tags_seed.json 
 from __future__ import annotations
 
 import grade_origin  # noqa: E402  소재 등급 · 원단 출처
+import wear_feel  # noqa: E402  착용감 · 계절감
 import argparse
 import csv
 import json
@@ -114,6 +115,28 @@ LEATHER_TRIM = re.compile(
     r"(?:라벨|탭|패치|파이핑|트리밍|트림|와펜|로고|포인트|배색|태그|지퍼|풀러|손잡이|핸들|스트랩"
     r"|label|tab|patch|piping|trim|logo|tag|zipper|puller|pull|handle|strap)")
 FAKE_LEATHER = re.compile(r"fake\s*leather|페이크\s*가죽|인조\s*가죽")
+# 골지(립) 원단 ≠ 끝단 시보리. 「넥, 소매, 밑단 립 조직」 「골지 소맷단, 밑단」 「ribbed cuffs and hem」은 몸판이 골지가 아니라
+# 끝단만 골지다 — 1,739벌 「골지」 · 1,404벌 「립 조직」 표본 대부분이 이쪽이었다(2026-10-06). 그 낱말을 「리브」(시보리)로 바꿔 읽는다.
+_TRIM_PART = r"(?:소맷단|소매단|소매\s*끝|소매|슬리브\s*끝|밑단|넥\s*라인|네크라인|넥|카라|칼라|커프스?|끝단|가장자리|허리\s*밴드|허리)"
+_RIB_WORD = r"(?:골지|리브드|립\s?조직|립\s?니트|ribbed|rib(?:-knit)?)"
+RIB_TRIM = re.compile(
+    rf"({_RIB_WORD})\s*(?:조직의?\s*|처리된?\s*|knit(?:ted)?\s*)?(?:후드\s*|crew\s*|mock\s*|spread\s*)?(?:{_TRIM_PART}|cuffs?|hems?|collar|trim(?:ming)?|edges?|neck(?:line)?|waist(?:band)?)"
+    rf"|{_TRIM_PART}(?:\s*(?:[,·/및]|와|과|은|는|의|에|을|를)\s*{_TRIM_PART}?){{0,4}}\s*(?:은|는|을|를|에|의|도)?\s*"
+    rf"(?:얇은\s*|탄탄한\s*|볼드한\s*|더블\s*|도톰한\s*|두꺼운\s*|넓은\s*|일래스틱\s*|변형\s*)?({_RIB_WORD})"
+    rf"|{_TRIM_PART}(?:\s*(?:[,·/및]|와|과)\s*{_TRIM_PART}){{0,4}}(?:은|는)\s[^.\n]{{0,16}}?({_RIB_WORD})\s*(?:조직)?\s*(?:으로|로)"
+    rf"|({_RIB_WORD})\s*(?:조직\s*)?(?:으로\s*|로\s*)?마감"
+    rf"|(?:cuffs?|hems?|collar|trim|edges?|neck(?:line)?)(?:\s*(?:,|and)\s*\w+){{0,3}}\s*(?:finished\s*)?(?:with|in)\s*({_RIB_WORD})",
+    re.I)
+
+
+def rib_trim_to_ribbing(text: str) -> str:
+    """끝단 골지 낱말을 같은 길이의 「리브」로 — 시보리(construction)로 읽히고 골지(material)는 안 붙는다."""
+    def fix(m: re.Match) -> str:
+        g = next(i for i in range(1, 6) if m.group(i))
+        a, b = m.start(g) - m.start(), m.end(g) - m.start()
+        w = m.group(0)
+        return w[:a] + ("리브" + " " * (b - a - 2) if b - a >= 2 else w[a:b]) + w[b:]
+    return RIB_TRIM.sub(fix, text)
 
 
 def fake_to_faux(text: str) -> str:
@@ -253,8 +276,21 @@ def compile_alias(alias: str) -> re.Pattern:
         # 613벌이 **글에 버젓이 적혀 있는데** 비어 있었다(2026-09-15 전수).
         # 네 글자 미만 별칭은 그대로 둔다 — 짧은 말에 숫자가 붙는 건 대개 딴 것이다.
         tail = r"(?![a-z])" if len(alias) >= 4 else r"(?![a-z0-9])"
+        # 두 낱말 별칭은 띄어 쓴 꼴 · 하이픈 · 붙여 쓴 꼴을 다 받는다 — 「Cut-Out Strap Knit Top」이 「cut out」에 안 걸려 컷아웃이
+        # 비어 있었다(사람 디테일 확인, 2026-10-06). double-knee · cargo-pocket 도 같다.
+        if re.search(r"[a-z]", alias.lower()) and re.search(r"[ \-]", alias):
+            a = re.sub(r"(?:\\ |\\-|-)+", r"[\\s\\-]?", a)
         return re.compile(rf"(?<![a-z0-9]){a}s?{tail}")
     return re.compile(a)
+
+
+def alias_lit(alias: str) -> str:
+    """그 별칭이 걸리려면 글에 반드시 있어야 하는 글자(_scan 의 빠른 거르기). 두 낱말 영문 별칭은 띄어쓰기 · 하이픈이 바뀌어도
+    걸리므로(compile_alias) 가장 긴 낱말 하나만 요구한다."""
+    low = alias.lower()
+    if re.fullmatch(r"[a-z0-9 /\-]+", low) and re.search(r"[a-z]", low) and re.search(r"[ \-]", low):
+        return max(re.split(r"[ \-]+", low), key=len)
+    return low
 
 
 
@@ -950,7 +986,7 @@ class Tagger:
             for value, aliases in vocab[ax].items():
                 names = list(aliases) if value in self.mine_only else [value] + list(aliases)
                 for a in names:
-                    (color_rules if ax == "color" else text_rules).append((len(a), ax, value, compile_alias(a), a.lower()))
+                    (color_rules if ax == "color" else text_rules).append((len(a), ax, value, compile_alias(a), alias_lit(a)))
         self.text_rules = sorted(text_rules, key=lambda r: -r[0])
         self.color_rules = sorted(color_rules, key=lambda r: -r[0])
 
@@ -973,7 +1009,7 @@ class Tagger:
             masked = list(text)
             cur = text
             for _, _, value, rx, lit in rs:
-                # 모든 별칭 정규식은 별칭 글자를 그대로 담는다(compile_alias) — 글에 그 글자가 없으면 정규식을 돌릴 것도 없다.
+                # 모든 별칭 정규식은 별칭 글자(alias_lit)를 그대로 담는다(compile_alias) — 글에 그 글자가 없으면 정규식을 돌릴 것도 없다.
                 # 축마다 수천 개 규칙을 4,000자 글에 다 돌려 태그 재생성이 상품당 0.2초, 전수 몇 시간이 걸렸다(주간 갱신
                 # 37021619738 의 태그 단계가 잡 상한을 넘김, 2026-10-02).
                 if lit not in text:
@@ -1141,6 +1177,7 @@ class Tagger:
         for b in self.text_blocklist:  # '시어링'→시어, '레이어드 스타일링'→레이어드 같은 오탐을 먼저 지운다
             text = text.replace(b, " " * len(b))
         text = LEATHER_TRIM.sub(lambda m: re.sub(r"가죽|레더|leather", lambda w: " " * len(w.group(0)), m.group(0)), text)
+        text = rib_trim_to_ribbing(text)
         # 「Fake Leather」는 인조가죽이다 — 사전의 「faux leather」로 바꿔 읽힌다(nuosmiq 로퍼, E 판 표본)
         text = fake_to_faux(text)
         # 「비건 구스 다운」「vegan down」은 합성 충전재다 — 다운이 아니다(badblood 바라클라바, E5 표본)
@@ -1885,6 +1922,7 @@ def main():
     out: dict[str, dict] = {}
     q_count, src_count = Counter(), Counter()
     mat_count = grade_count = origin_count = 0
+    feel_count: Counter = Counter()
     ax_count, cat_count = Counter(), Counter()
     manual_mat = load_manual_mat()
     if manual_mat:
@@ -1921,6 +1959,23 @@ def main():
             out[r["source_url"]]["origin"] = og
             grade_count += bool(gr)
             origin_count += bool(og)
+            # 착용감 · 계절감 — wear_feel 주석. 매장이 「신축성 없음」 「안감 없음」이라 적었으면 그 태그를 걷는다(「신축성이 전혀
+            # 없는 원단」이 function 신축성으로 붙었다). 이름이 스트레치라 하면 이름을 따른다.
+            fl = wear_feel.feel_of(gtext)
+            st = wear_feel.season_of(gtext)
+            if fl:
+                out[r["source_url"]]["feel"] = fl
+            if st:
+                out[r["source_url"]]["season_txt"] = st
+            feel_count.update(fl.keys())
+            feel_count["계절"] += bool(st)
+            if isinstance(tags, dict):
+                low_name = (r.get("name") or "").lower()
+                for k, ax, val, name_rx in (("신축성", "function", "신축성", r"stretch|스트레치|신축"), ("안감", "construction", "안감", r"lin(?:ed|ing)|안감")):
+                    if fl.get(k) == "없음" and val in (tags.get(ax) or []) and not re.search(name_rx, low_name):
+                        tags[ax] = [v for v in tags[ax] if v != val]
+                        if not tags[ax]:
+                            tags.pop(ax)
             q_count[quality] += 1
             for s in sources:
                 src_count[s] += 1
@@ -1950,6 +2005,7 @@ def main():
     print("품질:", dict(q_count))
     print("본문 출처:", dict(src_count))
     print(f"혼용률(mat) {mat_count} ({mat_count / max(n, 1):5.1%}) · 소재 등급(grade) {grade_count} · 원단 출처(origin) {origin_count}")
+    print("착용감 · 계절감:", " · ".join(f"{k} {c}" for k, c in feel_count.most_common()))
     print("축 커버리지:")
     for ax in AXES:
         print(f"  {ax:15s} {ax_count[ax]:6d} ({ax_count[ax] / n:5.1%})")
