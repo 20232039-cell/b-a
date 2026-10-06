@@ -231,15 +231,17 @@ ITEM_TYPE_VOCAB = {
     "브라탑": ["브라렛", "bralette", "브라탑", "bra top", " 브라 ", "bra", "브라 탑"],
     "튜브탑": ["튜브탑", "튜브 탑", "tube top", "밴도", "bandeau", "튜브"],
     "로브코트": ["로브 코트", "로브코트", "robe coat", "로브", "robe", "가운 코트", "gown coat"],
-    "슬립원피스": ["슬립 원피스", "슬립원피스", "slip dress", "슬립 드레스", "슬립드레스", "slip one-piece"],
-    "니트원피스": ["니트 원피스", "니트원피스", "knit dress", "니트 드레스", "knit one-piece", "knit onepiece", "스웨터 원피스", "sweater dress"],
-    "셔츠원피스": ["셔츠 원피스", "셔츠원피스", "shirt dress", "셔츠 드레스", "셔츠드레스", "shirt one-piece", "shirts dress"],
+    "슬립원피스": ["슬립 원피스", "슬립원피스", "slip dress", "슬립 드레스", "슬립드레스", "slip one-piece", "slipdress"],
+    "니트원피스": ["니트 원피스", "니트원피스", "knit dress", "니트 드레스", "knit one-piece", "knit onepiece", "스웨터 원피스", "sweater dress", "knitdress"],
+    "셔츠원피스": ["셔츠 원피스", "셔츠원피스", "shirt dress", "셔츠 드레스", "셔츠드레스", "shirt one-piece", "shirts dress", "shirtdress"],
     "미니스커트": ["미니 스커트", "미니스커트", "mini skirt", "miniskirt", "mini skirts", "미니 스컷"],
     "미디스커트": ["미디 스커트", "미디스커트", "midi skirt", "midi skirts"],
     "롱스커트": ["롱 스커트", "롱스커트", "long skirt", "long skirts", "맥시 스커트", "맥시스커트", "maxi skirt", "맥시 스컷"],
-    "미니원피스": ["미니 원피스", "미니원피스", "mini dress", "미니 드레스", "미니드레스", "mini one-piece", "mini ops"],
-    "미디원피스": ["미디 원피스", "미디원피스", "midi dress", "미디 드레스"],
-    "롱원피스": ["롱 원피스", "롱원피스", "long dress", "롱 드레스", "롱드레스", "맥시 원피스", "맥시원피스", "maxi dress", "맥시 드레스", "long one-piece", "long ops"],
+    "미니원피스": ["미니 원피스", "미니원피스", "mini dress", "미니 드레스", "미니드레스", "mini one-piece", "mini ops",
+              # 매장이 붙여 쓴 꼴 — 「RUFFLE PUFF MINIDRESS」(s-e-o, 상의 칸에 둔 미니 원피스 2벌, 사람 지적 2026-10-06)
+              "minidress"],
+    "미디원피스": ["미디 원피스", "미디원피스", "midi dress", "미디 드레스", "mididress"],
+    "롱원피스": ["롱 원피스", "롱원피스", "long dress", "롱 드레스", "롱드레스", "맥시 원피스", "맥시원피스", "maxi dress", "맥시 드레스", "long one-piece", "long ops", "longdress", "maxidress"],
     # 스웻은 별도 품목이 아니다(사람 결정 2026-09-02): 스웻셔츠=맨투맨, 스웻팬츠=스웨트팬츠. 품목 단어 없는 「스웻」은 build_csv 가 상의일 때만 맨투맨
     "맨투맨": ["sweatshirt", "sweat shirt", "맨투맨", "crewneck", "crew neck", "스웻셔츠", "스웨트셔츠", "스웨트 셔츠", "스웻 셔츠", "스웻 크루넥", "sweat crew", "mtm", "엠티엠", "sweat", "스웻", "스웨트",
              # 「SWEATSHIRT RAGLAN LILIES」는 뒤의 raglan 이 이겨 라글란(티셔츠 묶음)이 됐다 — 라글란 맨투맨은 맨투맨이다(2026-10-05 매장 분류 대조).
