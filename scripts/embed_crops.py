@@ -113,7 +113,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--jobs", default=str(JOBS))
     ap.add_argument("--limit", type=int, default=0)
-    ap.add_argument("--batch", type=int, default=0, help="기본: GPU 32 · CPU 8")
+    ap.add_argument("--batch", type=int, default=0, help="기본: GPU 8 · CPU 8 — 옷 분할 모델이 배치 32 에서 8GB GPU(RTX 3050)를 넘었다(2026-10-06)")
     ap.add_argument("--threads", type=int, default=64)
     ap.add_argument("--out", default=str(OUT), help="결과 폴더(시험할 때 저장소 밖으로)")
     args = ap.parse_args()
@@ -124,7 +124,7 @@ def main() -> int:
     from transformers import AutoModelForSemanticSegmentation, SegformerImageProcessor
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    batch = args.batch or (32 if device == "cuda" else 8)
+    batch = args.batch or 8
     print(f"장치 {device} · 배치 {batch}" + (f" · {torch.cuda.get_device_name(0)}" if device == "cuda" else ""), flush=True)
     out.mkdir(parents=True, exist_ok=True)
     IMG.mkdir(parents=True, exist_ok=True)

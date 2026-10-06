@@ -7,6 +7,7 @@
 어떻게:
   후보 풀  = 큰 품목(재킷류 · 코트류 · 티셔츠류 … build_vocab._HIER) 안. 같은 브랜드 · 같은 옷 다른 색 · 성별 안 맞는 것은 뺀다.
   닮음     = (1−PHOTO_W)·T + PHOTO_W·V + FINE_BONUS·[세부 품목 같음] − PEN_W·Σ[기장 · 넥라인 · 소매 태그가 둘 다 있는데 묶음이 안 겹침]
+             − LOOK_PEN_W·[기준 옷의 겉보기 소재(가죽 · 스웨이드 · 퍼 · 데님 …)가 후보 소재와 안 겹침]
       T    = 축별 코사인의 가중 평균(양쪽 다 관측된 축만, 묶음 안 IDF) + 관측이 적으면 묶음 평균 μ 로 수축  T=(Σw·sim+.2μ)/(Σw+.2)
              색은 같으면 1 · 같은 계열 .6 · 다르면 0. 소재는 혼용률 비율 벡터(없으면 소재 태그).
       V    = 사진 임베딩(data/emb/siglip, Marqo-FashionSigLIP) 코사인을 묶음 안 무작위 쌍 분포의 백분위로 바꾼 값. 사진 없는 후보는 T 그대로.
@@ -50,6 +51,14 @@ PHOTO_W = 0.5          # 사진 반 · 태그 반 — 0.3 · 0.7 · 0.9 보다 4
 FINE_BONUS = 0.10      # 세부 품목 같음
 PEN_W = 0.10           # 기장 · 넥라인 · 소매 묶음 어긋남(축마다)
 PEN_AXES = ("length", "neckline", "sleeve_length")
+# 겉보기 소재 어긋남 — 「모양이 품목, 소재는 태그」로 레더 자켓 품목을 없앤 뒤(2026-10-05), 가죽 겉옷의 이웃 상위 5 중 가죽 · 스웨이드는
+# 65%였다(겉옷 전체 19%). 소재 축 비중(.06)이 가볍기 때문이다. 눈으로 보이는 소재(가죽 · 스웨이드 · 퍼 · 데님 · 트위드 · 코듀로이 · 벨벳 · 니트)가
+# 기준 옷에 있는데 후보의 소재 태그가 그 묶음과 하나도 안 겹치면 감점한다(후보 소재가 비어 있으면 모름이라 안 뺀다).
+# 3 · 4 · 5차 사람 답(기준 옷 96벌): 전체 68.7 → 69.4%(+0.7%p, 기준 옷 단위 95% 구간 +0.1~+1.3), 그런 소재가 있는 기준 옷 21벌은
+# 65.1 → 68.2%(+3.1%p, +0.7~+5.9). 0.03 · 0.05 · 0.10 은 같았고 0.15 부터 줄었다(2026-10-06).
+LOOK_PEN_W = 0.05
+LOOK_MAT = {"가죽": ("가죽", "양가죽", "소가죽", "인조가죽", "에코레더"), "스웨이드": ("스웨이드",), "퍼": ("퍼", "시어링", "무스탕"),
+            "데님": ("데님",), "트위드": ("트위드",), "코듀로이": ("코듀로이",), "벨벳": ("벨벳",), "니트": ("니트",)}
 BRAND_W = 0.20         # 2차에서 .35 는 −18%
 PRICE_W = 0.05
 SHRINK = 0.2
@@ -223,6 +232,10 @@ def main() -> int:
         gidx = {v: k for k, (_g, vals) in enumerate(groups_vocab.get(ax, {}).items()) for v in vals}
         gmask[ax] = np.array([sum(1 << gidx[v] for v in set(((tags.get(r["source_url"]) or {}).get("tags") or {}).get(ax) or []) if v in gidx)
                               for r in rows], dtype=np.int64)
+    lk = {v: k for k, vs in enumerate(LOOK_MAT.values()) for v in vs}
+    mats = [set(((tags.get(r["source_url"]) or {}).get("tags") or {}).get("material") or []) for r in rows]
+    lmask = np.array([sum(1 << lk[v] for v in m if v in lk) for m in mats], dtype=np.int64)
+    mobs = np.array([bool(m) for m in mats])
     brands = sorted(set(brand))
     bi = {b: i for i, b in enumerate(brands)}
     BB = brand_matrix(rows, tags, brands)
@@ -276,6 +289,7 @@ def main() -> int:
             vs = np.array([0.0, 1.0])
         bidx = np.array([bi[b] for b in brand[idx]]); pr = price[idx]; gd = gender[idx]; fk = famkey[idx]; ft = ftype[idx]
         gm = {ax: gmask[ax][idx] for ax in PEN_AXES}
+        lm = lmask[idx]; mo = mobs[idx]
 
         def Tblock(s, e):
             num = np.zeros((e - s, n)); den = np.zeros((e - s, n))
@@ -315,6 +329,8 @@ def main() -> int:
                 for ax, m in gm.items():
                     if m[i]:
                         row = row - PEN_W * (((m & m[i]) == 0) & (m > 0))
+                if lm[i]:
+                    row = row - LOOK_PEN_W * (((lm & lm[i]) == 0) & mo)
                 row[i] = -1
                 same = bidx == bidx[i]
                 ok = (~same) & ((gd[i] == "UNISEX") | (gd == "UNISEX") | (gd == gd[i]))
@@ -343,7 +359,7 @@ def main() -> int:
     pid = lambda r: f'{r["brand_slug"]}-{r["product_no"]}'
     index = [pid(r) for r in rows]
     out = {pid(rows[i]): v for i, v in ((ix, out[rows[ix]["source_url"]]) for ix in range(N) if rows[ix]["source_url"] in out)}
-    config = {"photo": PHOTO_W, "fine_type_bonus": FINE_BONUS, "conflict_penalty": PEN_W, "brand": BRAND_W, "price": PRICE_W, "shrink": SHRINK, "axes": AXW,
+    config = {"photo": PHOTO_W, "fine_type_bonus": FINE_BONUS, "conflict_penalty": PEN_W, "look_material_penalty": LOOK_PEN_W, "look_material": LOOK_MAT, "brand": BRAND_W, "price": PRICE_W, "shrink": SHRINK, "axes": AXW,
               "pool": "big_category", "keep": KEEP}
     h = hashlib.sha1()   # 설정 · 색 계열표 · 입력 파일 내용 · 임베딩 조각까지 — 같은 주소라도 태그 · 가격이 바뀌면 version 이 바뀐다(코덱스 2026-10-05)
     h.update(json.dumps(config, sort_keys=True).encode())
