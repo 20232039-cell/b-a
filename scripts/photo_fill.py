@@ -186,6 +186,27 @@ def main() -> int:
         print(f"   품목 빈 옷 {len(tgt):,}벌 중 {n_item:,}벌 채움 (버림: " + " · ".join(f"{k} {v:,}" for k, v in n_drop.items()) + "): "
               + " · ".join(f"{c} {n:,}" for c, n in Counter(v["item"][0] for v in pred.values() if "item" in v).most_common()))
 
+    # ── 그래픽(프린트) 크기 확인 ──────────────────────────────────────────────
+    # 글의 「그래픽」 태그는 큰 프린트와 작은 로고 프린트를 못 가른다 — 「9999 로고 프린트」 스웨트팬츠도 그래픽이다.
+    # 「비슷한 옷」의 색·무늬 기준은 작은 로고를 무지로 본다(대표님 2026-10-06). 그래서 그래픽 태그가 있는 옷마다
+    # 사진이 그래픽이라고 보는 확률을 적어 두고, similar_items 는 0.7 이상일 때만 무늬로 친다
+    # (판매중 그래픽 태그 상의 10,705벌 중 6,631 · 바지 1,915 중 536 — 0.7 이상은 눈으로 봐도 큰 프린트였다).
+    tg_of = lambda r: (tg(r).get("design_element") or [])
+    lab, brs, xs = [], [], []
+    for r in cloth:
+        d = tg_of(r)
+        if d:
+            lab.append("g" if "그래픽" in d else "n"); brs.append(r["brand_slug"]); xs.append(EI[r["source_url"]])
+    m = fit_report("그래픽", E[xs], lab, brs)
+    if m:
+        classes, W, b = m
+        tgt = [r for r in cloth if "그래픽" in tg_of(r)]
+        if tgt and "g" in classes:
+            P = softmax(E[[EI[r["source_url"]] for r in tgt]] @ W + b)[:, classes.index("g")]
+            for r, p_ in zip(tgt, P):
+                pred.setdefault(r["source_url"], {})["graphic"] = round(float(p_), 3)
+            print(f"   그래픽 태그 {len(tgt):,}벌 · 사진 확률 ≥0.7 {int((P >= 0.7).sum()):,}벌")
+
     # ── 소매 ────────────────────────────────────────────────────────────────
     lab, brs, xs = [], [], []
     for r in rows:

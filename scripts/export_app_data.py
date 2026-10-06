@@ -44,6 +44,9 @@ MINED: dict[tuple, dict] = {}
 # 열쇠는 size_from_ocr.color_base 를 그대로 쓴다 — 형제에게 사이즈를 물려줄 때 쓰는 것과
 # 같은 잣대여야 앱이 보여 주는 형제와 우리가 치수를 물려준 형제가 어긋나지 않는다.
 COLOR_GROUP: dict[str, int] = {}
+# 기준별 「비슷한 옷」(similar_axes.json) 의 상품 비트 — 줄의 ax(1 색·무늬 · 2 모양 · 4 소재) · pt(1 무늬 있음). 상품 id 열쇠.
+AX_FLAGS: dict[str, int] = {}
+SIM_MIN = 0.70    # 비슷한 옷 점수 문턱 — 이 아래는 내보내지 않는다(사람 답: 0.70 아래는 아홉 벌에 한 벌꼴로만 골랐다, 대표님 결정 2026-10-06)
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
@@ -189,7 +192,9 @@ def thin_row(r: dict, tags: dict, bi: dict, ci: dict, pref: dict) -> dict:
     for k, v in (("co", (t.get("color") or [""])[0]),
                  ("ma", (t.get("material") or [""])[0]),
                  ("se", r.get("season") or ""),
-                 ("cg", COLOR_GROUP.get(r["source_url"], 0))):
+                 ("cg", COLOR_GROUP.get(r["source_url"], 0)),
+                 ("ax", AX_FLAGS.get(f'{r["brand_slug"]}-{r["product_no"]}', 0) & 7),
+                 ("pt", 1 if AX_FLAGS.get(f'{r["brand_slug"]}-{r["product_no"]}', 0) & 8 else 0)):
         if v:
             row[k] = v
     st = sorted(style_tags(t), key=lambda x: (TAG_DF[x], x))[:TAG_MAX]
@@ -407,6 +412,13 @@ def main() -> int:
         for u in urls:
             COLOR_GROUP[u] = gid
     print(f"색만 다른 형제 묶음 {gid}개 · 묶인 상품 {len(COLOR_GROUP)}벌")
+    ax_path = DATA / "similar_axes.json"
+    axes = json.loads(ax_path.read_text(encoding="utf-8")) if ax_path.exists() else {}
+    for pid, v in (axes.get("items") or {}).items():
+        # 실제로 목록이 있는 기준만 비트를 켠다(f 는 계산 때 기준 옷 쪽 정보만 본 값)
+        f = (1 if v.get("cp") else 0) | (2 if v.get("s") else 0) | (4 if v.get("m") else 0) | (int(v.get("f", 0)) & 8)
+        if f:
+            AX_FLAGS[pid] = f
 
     # 매장마다 사진 주소 앞머리 — 줄에서 떼어 내고 catalog.json 에 한 번만 적는다
     urls_of: dict[str, list[str]] = defaultdict(list)
@@ -602,7 +614,7 @@ def main() -> int:
         sim = json.loads(sim_path.read_text(encoding="utf-8"))
         sidx = sim.get("index") or []
         exported = {f'{r["brand_slug"]}-{r["product_no"]}' for r in rows}   # APP_HOLD 매장 등 앱에 안 나가는 상품은 이웃에서도 뺀다(코덱스 2026-10-05)
-        dropped_nb = 0
+        dropped_nb = below_min = 0
         for pid, nb in (sim.get("items") or {}).items():
             if pid not in exported:
                 continue
@@ -610,7 +622,10 @@ def main() -> int:
             pairs = []
             for j, sc in zip(nb[0::2], nb[1::2]):
                 if 0 <= j < len(sidx) and sidx[j] in exported:
-                    pairs.append([sidx[j], min(1.0, max(0.0, sc / 1000))])   # 세부 품목 가산으로 1 을 살짝 넘을 수 있어 0~1 로 자른다
+                    if sc / 1000 >= SIM_MIN:
+                        pairs.append([sidx[j], min(1.0, max(0.0, sc / 1000))])   # 세부 품목 가산으로 1 을 살짝 넘을 수 있어 0~1 로 자른다
+                    else:
+                        below_min += 1
                 else:
                     dropped_nb += 1
             if pairs:
@@ -631,11 +646,54 @@ def main() -> int:
                 continue
             for i, b_ in enumerate(buckets_s):
                 sim_bytes += write(out / "similar" / f"{slug}.{i}.json", b_, args.dry)
-        print(f"   앱에 안 나가는 상품이라 뺀 이웃 {dropped_nb:,}")
+        print(f"   앱에 안 나가는 상품이라 뺀 이웃 {dropped_nb:,} · 점수 {SIM_MIN} 미만이라 뺀 이웃 {below_min:,} · "
+              f"남은 이웃 3벌 미만인 상품 {sum(1 for m in sim_of.values() for v in m.values() if len(v) < 3):,}")
         print(f"비슷한 옷 조각 {len(sim_of)}곳 · 상품 {sum(len(m) for m in sim_of.values()):,}벌 · 합계 {sim_bytes/1048576:.1f} MB · "
               f"쪼갠 매장 {sum(1 for n in sim_parts_of.values() if n > 1)}곳 · version {sim.get('version')}")
     else:
         print("비슷한 옷 조각 없음 — data/similar_items.json 이 없다(similar_items.py 가 아직 안 돌았다)")
+
+    # ── 기준별 비슷한 옷(색·무늬 · 모양 · 소재) — 앱 「비슷한 옷」 글자 줄, 그 기준을 처음 볼 때만 받는다 ─────────
+    # 원본 data/similar_axes.json(similar_items.py) — 상품마다 {cp, s, m: [번호, 점수×1000, …] 12벌, f: 비트}.
+    # 조각 similar-axis/<slug>[.i].json, 쪼개기는 similar 와 같은 규칙(product_no % ap), 줄: {id: {"cp": [[이웃 id, 점수]…], "s": …, "m": …}}.
+    # 정보 없는 기준은 키를 안 적는다. 이웃은 앱에 나가는 상품만(앱 세션 2026-10-06).
+    ax_parts_of: dict[str, int] = {}
+    ax_of: dict[str, dict[str, dict]] = defaultdict(dict)
+    ax_bytes = 0
+    if axes.get("items"):
+        aidx = axes.get("index") or []
+        exported_ax = {f'{r["brand_slug"]}-{r["product_no"]}' for r in rows}
+        for pid, v in axes["items"].items():
+            if pid not in exported_ax:
+                continue
+            row_ = {}
+            for key in ("cp", "s", "m"):
+                nb = v.get(key) or []
+                pairs = [[aidx[j], min(1.0, max(0.0, sc / 1000))] for j, sc in zip(nb[0::2], nb[1::2])
+                         if 0 <= j < len(aidx) and aidx[j] in exported_ax]
+                if pairs:
+                    row_[key] = pairs
+            if row_:
+                ax_of[pid.rsplit("-", 1)[0]][pid] = row_
+        for slug, m in sorted(ax_of.items()):
+            raw = len(json.dumps(m, ensure_ascii=False, separators=(",", ":")).encode())
+            ap = max(1, -(-raw // SIM_PART_BYTES))
+            while True:
+                buckets_a: list[dict] = [{} for _ in range(ap)]
+                for k, v in m.items():
+                    buckets_a[int(k.rsplit("-", 1)[1]) % ap][k] = v
+                if ap == 1 or ap >= 64 or all(len(json.dumps(b_, ensure_ascii=False, separators=(",", ":")).encode()) <= SIM_PART_BYTES for b_ in buckets_a):
+                    break
+                ap += 1
+            ax_parts_of[slug] = ap
+            if ap == 1:
+                ax_bytes += write(out / "similar-axis" / f"{slug}.json", m, args.dry)
+                continue
+            for i, b_ in enumerate(buckets_a):
+                ax_bytes += write(out / "similar-axis" / f"{slug}.{i}.json", b_, args.dry)
+        print(f"기준별 비슷한 옷 조각 {len(ax_of)}곳 · 상품 {sum(len(m) for m in ax_of.values()):,}벌 · 합계 {ax_bytes/1048576:.1f} MB · version {axes.get('version')}")
+    else:
+        print("기준별 비슷한 옷 조각 없음 — data/similar_axes.json 이 없다")
 
     # ── catalog.json — 앱이 제일 먼저 읽는 도장 ────────────────────────────────
     # 하루 한 번 데이터가 바뀌는데 앱이 「새 게 나왔는지」를 알 길이 없었다. 받아 둔 걸
@@ -659,6 +717,9 @@ def main() -> int:
     for slug, sp in sim_parts_of.items():
         files[f"similar/{slug}.json" if sp == 1 else f"similar/{slug}.<0..{sp-1}>.json"] = {
             "n": len(sim_of[slug]), "parts": sp}
+    for slug, ap in ax_parts_of.items():
+        files[f"similar-axis/{slug}.json" if ap == 1 else f"similar-axis/{slug}.<0..{ap-1}>.json"] = {
+            "n": len(ax_of[slug]), "parts": ap}
     catalog = {
         "v": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),
         "count": len(rows),
@@ -671,22 +732,31 @@ def main() -> int:
             "s": "1 판매중 · 0 품절", "co": "대표색", "ma": "대표소재", "se": "시즌",
             "cg": "색만 다른 형제 묶음(없으면 안 적힘)",
             "tg": "스타일 태그 — tags 번호 배열, 드문 것부터 많아야 6(없으면 안 적힘)",
+            "ax": "기준별 비슷한 옷이 있는 기준 비트 — 1 색·무늬 · 2 모양 · 4 소재(similar-axis 조각, 0 이면 안 적힘)",
+            "pt": "1 이면 무늬 있음(스트라이프 · 체크 · 프린트 …) — 무지 · 모름은 안 적힘",
         },
         # 무드는 **브랜드에만** 있다 — 상품마다 붙일 것이 아니다(아래 fold_mood 참고)
         "brand_fields": {"mo": "무드 — moods 안의 말만 쓴다",
                          "p": "사진 주소 앞머리", "up": "상품 주소 앞머리",
-                         "bp": "brands 조각 수", "dp": "descs 조각 수(0 이면 없음)", "sp": "similar 조각 수(0 이면 없음)"},
+                         "bp": "brands 조각 수", "dp": "descs 조각 수(0 이면 없음)", "sp": "similar 조각 수(0 이면 없음)",
+                         "ap": "similar-axis 조각 수(0 이면 없음)"},
         # 상세 조각(brands/<slug>.json) 한 벌에만 있는 열쇠
         "detail_fields": {"u": "상품 주소 — brands[b].up 을 앞에 붙인다",
                           "mat": "혼용률 — [{p: 부위(빈칸이면 구분 없음), v: [[소재, %], …]}, …]"},
         # 비슷한 옷 조각(similar/<slug>.json) — 상품 id → [[이웃 상품 id, 점수 0~1], …] 최대 40, 점수 높은 순.
         # 큰 품목 안 · 사진 반 태그 반 · 브랜드 무드 · 가격. 같은 브랜드 · 같은 옷 다른 색은 없다. 노션 「유사도·추천 설계」 2절.
-        "similar_fields": {"<id>": "[[이웃 id, 점수], …] — 이웃은 다른 매장일 수 있다. 앱은 보일 때 브랜드당 2벌로 섞는다"},
+        "similar_fields": {"<id>": "[[이웃 id, 점수], …] — 이웃은 다른 매장일 수 있다. 앱은 보일 때 브랜드당 2벌로 섞는다. "
+                                   f"점수 {SIM_MIN} 미만은 안 싣는다 — 3벌 미만이면 앱은 「다른 브랜드의 ○○」로 대신한다"},
+        # 기준별 비슷한 옷(similar-axis/<slug>.json) — 같은 큰 품목 안에서 그 기준 위주로 다시 찾은 12벌(브랜드당 2벌), 점수 높은 순.
+        "similar_axis_fields": {"cp": "색·무늬 — 무지끼리 · 또는 무늬(패턴 · 프린트)가 같은 옷, 그 안에서 색 · 워싱 순",
+                                "s": "모양 — 사진(옷만 잘라 낸 판) 반 · 실루엣 · 기장 · 소매 · 넥라인 · 디테일 태그 반",
+                                "m": "소재 — 혼용률 · 소재 태그 · 겉보기 소재(가죽 · 스웨이드 · 퍼 · 데님 …)"},
         # 품목 계층 — 갈래 → 큰 품목 → 세부 품목(subtype 값). 앱은 손으로 쓴 품목 표 대신 이걸 읽는다(앱 세션 2026-10-05).
         # 원칙 「모양이 품목, 소재는 태그」 — 레더 · 스웨이드 · 트위드는 품목이 아니라 ma(대표소재) · 태그로 거른다. 무스탕만 품목.
         "hier": [{"sec": sec, "cat": cat, **({"base": base} if base else {}), "subs": subs} for sec, cat, base, subs in HIER],
         "brands": [{"i": bi[s], "s": s, "n": brand_name.get(s, s), "p": pref.get(s, ""),
                     "c": len(by.get(s, [])), "bp": shards_of.get(s, 1), "dp": parts_of.get(s, 0), "sp": sim_parts_of.get(s, 0),
+                    "ap": ax_parts_of.get(s, 0),
                     "im": next((r.get("image_url") for r in by.get(s, []) if r.get("image_url")), ""),
                     **({"up": upref[s]} if upref.get(s) else {}),
                     **({"mo": brand_mood[s]} if brand_mood.get(s) else {})}

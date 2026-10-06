@@ -48,6 +48,7 @@ jobs:
           git add data/products_full.csv data/product_sizes.json data/product_tags_full.json
           if [ -f data/photo_pred.json ]; then git add data/photo_pred.json; fi   # 사진 판정(photo_fill, 2026-10-05)
           if [ -f data/similar_items.json ]; then git add data/similar_items.json; fi   # 비슷한 옷(similar_items, 2026-10-05)
+          if [ -f data/similar_axes.json ]; then git add data/similar_axes.json; fi     # 기준별 비슷한 옷(색·무늬 · 모양 · 소재, 2026-10-06)
           for f in data/styles.csv data/styles_stats.json data/gender_basis.json; do if [ -f "$f" ]; then git add "$f"; fi; done
           git diff --cached --quiet && { echo "변화 없음"; exit 0; }
           git commit -m "생성물 다시 만들기 — 카탈로그 · 태그 · 사이즈 · 스타일 (Actions)"

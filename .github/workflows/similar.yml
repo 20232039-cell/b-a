@@ -26,6 +26,7 @@ jobs:
         shell: bash
         run: |
           git add data/similar_items.json
+          if [ -f data/similar_axes.json ]; then git add data/similar_axes.json; fi
           if git diff --cached --quiet; then echo "바뀐 것 없음"; exit 0; fi
           git commit -m "비슷한 옷 다시 만들기 — similar_items v3 (Actions)"
           for i in 1 2 3; do

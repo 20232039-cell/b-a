@@ -66,6 +66,16 @@ AXW = {"silhouette": .15, "material": .06, "design_element": .10, "construction"
        "finish_wash": .02, "color": .15, "neckline": .10, "sleeve_length": .06, "pants_type": .04, "hardware": .015, "function": .005}
 AXES = [a for a in AXW if a != "color"]
 KEEP, PER_BRAND, TOP_T, TOP_BRANDS, PER_NEIGHBOR = 40, 3, 150, 20, 5
+# 기준별 목록(앱 「비슷한 옷」 글자 줄 — 색·무늬 · 모양 · 소재, 대표님 결정 2026-10-06). 같은 큰 품목 안에서 그 기준 위주로 다시 찾는다.
+# 「전체 40벌 안 재정렬」로는 그 기준으로만 아주 비슷한 옷이 이미 빠져 있을 수 있어서 따로 뽑는다(코덱스 검토).
+#   cp 색·무늬 = .5·[무지끼리 · 또는 무늬(패턴 · 프린트)가 하나라도 같음] + .3·색(같음 1 · 계열 .6) + .1·워싱 · 가공 + .1·닮음
+#   s  모양   = .5·사진 + .5·태그(실루엣 · 기장 · 소매 · 넥라인 · 디자인 요소 · 봉제 · 바지 종류) + 세부 품목 가산 − 기장 · 넥라인 · 소매 어긋남
+#   m  소재   = .6·소재(혼용률 · 소재 태그) + .2·[겉보기 소재 같음] + .2·닮음
+# 무지 = 무늬 태그가 단색 · 멜란지뿐이고 그래픽(프린트)이 없음. 작은 로고 · 자수는 무지로 본다(대표님 2026-10-06).
+AX_KEEP, AX_PER_BRAND = 12, 2
+SHAPE_AXES = ("silhouette", "length", "sleeve_length", "neckline", "design_element", "construction", "pants_type")
+PLAIN_PAT = ("단색", "멜란지")
+GRAPHIC_MIN = 0.7
 CATS = ("tops", "bottoms", "outer", "skirt", "dress")
 # 색 계열(같은 계열 .6) — 수집기 COLOR_VOCAB 라벨을 큰 계열로
 FAM = {}
@@ -251,6 +261,17 @@ def main() -> int:
         gidx = {v: k for k, (_g, vals) in enumerate(groups_vocab.get(ax, {}).items()) for v in vals}
         gmask[ax] = np.array([sum(1 << gidx[v] for v in set(((tags.get(r["source_url"]) or {}).get("tags") or {}).get(ax) or []) if v in gidx)
                               for r in rows], dtype=np.int64)
+    pat_bits: dict[str, int] = {}
+    # 그래픽은 사진도 프린트가 크다고 볼 때만(photo_fill 의 graphic ≥ GRAPHIC_MIN) — 작은 로고 프린트는 무지로(대표님 2026-10-06)
+    ppath = DATA / "photo_pred.json"
+    photo_pred = json.loads(ppath.read_text(encoding="utf-8")) if ppath.exists() else {}
+    def patkey(r):
+        t = (tags.get(r["source_url"]) or {}).get("tags") or {}
+        ks = {v for v in (t.get("pattern") or []) if v not in PLAIN_PAT}
+        if "그래픽" in (t.get("design_element") or []) and (photo_pred.get(r["source_url"]) or {}).get("graphic", 0) >= GRAPHIC_MIN:
+            ks.add("그래픽")
+        return sum(1 << pat_bits.setdefault(v, len(pat_bits)) for v in ks)
+    pkey = np.array([patkey(r) for r in rows], dtype=np.int64)
     lk = {v: k for k, vs in enumerate(LOOK_MAT.values()) for v in vs}
     mats = [set(((tags.get(r["source_url"]) or {}).get("tags") or {}).get("material") or []) for r in rows]
     lmask = np.array([sum(1 << lk[v] for v in m if v in lk) for m in mats], dtype=np.int64)
@@ -267,6 +288,7 @@ def main() -> int:
         groups[BIG.get(r["item_type"], r["item_type"])].append(i)
     rng = np.random.default_rng(0)
     out: dict[str, list] = {}
+    axes_out: dict[str, dict] = {}
     done_groups = 0
     for gname, idx_list in sorted(groups.items(), key=lambda kv: -len(kv[1])):
         if args.limit and done_groups >= args.limit:
@@ -310,9 +332,16 @@ def main() -> int:
         bidx = np.array([bi[b] for b in brand[idx]]); pr = price[idx]; gd = gender[idx]; fk = famkey[idx]; ft = ftype[idx]
         gm = {ax: gmask[ax][idx] for ax in PEN_AXES}
         lm = lmask[idx]; mo = mobs[idx]
+        pk = pkey[idx]; plain = pk == 0
+        shape_obs = np.zeros(n, bool)
+        for ax in SHAPE_AXES:
+            if ax in obs:
+                shape_obs |= obs[ax]
+        mat_obs = obs.get("material", np.zeros(n, bool))
 
-        def Tblock(s, e):
+        def Tblock(s, e, extra=False):
             num = np.zeros((e - s, n)); den = np.zeros((e - s, n))
+            X = {k: np.zeros((e - s, n), np.float32) for k in ("ns", "ds", "nm", "dm", "fs")} if extra else None
             for ax, M in Ms.items():
                 w = AXW[ax]; o = obs[ax]
                 if not o[s:e].any():
@@ -320,6 +349,15 @@ def main() -> int:
                 sim = (M[s:e] @ M.T).toarray()
                 both = np.outer(o[s:e], o)
                 num += w * sim * both; den += w * both
+                if extra:
+                    if ax in SHAPE_AXES:
+                        X["ns"] += w * sim * both; X["ds"] += w * both
+                    elif ax == "material":
+                        X["nm"] += sim * both; X["dm"] += both
+                    elif ax == "finish_wash":
+                        X["fs"] += sim * both
+            if extra:
+                return num, den, X
             w = AXW["color"]
             both = np.outer(cobs[s:e], cobs)
             csim = np.where(col[s:e, None] == col[None, :], 1.0, np.where(fam[s:e, None] == fam[None, :], 0.6, 0.0)) * both
@@ -336,8 +374,9 @@ def main() -> int:
         mu = mu_num / max(mu_den, 1)
         for s in range(0, n, 600):
             e = min(n, s + 600)
-            num, den = Tblock(s, e)
+            num, den, X = Tblock(s, e, extra=True)
             Tm = (num + SHRINK * mu) / (den + SHRINK)
+            Ts = (X["ns"] + SHRINK * mu) / (X["ds"] + SHRINK)
             for r_ in range(e - s):
                 i = s + r_
                 row = Tm[r_].copy()
@@ -373,6 +412,41 @@ def main() -> int:
                     keep += [int(idx[j]), int(round(float(sv) * 1000))]; per[bidx[j]] += 1; seenf.add(fk[j])
                     if len(keep) == KEEP * 2:
                         break
+                # ── 기준별 목록 ──
+                base_row = np.clip(row, 0, 1)
+                colsim = np.where(col == col[i], 1.0, np.where(fam == fam[i], 0.6, 0.0)) * (cobs & cobs[i])
+                same_pat = plain if plain[i] else ((pk & pk[i]) > 0)
+                lists = {}
+                lists["cp"] = .5 * same_pat + .3 * colsim + .1 * X["fs"][r_] + .1 * base_row
+                if vobs[i] or shape_obs[i]:
+                    srow = Ts[r_].astype(np.float64)
+                    if PHOTO_W > 0 and vobs[i]:
+                        srow = .5 * srow + .5 * vrow
+                    srow = srow + FINE_BONUS * (ft == ft[i])
+                    for ax, m in gm.items():
+                        if m[i]:
+                            srow = srow - PEN_W * (((m & m[i]) == 0) & (m > 0))
+                    lists["s"] = srow
+                if mat_obs[i]:
+                    tmat = np.where(X["dm"][r_] > 0, X["nm"][r_] / np.maximum(X["dm"][r_], 1e-9), 0.0)
+                    look = ((lm & lm[i]) > 0) if lm[i] else np.zeros(n, bool)
+                    lists["m"] = .6 * tmat + .2 * look + .2 * base_row
+                flags = 1 | (2 if "s" in lists else 0) | (4 if "m" in lists else 0) | (0 if plain[i] else 8)
+                axo = {"f": flags}
+                for key, sc in lists.items():
+                    sc = np.where(ok, sc, -9); sc[i] = -9
+                    pick = []; per2: collections.Counter = collections.Counter(); seen2 = set()
+                    for j in np.argsort(-sc)[:300]:
+                        if sc[j] <= -9:
+                            break
+                        if per2[bidx[j]] >= AX_PER_BRAND or fk[j] in seen2:
+                            continue
+                        pick += [int(idx[j]), int(round(float(min(max(sc[j], 0), 1)) * 1000))]; per2[bidx[j]] += 1; seen2.add(fk[j])
+                        if len(pick) == AX_KEEP * 2:
+                            break
+                    if pick:
+                        axo[key] = pick
+                axes_out[rows[idx[i]]["source_url"]] = axo
                 out[rows[idx[i]]["source_url"]] = keep
         print(f"  {gname} {n:,} ({time.time() - t0:.0f}s)", flush=True)
 
@@ -384,7 +458,7 @@ def main() -> int:
     h = hashlib.sha1()   # 설정 · 색 계열표 · 입력 파일 내용 · 임베딩 조각까지 — 같은 주소라도 태그 · 가격이 바뀌면 version 이 바뀐다(코덱스 2026-10-05)
     h.update(json.dumps(config, sort_keys=True).encode())
     h.update(json.dumps(FAM, sort_keys=True).encode())
-    for f in ("products_full.csv", "product_tags_full.json", "mood/brand_graph.json", "mood_genre_labels.json", "vocab_aliases.json"):
+    for f in ("products_full.csv", "product_tags_full.json", "mood/brand_graph.json", "mood_genre_labels.json", "vocab_aliases.json", "photo_pred.json"):
         fp = DATA / f
         if fp.exists():
             h.update(hashlib.sha1(fp.read_bytes()).digest())
@@ -396,6 +470,14 @@ def main() -> int:
         h.update(f"limit={args.limit}".encode())
     version = h.hexdigest()[:12]
     Path(args.out).write_text(json.dumps({"version": version, "config": config, "index": index, "items": out}, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
+    ax_path = Path(args.out).with_name(Path(args.out).name.replace("similar_items", "similar_axes")) \
+        if "similar_items" in Path(args.out).name else Path(args.out).with_suffix(".axes.json")
+    axes_out = {pid(rows[ix]): axes_out[rows[ix]["source_url"]] for ix in range(N) if rows[ix]["source_url"] in axes_out}
+    ax_conf = {"keep": AX_KEEP, "per_brand": AX_PER_BRAND, "shape_axes": SHAPE_AXES, "plain_pattern": PLAIN_PAT, "graphic_min": GRAPHIC_MIN,
+               "flags": "1 색·무늬 · 2 모양 · 4 소재 · 8 무늬 있음(없으면 무지)"}
+    ax_path.write_text(json.dumps({"version": version, "config": ax_conf, "index": index, "items": axes_out}, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
+    cnt = collections.Counter(k for v in axes_out.values() for k in v if k != "f")
+    print(f"기준별 목록 {len(axes_out):,}벌 · " + " · ".join(f"{k} {c:,}" for k, c in sorted(cnt.items())) + f" · {ax_path.stat().st_size / 1e6:.1f}MB")
     nc = [len(v) // 2 for v in out.values()]
     print(f"저장 {len(out):,}벌 · 후보 평균 {np.mean(nc) if nc else 0:.1f} · 40벌 미만 {sum(1 for c in nc if c < KEEP):,} · version {version} · {time.time() - t0:.0f}s · {Path(args.out).stat().st_size / 1e6:.1f}MB")
     return 0
