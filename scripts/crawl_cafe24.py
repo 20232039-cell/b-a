@@ -1431,6 +1431,10 @@ def garment_head(name: str) -> str:
     # 「Mods Parka_Short」는 짧은 파카지 반바지가 아니다 — 겉옷 낱말 바로 뒤에 붙은 short 는 기장이다(3벌, 2026-10-06).
     if head in ("쇼츠", "숏팬츠") and re.search(r"(parka|jacket|coat|blouson|jumper)[ _\-]*short\b", name or "", re.I):
         head = match_head(re.sub(r"short\b", " ", name, flags=re.I), ITEM_TYPE_VOCAB)
+    # 「후드 티셔츠」 · 「hooded tee」는 후드다 — 뒤에서 끝나는 티셔츠가 이겨 롱슬리브 124 · 맨투맨 37벌이 후드를 잃고 있었다
+    # (5차 평가 16번, 사람 「기준 사진 후드티야, 롱슬리브가 아니라」 2026-10-06). 니트 · 재킷 · 파카에 달린 후드는 그대로 둔다(모양 품목이 따로 있다).
+    if head in ("티셔츠", "롱슬리브", "반팔", "맨투맨") and re.search(r"후드|후디|hood", name or "", re.I):
+        head = "후드"
     if head:
         return head
     m = _TAIL_ABBR_RX.search(name or "")
