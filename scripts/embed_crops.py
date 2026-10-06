@@ -13,6 +13,8 @@
 
     python scripts/embed_crops.py                    # data/emb/crop_jobs.json 의 일감(평가 옷 약 1,500벌 + 비교용 4,000벌, 사진 8,905장)
     python scripts/embed_crops.py --limit 200        # 시험 삼아 조금만
+    python scripts/embed_crops.py --all              # 판매중 옷 전부의 대표 사진(약 9만 장) → data/emb/siglip_crop — 비슷한 옷이 이걸 쓴다
+                                                     # 평가(2026-10-06): 사진 항만 바꿔도 사람 답 쌍 정확도 68.7 → 73.0%, 처음 본 옷 62.5 → 69.6%
 
 결과: data/emb/crop_eval/part_NNNN.npz — E_full · E_box · E_mask(float16, 행 순서 = meta) ·
 meta(JSON: [{u, k(0=대표 · 1~3=상세), area(옷 영역 비율), person(사람이 찍힌 사진인가), ok(옷 영역을 찾았나)}]).
@@ -45,6 +47,7 @@ DATA = ROOT / "data"
 EMB = DATA / "emb"
 IMG = EMB / "_imgs" / "crop"
 OUT = EMB / "crop_eval"
+ALL_OUT = EMB / "siglip_crop"
 JOBS = EMB / "crop_jobs.json"
 SEG_REPO = "mattmdjaga/segformer_b2_clothes"
 CLIP_REPO = "hf-hub:Marqo/marqo-fashionSigLIP"
@@ -115,9 +118,11 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--batch", type=int, default=0, help="기본: GPU 8 · CPU 8 — 옷 분할 모델이 배치 32 에서 8GB GPU(RTX 3050)를 넘었다(2026-10-06)")
     ap.add_argument("--threads", type=int, default=64)
-    ap.add_argument("--out", default=str(OUT), help="결과 폴더(시험할 때 저장소 밖으로)")
+    ap.add_argument("--out", default="", help="결과 폴더(시험할 때 저장소 밖으로)")
+    ap.add_argument("--all", action="store_true",
+                    help="판매중 · 씨앗 브랜드 옷 전부의 대표 사진 → data/emb/siglip_crop (similar_items 가 90% 이상 덮이면 이걸 쓴다)")
     args = ap.parse_args()
-    out = Path(args.out)
+    out = Path(args.out or (ALL_OUT if args.all else OUT))
 
     import open_clip
     import torch
@@ -129,11 +134,16 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=True)
     IMG.mkdir(parents=True, exist_ok=True)
 
-    jobs = json.load(open(args.jobs, encoding="utf-8"))
-    items = [{"u": j["u"], "c": j["c"], "k": k, "img": im} for j in jobs for k, im in enumerate(j["imgs"])]
+    if args.all:
+        from embed_photos import APPAREL, all_jobs
+        items = [{"u": j["u"], "c": j["c"], "k": 0, "img": j["img"], "b": j["b"], "t": j["t"]}
+                 for j in all_jobs() if j["c"] in APPAREL]
+    else:
+        jobs = json.load(open(args.jobs, encoding="utf-8"))
+        items = [{"u": j["u"], "c": j["c"], "k": k, "img": im} for j in jobs for k, im in enumerate(j["imgs"])]
     items = items[:args.limit] if args.limit else items
     parts = sorted(out.glob("part_*.npz"))
-    done = {(m["u"], m["k"]) for p in parts for m in json.loads(str(np.load(p, allow_pickle=False)["meta"]))}
+    done = {(m["u"], m.get("k", 0)) for p in parts for m in json.loads(str(np.load(p, allow_pickle=False)["meta"]))}
     todo = [x for x in items if (x["u"], x["k"]) not in done]
     print(f"사진 {len(items)} · 이미 함 {len(done)} · 남음 {len(todo)}", flush=True)
     if not todo:
@@ -194,19 +204,29 @@ def main() -> int:
                 boxes.append(bx)
                 masks.append(mk)
                 metas.append({"u": x["u"], "k": x["k"], "area": round(area, 3), "person": person, "ok": ok})
-            F.append(embed(ims))
+            if not args.all:
+                F.append(embed(ims))
             B.append(embed(boxes))
             M.append(embed(masks))
         if not metas:
             continue
         k = len(parts) + 1
-        np.savez(out / f"part_{k:04d}.npz", E_full=np.concatenate(F), E_box=np.concatenate(B), E_mask=np.concatenate(M),
-                 meta=np.array(json.dumps(metas, ensure_ascii=False)))
+        if args.all:
+            # 상자로 자른 것 + 옷 아닌 픽셀을 지운 것의 평균(bm) — 평가에서 가장 나았다. siglip 조각과 같은 꼴(E + meta u·b·c·t)
+            bm = np.concatenate(B).astype(np.float32) + np.concatenate(M).astype(np.float32)
+            bm /= np.linalg.norm(bm, axis=1, keepdims=True) + 1e-9
+            by_u = {x["u"]: x for x in chunk}
+            metas = [{"u": m["u"], "b": by_u[m["u"]]["b"], "c": by_u[m["u"]]["c"], "t": by_u[m["u"]]["t"], "ok": m["ok"]} for m in metas]
+            np.savez(out / f"part_{k:04d}.npz", E=bm.astype(np.float16), meta=np.array(json.dumps(metas, ensure_ascii=False)))
+        else:
+            np.savez(out / f"part_{k:04d}.npz", E_full=np.concatenate(F), E_box=np.concatenate(B), E_mask=np.concatenate(M),
+                     meta=np.array(json.dumps(metas, ensure_ascii=False)))
         parts.append(out / f"part_{k:04d}.npz")
-        done |= {(m["u"], m["k"]) for m in metas}
+        done |= {(m["u"], m.get("k", 0)) for m in metas}
         okr = sum(m["ok"] for m in metas) / len(metas)
         print(f"저장 {len(done)} / {len(items)} · 이번 조각 옷 찾음 {okr:.0%} · {time.time() - t0:.0f}s", flush=True)
-    print(f"끝 — {len(done)}장 · {out}\n올리기:  git add data/emb/crop_eval && git commit -m \"옷만 자른 사진 임베딩(평가용)\" && git push", flush=True)
+    rel = out.relative_to(ROOT) if out.is_relative_to(ROOT) else out
+    print(f"끝 — {len(done)}장 · {out}\n올리기:  git add {rel} && git commit -m \"옷만 자른 사진 임베딩\" && git push", flush=True)
     return 0
 
 

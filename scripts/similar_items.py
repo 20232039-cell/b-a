@@ -10,7 +10,7 @@
              − LOOK_PEN_W·[기준 옷의 겉보기 소재(가죽 · 스웨이드 · 퍼 · 데님 …)가 후보 소재와 안 겹침]
       T    = 축별 코사인의 가중 평균(양쪽 다 관측된 축만, 묶음 안 IDF) + 관측이 적으면 묶음 평균 μ 로 수축  T=(Σw·sim+.2μ)/(Σw+.2)
              색은 같으면 1 · 같은 계열 .6 · 다르면 0. 소재는 혼용률 비율 벡터(없으면 소재 태그).
-      V    = 사진 임베딩(data/emb/siglip, Marqo-FashionSigLIP) 코사인을 묶음 안 무작위 쌍 분포의 백분위로 바꾼 값. 사진 없는 후보는 T 그대로.
+      V    = 사진 임베딩(data/emb/siglip_crop 이 90% 이상 덮으면 그것, 아니면 data/emb/siglip · Marqo-FashionSigLIP) 코사인을 묶음 안 무작위 쌍 분포의 백분위로 바꾼 값. 사진 없는 후보는 T 그대로.
   점수 S   = (.95−BRAND_W)·닮음 + BRAND_W·B + .05·P   (B: 브랜드끼리 비슷함 백분위, P=exp(−|log 가격비|))
   후보     = 묶음 안 닮음 상위 150 ∪ 브랜드 이웃 상위 20곳 × 각 상위 5 → S 상위 40 저장(브랜드당 3 · 같은 옷 다른 색 1)
   브랜드 B = data/mood/brand_graph.json 의 장르 비율(사람 칩 · 없으면 예측) 코사인 0.5 + 브랜드 태그 벡터(IDF, 부자재 · 기능 · 넥라인 뺌) 코사인 0.5,
@@ -95,8 +95,27 @@ def load_hier() -> dict[str, str]:
     return big
 
 
-def load_emb() -> tuple[np.ndarray, dict[str, int]]:
-    emb_dir = DATA / "emb" / "siglip"
+# 사진 임베딩 폴더. 옷만 잘라 낸 판(siglip_crop — embed_crops.py --all, 상자로 자른 것과 옷 아닌 픽셀을 지운 것의 평균)이
+# 판매중 옷의 90% 이상을 덮으면 그걸 쓰고, 아니면 대표 사진 통째(siglip)를 쓴다. 두 판을 섞지 않는다 — 벡터 공간이 달라 코사인을 못 견준다.
+# 3 · 4 · 5차 사람 답(기준 옷 96벌): 사진 항만 바꿔 끼우면 전체 68.7 → 73.0%(+4.3%p, 기준 옷 단위 95% 구간 +0.9~+7.9),
+# 처음 본 4 · 5차 62.5 → 69.6%(+7.2%p, +1.0~+13.8). 상세 사진까지 평균 · 최대로 섞으면 오히려 나빴다(−2~−6%p, 2026-10-06).
+EMB_DIRS = ("siglip_crop", "siglip")
+CROP_MIN_COVER = 0.90
+
+
+def pick_emb_dir(urls: list[str]) -> str:
+    crop = DATA / "emb" / "siglip_crop"
+    have = set()
+    for p in sorted(crop.glob("part_*.npz")):
+        have.update(m["u"] for m in json.loads(str(np.load(p, allow_pickle=False)["meta"])))
+    cover = sum(1 for u in urls if u in have) / max(len(urls), 1)
+    name = "siglip_crop" if cover >= CROP_MIN_COVER else "siglip"
+    print(f"사진 임베딩 {name} (옷만 자른 판이 판매중 옷의 {cover:.0%})", flush=True)
+    return name
+
+
+def load_emb(name: str = "siglip") -> tuple[np.ndarray, dict[str, int]]:
+    emb_dir = DATA / "emb" / name
     Es, urls = [], []
     for p in sorted(emb_dir.glob("part_*.npz")):
         z = np.load(p, allow_pickle=False)
@@ -239,7 +258,8 @@ def main() -> int:
     brands = sorted(set(brand))
     bi = {b: i for i, b in enumerate(brands)}
     BB = brand_matrix(rows, tags, brands)
-    E, EI = load_emb()
+    EMB_NAME = pick_emb_dir([r["source_url"] for r in rows])
+    E, EI = load_emb(EMB_NAME)
     print(f"브랜드 {len(brands)} · 사진 {len(EI):,}장 · 특징 {VOC:,} ({time.time() - t0:.0f}s)", flush=True)
 
     groups: dict[str, list[int]] = collections.defaultdict(list)
@@ -360,7 +380,7 @@ def main() -> int:
     index = [pid(r) for r in rows]
     out = {pid(rows[i]): v for i, v in ((ix, out[rows[ix]["source_url"]]) for ix in range(N) if rows[ix]["source_url"] in out)}
     config = {"photo": PHOTO_W, "fine_type_bonus": FINE_BONUS, "conflict_penalty": PEN_W, "look_material_penalty": LOOK_PEN_W, "look_material": LOOK_MAT, "brand": BRAND_W, "price": PRICE_W, "shrink": SHRINK, "axes": AXW,
-              "pool": "big_category", "keep": KEEP}
+              "pool": "big_category", "keep": KEEP, "photo_emb": EMB_NAME}
     h = hashlib.sha1()   # 설정 · 색 계열표 · 입력 파일 내용 · 임베딩 조각까지 — 같은 주소라도 태그 · 가격이 바뀌면 version 이 바뀐다(코덱스 2026-10-05)
     h.update(json.dumps(config, sort_keys=True).encode())
     h.update(json.dumps(FAM, sort_keys=True).encode())
@@ -368,7 +388,7 @@ def main() -> int:
         fp = DATA / f
         if fp.exists():
             h.update(hashlib.sha1(fp.read_bytes()).digest())
-    for p_ in sorted((DATA / "emb" / "siglip").glob("part_*.npz")):
+    for p_ in sorted((DATA / "emb" / EMB_NAME).glob("part_*.npz")):
         h.update(p_.name.encode()); h.update(str(p_.stat().st_size).encode())
     h.update(f"n={len(index)}".encode())                      # 상품 집합이 바뀌면(보류 매장 제외 등) version 도 바뀐다 — 2026-10-05 에 같은 version 이 두 번 나왔다
     h.update(json.dumps(sorted(platforms.APP_HOLD)).encode())
