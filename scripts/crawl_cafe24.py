@@ -1433,7 +1433,9 @@ def garment_head(name: str) -> str:
         head = match_head(re.sub(r"short\b", " ", name, flags=re.I), ITEM_TYPE_VOCAB)
     # 「후드 티셔츠」 · 「hooded tee」는 후드다 — 뒤에서 끝나는 티셔츠가 이겨 롱슬리브 124 · 맨투맨 37벌이 후드를 잃고 있었다
     # (5차 평가 16번, 사람 「기준 사진 후드티야, 롱슬리브가 아니라」 2026-10-06). 니트 · 재킷 · 파카에 달린 후드는 그대로 둔다(모양 품목이 따로 있다).
-    if head in ("티셔츠", "롱슬리브", "반팔", "맨투맨") and re.search(r"후드|후디|hood", name or "", re.I):
+    # 낱말 속의 후드는 아니다 — 「보이후드」 · 「차일드후드」(브랜드 · 그래픽 이름) · 「후디진호」 · neighborhood.
+    if head in ("티셔츠", "롱슬리브", "반팔", "맨투맨") and \
+            re.search(r"(?<![가-힣a-z])(?:후드|후디)|(?<![a-z])hood(?:ed|ie|y|tee)?(?![a-z])", name or "", re.I):
         head = "후드"
     if head:
         return head
