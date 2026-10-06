@@ -49,6 +49,20 @@ SLEEVE_BY_ITEM = {"반팔": "반팔", "롱슬리브": "롱슬리브", "슬리브
 SLEEVE_TARGETS = {"티셔츠", "셔츠"}          # 뭉뚱그린 품목만 가른다(refine_items 와 같다)
 NECK_CATS = {"tops", "dress"}
 MIN_CLASS = 150           # 이보다 적은 갈래는 배우지 않는다
+CLOTH_CATS = {"tops", "bottoms", "outer", "skirt", "dress", "suiting"}   # 옷 — 큰 품목을 사진으로 채우는 범위
+# 품목이 빈 옷은 **큰 품목**(팬츠 · 데님 · 티셔츠 …)만 사진으로 채운다 — 세부 52갈래는 69%(확신 ≥0.8 구간이 6%뿐)라
+# 못 쓰고, 큰 품목 14갈래는 83%, 확신 ≥0.8 구간(절반)에서 96.5%다(2026-10-06, 빈 품목 1,441벌 조사). 매장 갈래(아우터 ·
+# 상의 · 하의)와 어긋나는 예측은 버린다 — 셋업 수트가 하의 칸에 있는 식의 사례라 어느 쪽이 맞는지 사진만으로 못 정한다.
+# 큰 품목 이름이 곧 품목 값인 것(base 가 있는 것)만 채운다 — 「맨투맨·후드」 같은 묶음 이름은 품목 값이 아니다.
+from item_hier import HIER
+CAT_OF = {}; BASE_OF = {}; SEC_OF = {}
+for _sec, _cat, _base, _subs in HIER:
+    for _s in _subs:
+        CAT_OF[_s] = _cat
+    if _base:
+        CAT_OF[_base] = _cat; BASE_OF[_cat] = _base
+    SEC_OF[_cat] = _sec
+GROUP_OF_SEC = {"아우터": "아우터", "상의": "상의", "하의": "하의", "원피스": "상의"}   # products_full.csv 의 group 칸은 원피스를 상의에 둔다
 
 
 def load_emb() -> tuple[np.ndarray, dict[str, int]]:
@@ -110,8 +124,10 @@ def fit_report(name: str, X: np.ndarray, labels: list[str], brands: list[str]) -
         acc = float((pred == yt).mean())
         hi = conf >= MIN_P
         acc_hi = float((pred[hi] == yt[hi]).mean()) if hi.any() else float("nan")
+        mid = (conf >= 0.5) & ~hi
+        acc_mid = float((pred[mid] == yt[mid]).mean()) if mid.any() else float("nan")
         print(f"{name}: 갈래 {len(classes)} · 학습 {int((~hold).sum()):,} · 검증 {int(hold.sum()):,}(브랜드 10%) · 정확도 {acc:.1%}"
-              f" · 확신≥{MIN_P} 비율 {hi.mean():.0%} 그 안 정확도 {acc_hi:.1%}")
+              f" · 확신≥{MIN_P} 비율 {hi.mean():.0%} 그 안 정확도 {acc_hi:.1%} · 0.5~{MIN_P} 비율 {mid.mean():.0%} 그 안 {acc_mid:.1%}")
         per = Counter(); tot = Counter()
         for p_, t_ in zip(pred, yt):
             tot[classes[t_]] += 1; per[classes[t_]] += int(p_ == t_)
@@ -139,9 +155,36 @@ def main() -> int:
     rows = list(csv.DictReader(io.StringIO(CSV.read_text(encoding="utf-8-sig"))))
     tags = json.loads(TAGS.read_text(encoding="utf-8")) if TAGS.exists() else {}
     sizes = json.loads(SIZES.read_text(encoding="utf-8")) if SIZES.exists() else {}
-    rows = [r for r in rows if r["source_url"] in EI and r.get("category_code") in NECK_CATS]
+    cloth = [r for r in rows if r["source_url"] in EI and r.get("category_code") in CLOTH_CATS]
+    rows = [r for r in cloth if r.get("category_code") in NECK_CATS]
     tg = lambda r: ((tags.get(r["source_url"]) or {}).get("tags") or {})
     pred: dict[str, dict] = {}
+
+    # ── 큰 품목(품목이 빈 옷만) ──────────────────────────────────────────────
+    lab, brs, xs = [], [], []
+    for r in cloth:
+        c = CAT_OF.get(r["item_type"])
+        if c:
+            lab.append(c); brs.append(r["brand_slug"]); xs.append(EI[r["source_url"]])
+    m = fit_report("큰 품목", E[xs], lab, brs)
+    if m:
+        classes, W, b = m
+        tgt = [r for r in cloth if not r["item_type"] and r["status"] == "ON_SALE"]
+        n_item, n_drop = 0, Counter()
+        if tgt:
+            P = softmax(E[[EI[r["source_url"]] for r in tgt]] @ W + b)
+            for r, p in zip(tgt, P):
+                if p.max() < MIN_P:
+                    n_drop["확신 부족"] += 1; continue
+                c = classes[int(p.argmax())]
+                if GROUP_OF_SEC.get(SEC_OF.get(c, ""), "") != (r.get("group") or ""):
+                    n_drop["매장 갈래와 어긋남"] += 1; continue
+                if c not in BASE_OF:
+                    n_drop["품목 값 없는 묶음"] += 1; continue
+                pred.setdefault(r["source_url"], {})["item"] = [BASE_OF[c], round(float(p.max()), 3)]
+                n_item += 1
+        print(f"   품목 빈 옷 {len(tgt):,}벌 중 {n_item:,}벌 채움 (버림: " + " · ".join(f"{k} {v:,}" for k, v in n_drop.items()) + "): "
+              + " · ".join(f"{c} {n:,}" for c, n in Counter(v["item"][0] for v in pred.values() if "item" in v).most_common()))
 
     # ── 소매 ────────────────────────────────────────────────────────────────
     lab, brs, xs = [], [], []

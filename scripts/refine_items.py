@@ -57,6 +57,12 @@ def photo_sleeve(photo: dict, url: str) -> str | None:
     return v[0] if v else None
 
 
+def photo_item(photo: dict, url: str) -> str | None:
+    """품목이 빈 옷에 photo_fill 이 사진으로 고른 큰 품목(팬츠 · 데님 · 티셔츠 … base 값, 확신 ≥0.8 · 매장 갈래 일치만 들어 있다)."""
+    v = (photo.get(url) or {}).get("item")
+    return v[0] if v else None
+
+
 def total_cm(sizes: dict, url: str) -> float | None:
     v = [x for x in ((sizes.get(url) or {}).get("sizes") or {}).get("총장", []) if x is not None]
     return min(v) if v else None
@@ -134,14 +140,19 @@ def main() -> int:
             new, why = decide(it, sleeve_cm(sizes, u), sleeve_tag(tags, u), photo_sleeve(photo, u))
             if new != it:
                 by[why] += 1
+        elif not it and photo_item(photo, u):
+            # 이름에서 품목을 못 읽은 옷(품번형 이름 — modnine 「MOD1」, ader-error 「Product. 128」)은 사진이 고른 큰 품목으로.
+            # 세부 품목은 비워 두므로 앱의 큰 품목 칩에는 잡히고 세부 칩에는 안 잡힌다(2026-10-06).
+            new = photo_item(photo, u)
+            by["사진"] += 1
         else:
             continue
         if new != it:
-            moved[(it, new)] += 1
+            moved[(it or "(빈칸)", new)] += 1
             r["item_type"] = new
             if r.get("subtype") in (it, ""):
                 r["subtype"] = new
-    print(f"소매 · 기장으로 다듬음 {sum(moved.values()):,}벌 (실측 {by['실측']:,} · 사진 {by['사진']:,} · 태그 {by['태그']:,})")
+    print(f"소매 · 기장 · 빈 품목 다듬음 {sum(moved.values()):,}벌 (실측 {by['실측']:,} · 사진 {by['사진']:,} · 태그 {by['태그']:,})")
     for (a, b), n in moved.most_common():
         print(f"  {a} → {b} {n:,}")
     if args.dry_run or not moved:
