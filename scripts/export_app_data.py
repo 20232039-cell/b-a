@@ -167,6 +167,15 @@ def img_prefix(urls: list[str]) -> str:
     return head
 
 
+AX_MIN = 3        # 기준별 목록도 「비슷한 옷」과 같은 규칙 — SIM_MIN 미만을 빼고 3벌 미만이면 그 기준을 안 싣는다(대표님 규칙을 탭에도, 2026-10-07)
+
+
+def ax_pairs(nb: list, aidx: list, ok_ids: set) -> list:
+    """similar_axes.json 의 [번호, 점수×1000, …] → [[이웃 id, 점수], …] — 앱에 나가는 이웃 · 점수 SIM_MIN 이상만."""
+    return [[aidx[j], min(1.0, max(0.0, sc / 1000))] for j, sc in zip(nb[0::2], nb[1::2])
+            if 0 <= j < len(aidx) and aidx[j] in ok_ids and sc / 1000 >= SIM_MIN]
+
+
 def thin_row(r: dict, tags: dict, bi: dict, ci: dict, pref: dict) -> dict:
     """목록 한 줄. 열쇠 뜻은 catalog.json 의 "fields" 에 적어 둔다."""
     t = (tags.get(r["source_url"]) or {}).get("tags") or {}
@@ -414,10 +423,15 @@ def main() -> int:
     print(f"색만 다른 형제 묶음 {gid}개 · 묶인 상품 {len(COLOR_GROUP)}벌")
     ax_path = DATA / "similar_axes.json"
     axes = json.loads(ax_path.read_text(encoding="utf-8")) if ax_path.exists() else {}
+    ax_ok_ids = {f'{r["brand_slug"]}-{r["product_no"]}' for r in rows}
     for pid, v in (axes.get("items") or {}).items():
-        # 실제로 목록이 있는 기준만 비트를 켠다(f 는 계산 때 기준 옷 쪽 정보만 본 값)
-        f = (1 if v.get("cp") else 0) | (2 if v.get("s") else 0) | (4 if v.get("m") else 0) | (int(v.get("f", 0)) & 8)
-        if f:
+        # 실제로 실리는 기준만 비트를 켠다 — 문턱 · 앱에 나가는 이웃으로 거른 뒤 AX_MIN 벌 이상(아래 조각 쓰기와 같은 규칙)
+        aidx_ = axes.get("index") or []
+        f = int(v.get("f", 0)) & 8
+        for key, bit in (("cp", 1), ("s", 2), ("m", 4)):
+            if len(ax_pairs(v.get(key) or [], aidx_, ax_ok_ids)) >= AX_MIN:
+                f |= bit
+        if f & 7:
             AX_FLAGS[pid] = f
 
     # 매장마다 사진 주소 앞머리 — 줄에서 떼어 내고 catalog.json 에 한 번만 적는다
@@ -668,10 +682,8 @@ def main() -> int:
                 continue
             row_ = {}
             for key in ("cp", "s", "m"):
-                nb = v.get(key) or []
-                pairs = [[aidx[j], min(1.0, max(0.0, sc / 1000))] for j, sc in zip(nb[0::2], nb[1::2])
-                         if 0 <= j < len(aidx) and aidx[j] in exported_ax]
-                if pairs:
+                pairs = ax_pairs(v.get(key) or [], aidx, exported_ax)
+                if len(pairs) >= AX_MIN:
                     row_[key] = pairs
             if row_:
                 ax_of[pid.rsplit("-", 1)[0]][pid] = row_
@@ -748,6 +760,7 @@ def main() -> int:
         "similar_fields": {"<id>": "[[이웃 id, 점수], …] — 이웃은 다른 매장일 수 있다. 앱은 보일 때 브랜드당 2벌로 섞는다. "
                                    f"점수 {SIM_MIN} 미만은 안 싣는다 — 3벌 미만이면 앱은 「다른 브랜드의 ○○」로 대신한다"},
         # 기준별 비슷한 옷(similar-axis/<slug>.json) — 같은 큰 품목 안에서 그 기준 위주로 다시 찾은 12벌(브랜드당 2벌), 점수 높은 순.
+        "similar_axis_note": f"기준마다 점수 {SIM_MIN} 미만은 안 싣고, {AX_MIN}벌 미만이면 그 기준 키를 뺀다(index 줄 ax 비트도 꺼짐)",
         "similar_axis_fields": {"cp": "색·무늬 — 무지끼리 · 또는 무늬(패턴 · 프린트)가 같은 옷, 그 안에서 색 · 워싱 순",
                                 "s": "모양 — 사진(옷만 잘라 낸 판) 반 · 실루엣 · 기장 · 소매 · 넥라인 · 디테일 태그 반",
                                 "m": "소재 — 혼용률 · 소재 태그 · 겉보기 소재(가죽 · 스웨이드 · 퍼 · 데님 …)"},
