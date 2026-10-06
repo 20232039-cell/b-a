@@ -287,7 +287,7 @@ ITEM_TYPE_VOCAB = {
              "트라우져"],
     "스커트": ["skirt", "스커트",
              # skort(스커트+팬츠) 19벌 — 매장은 하의 칸에 두지만 옷은 스커트다.
-             "skort"],
+             "skort", "pantskirt", "pant skirt", "판츠스커트", "팬츠스커트"],
     # 「ops」는 원피스 약자다(「jersey contrast tiered ops」 · 「turtleneck ops」). 영문 낱말 경계로만 걸려 tops 에는 안 걸린다.
     # 상의로 섰더니 원피스 총장 121.5 가 「상의에 있을 수 없는 값」으로 지워졌다(코덱스 014 · le 2109).
     "원피스": ["dress", "원피스", "드레스", "one-piece", "onepiece", "one piece", "ops"],
@@ -334,7 +334,7 @@ ITEM_TYPE_VOCAB = {
     "수영복하의": ["bikini bottom", "비키니 bottom", "비키니 바텀", "swim bottom", "비키니 하의",
               "swim short", "보드숏", "board short"],
     "롱슬리브": ["long sleeve", "long-sleeve", "longsleeve", "long sleeves",
-             "롱슬리브", "롱 슬리브", "긴팔"],
+             "롱슬리브", "롱 슬리브", "긴팔", "l/s"],
     "쇼츠": ["shorts", "쇼츠"],
     "스웨트팬츠": ["sweatpants", "sweat pants", "sweat pant", "스웨트팬츠", "스웨트 팬츠", "스웻팬츠", "스웻 팬츠", "트레이닝 팬츠", "트레이닝팬츠", "training pants"],
     "카고팬츠": ["cargo pants", "카고팬츠", "cargo", "카고 팬츠", "카고 바지", "cargo pant", "cargo trousers"],
@@ -354,7 +354,7 @@ ITEM_TYPE_VOCAB = {
            # 「숏슬리브」를 낱말 그 자체로 품목처럼 쓰는 매장이 있다(「헨리넥 숏슬리브」 「스쿱넥 포켓 숏슬리브」).
            # 하프슬리브는 있는데 숏슬리브가 없어서 15벌이 품목 빈칸이었다(2026-09-08). 이름 37,519개에서
            # 바뀌는 것은 그 13벌(빈칸 → 반팔)뿐이다 — 「숏슬리브 셔츠」는 뒤 낱말이 이겨 셔츠로 남는다.
-           "숏슬리브", "숏 슬리브"],
+           "숏슬리브", "숏 슬리브", "s/s"],
     # 「폴로 셔츠」「POLO SHIRT」는 뒤의 셔츠가 이겨 셔츠로 갔다(441벌, 2026-10-05 매장 분류 대조 — 매장은 TEE 로 둔다). 붙은꼴로 되돌린다.
     "피케": ["polo", "pique", "피케", "폴로", "polo shirt", "polo shirts", "폴로 셔츠", "폴로셔츠", "polo tee", "폴로 티", "폴로티", "pique shirt", "피케 셔츠", "피케셔츠"],
     "레깅스": ["leggings", "레깅스"],
