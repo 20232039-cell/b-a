@@ -1407,9 +1407,32 @@ MATERIAL_OUTER = (
 )
 
 
+# 매장은 pants · shorts 를 단수로도 쓴다 — 「Nylon Rigger Pant」「Flight Short」「Chino Pant」. 복수만 어휘에 있어서 판매중
+# 빈 품목 1,441벌 중 pant 141 · short 81벌이 비어 있었다(2026-10-06). 복수 별칭마다 단수를 자동으로 만들고, 홀로 선 단수는
+# 팬츠 · 쇼츠로. 복수가 어디로 가든 단수도 같은 곳으로 간다(「Denim Painter Pants」가 팬츠이듯 「… Pant」도 팬츠).
+for _lab, _keys in list(ITEM_TYPE_VOCAB.items()):
+    ITEM_TYPE_VOCAB[_lab] = _keys + [k[:-1] for k in _keys if k.endswith(("pants", "shorts")) and k[:-1] not in _keys]
+ITEM_TYPE_VOCAB["팬츠"].append("pant")
+ITEM_TYPE_VOCAB["쇼츠"].append("short")
+
+# 이름 끝(또는 끝 괄호 앞)에만 쓰는 대문자 약어 — ava-molli 「WOOL BLENDED WIDE PT (BLACK)」 · 「BELTED A-LINE MIDI SK (NAVY)」 ·
+# 「TWEED MINI OP (IVORY CHECK)」(판매중 빈 품목 중 PT 42 · SK 22 · OP 26벌, 2026-10-06). 어휘에 넣지 않는 까닭: 소문자 「op」 ·
+# 「sk」는 낱말 조각이고 「GY+SK」의 SK 는 색(스카이)이다. 아무 품목도 안 걸렸을 때, 대문자일 때, 끝자리일 때만 받는다.
+_TAIL_ABBR = {"PT": "팬츠", "SK": "스커트", "OP": "원피스"}
+_TAIL_ABBR_RX = re.compile(r"\b(PT|SK|OP)(?=\s*(?:\(|\[|$))")
+
+
 def garment_head(name: str) -> str:
-    """ITEM_TYPE_VOCAB 의 match_head. 홀로 선 「라이더 · 바이커」는 어휘에 없으므로(라이더자켓 주석) 따로 거를 것이 없다."""
-    return match_head(name, ITEM_TYPE_VOCAB)
+    """ITEM_TYPE_VOCAB 의 match_head. 홀로 선 「라이더 · 바이커」는 어휘에 없으므로(라이더자켓 주석) 따로 거를 것이 없다.
+    아무것도 안 걸리면 이름 끝의 대문자 약어(PT · SK · OP)를 본다."""
+    head = match_head(name, ITEM_TYPE_VOCAB)
+    # 「Mods Parka_Short」는 짧은 파카지 반바지가 아니다 — 겉옷 낱말 바로 뒤에 붙은 short 는 기장이다(3벌, 2026-10-06).
+    if head in ("쇼츠", "숏팬츠") and re.search(r"(parka|jacket|coat|blouson|jumper)[ _\-]*short\b", name or "", re.I):
+        head = match_head(re.sub(r"short\b", " ", name, flags=re.I), ITEM_TYPE_VOCAB)
+    if head:
+        return head
+    m = _TAIL_ABBR_RX.search(name or "")
+    return _TAIL_ABBR[m.group(1)] if m else ""
 
 
 def material_outer(head_name: str, item: str) -> str:
