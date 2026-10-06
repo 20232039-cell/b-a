@@ -162,10 +162,18 @@ def main() -> int:
 
     polite = Polite()
     fails = defaultdict(int)
+    # 호스트를 번갈아 섞는다 — --all 은 브랜드 순이라 그대로면 조각마다 한 호스트만 일한다(embed_photos 와 같은 처리).
+    turn = defaultdict(int)
+
+    def rr(x):
+        turn[polite.host(x["img"])] += 1
+        return turn[polite.host(x["img"])]
+
+    todo.sort(key=rr)
     t0 = time.time()
     CH = 1500
-    for c0 in range(0, len(todo), CH):
-        chunk = todo[c0:c0 + CH]
+
+    def download(chunk):
         by_host = defaultdict(list)
         n = defaultdict(int)
         for x in chunk:
@@ -182,7 +190,16 @@ def main() -> int:
 
         with ThreadPoolExecutor(min(args.threads, len(by_host))) as ex:
             list(ex.map(fetch_host, by_host.items()))
-        chunk = [x for x in chunk if img_path(x["img"]).exists()]
+        return [x for x in chunk if img_path(x["img"]).exists()]
+
+    # 다음 조각을 받는 동안 이번 조각을 계산한다 — 내려받기와 GPU 시간이 더해지지 않고 겹치게.
+    chunks = [todo[c0:c0 + CH] for c0 in range(0, len(todo), CH)]
+    ahead = ThreadPoolExecutor(1)
+    nxt = ahead.submit(download, chunks[0])
+    for ci in range(len(chunks)):
+        chunk = nxt.result()
+        if ci + 1 < len(chunks):
+            nxt = ahead.submit(download, chunks[ci + 1])
         F, B, M, metas = [], [], [], []
         for i in range(0, len(chunk), batch):
             ims, keep = [], []
