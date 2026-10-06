@@ -60,7 +60,7 @@ REVIEW = re.compile(r"리뷰|평소\s*사이즈|입었어요|샀어요|했어요
 WIN = 16
 PART_RX = {
     "신축성": re.compile(r"(?:신축성|신축감|신축력|stretch)\s*(?:이|이\s*좋은|이\s*있는|있는|좋은)\s*(?:소매|밑단|밴드|허리|커프스|카라|넥|끝단|시보리|립)"),
-    "광택": re.compile(r"단추|자개|버튼|자수|지퍼|메탈|금속|하드웨어|스터드|비즈|큐빅|로고|프린트|장식|button|zipper|hardware"),
+    "광택": re.compile(r"단추|자개|버튼|자수|지퍼|메탈|금속|하드웨어|스터드|비즈|큐빅|로고|프린트|장식|안감|button|zipper|hardware|lining"),
 }
 EN_CHOICE = re.compile(r"(?<![a-z])(?:thin|mediu[mn]|thick|light|heavy|stretchy|no stretch|slight(?:ly)?|none|sheer|see-through|moderate)(?![a-z])")
 GENERIC = re.compile(r"특성상|사이즈의?\s*편차|참고로만|주관적")
@@ -94,7 +94,7 @@ def feel_of(text: str) -> dict:
             if REVIEW.search(around):
                 continue
             # 옷 전체가 아니라 한 부분 얘기 — 「신축성 있는 밑단 밴드」 「은은한 광택의 자개 단추」 「사틴 자수가 은은한 광택으로」
-            if k in PART_RX and PART_RX[k].search(text[max(0, m.start() - 20):m.end() + 14]):
+            if k in PART_RX and PART_RX[k].search(text[max(0, m.start() - 20):m.end() + (40 if k == "광택" else 14)]):
                 continue
             if GENERIC.search(around):
                 continue
