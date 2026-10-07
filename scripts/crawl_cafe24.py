@@ -2153,6 +2153,9 @@ DESC_UNISEX = re.compile(
     r"남녀\s?모두[^.·\n]{0,12}착용|남녀\s?공용\s?착용|남녀\s?공용\s?(?:상품|제품)|"
     r"유니섹스\s?(?:상품|제품|로\s?제작|디자인으로)|unisex\s?(?:item|product|design)", re.I)
 
+# 사이즈 줄 머리의 성별 — 「1 (women 1) - 허리 35 / …」·「For women(1) - 총장 60 …」. size_rows 가 실측 줄로 받은 머리만 본다.
+SIZE_GENDER_WORD = re.compile(r"(?i)\b(women|woman|men|man)\b|(여성|남성)")
+
 NAME_W_HEAD = re.compile(r"^\s*(?:\[[^\]]*\]\s*)?W\s+(?=[A-Za-z가-힣])")
 NAME_M_HEAD = re.compile(r"^\s*(?:\[[^\]]*\]\s*)?M\s+(?=[A-Za-z가-힣])")
 
@@ -2195,6 +2198,7 @@ def classify_gender(category_names: list[str], brand_default: str, name: str = "
                     item_type: str = "", top_len: float | None = None,
                     shoulder: float | None = None, category_code: str = "",
                     waist: tuple[float, float] | None = None, description: str = "",
+                    size_text: str = "", options: list | None = None,
                     why: list | None = None) -> str:
     """칸 이름 → 브랜드 기본값 순으로 성별을 정하되, 상품 이름이 말하면 그게 이긴다.
 
@@ -2231,6 +2235,17 @@ def classify_gender(category_names: list[str], brand_default: str, name: str = "
     # 칸은 매장이 상품을 어디 **진열**했나이고, 설명은 무엇을 **만들었나**이다.
     if description and DESC_UNISEX.search(description):
         return _why(why, "설명", "UNISEX")
+    # 사이즈표가 줄마다 성별을 적는 매장 — 「1 (women 1) - 허리 35 …」·「3 (men 1) - …」(label-archive).
+    # 그 상품이 어느 몸에 맞춰 나왔는지를 매장이 사이즈마다 말한 것이라 칸보다 구체적이다(사람 2026-10-07).
+    if size_text:
+        heads = [h for _, h, _ in size_rows([l.strip() for l in size_text.splitlines() if l.strip()])]
+        sg = {("W" if x.group(0).lower().startswith(("wom", "여")) else "M") for h in heads for x in SIZE_GENDER_WORD.finditer(h)}
+        if sg == {"W", "M"}:
+            return _why(why, "사이즈표", "UNISEX")
+        if sg == {"W"}:
+            return _why(why, "사이즈표", "WOMENSWEAR")
+        if sg == {"M"}:
+            return _why(why, "사이즈표", "MENSWEAR")
     cg = cate_gender(category_names)
     # 매장이 남성 칸과 여성 칸에 **둘 다** 넣어 둔 상품이 있다. 그건 매장이 「둘 다 입는
     # 옷」이라고 말한 것이지 둘 중 하나가 아니다. 지금까지는 GENDER_RULES 차례에 따라
@@ -2277,7 +2292,23 @@ def classify_gender(category_names: list[str], brand_default: str, name: str = "
         elif shoulder is not None and shoulder < SHOULDER_NARROW_CM:
             # 총장을 모를 때만 어깨를 본다 — 총장이 있는데 어깨로 덮으면 98%로 떨어진다
             return _why(why, "실측(총장 · 어깨)", "WOMENSWEAR")
+    # 「둘다」 브랜드인데 매장이 아무 말도 안 한 옷 — 사이즈가 M부터 시작하면(S · XS 없음) 남성 옷이다.
+    # 매장이 칸을 정해 둔 둘다 브랜드 옷 3,774벌에서 95%가 남성 칸이었다(2026-10-07). 대표님 표본 40벌에서
+    # 「공용」으로 들어간 옷의 절반 넘게가 남성이었고, M부터 시작하는 옷은 전부 남성으로 골랐다.
+    # 어깨 52cm 이상은 70%뿐이라(여성 오버핏 24%) 쓰지 않는다. 매장이 유니섹스라고 하면 위에서 이미 공용이다.
+    if brand_default == "UNISEX" and options and size_starts_at_m(options):
+        return _why(why, "치수(M부터)", "MENSWEAR")
     return _why(why, "브랜드 기본값", brand_default or "UNISEX")
+
+
+_SZ_SMALL = re.compile(r"(?i)(?:^|[\s|/(\[_\-])(?:x{1,3}s|2xs|s|small)(?=$|[\s|/)\]_\-])")
+_SZ_MID_UP = re.compile(r"(?i)(?:^|[\s|/(\[_\-])(?:m|l|x{1,3}l|\dxl|medium|large)(?=$|[\s|/)\]_\-])")
+
+
+def size_starts_at_m(options: list) -> bool:
+    """옵션에 M · L · XL 같은 알파벳 사이즈가 있고 S · XS 가 하나도 없나 — 「M | L | XL」·「BLACK_M | BLACK_L」."""
+    o = "|" + "|".join(str(x) for x in options) + "|"
+    return bool(_SZ_MID_UP.search(o)) and not _SZ_SMALL.search(o)
 
 
 # ─── HTTP — 호스트당 1초, 재시도 ───
@@ -3654,7 +3685,55 @@ def extract_size_text_forms(text: str) -> dict[str, list[float]]:
         if len(cols) >= 2 and names and all(len(v) == len(names) for v in cols.values()):
             cols["_names"] = names
             return cols
+    # ③ 사이즈마다 한 줄, 「이름 (덧말) - 라벨 값 / 라벨 값 …」(label-archive):
+    #      1 (women 1) - 허리  35  /  힙  46.5  /  총장  103 (women 페이지에서 구매 가능)
+    #      3 (men 1) - 허리  40  /  힙 50  /  총장  108
+    #    ①②에 안 걸려 글자열 파서가 첫 줄만 읽었다(2026-10-07 사람 지적 — label-archive 608벌이 사이즈 하나뿐).
+    #    줄마다 라벨 차례가 같고 두 줄 이상일 때만 받는다.
+    #    같은 매장 안에서도 꼴이 섞여 있다 — 「For women(1) - 총장 60 가슴단면 52」(슬래시 없음) ·
+    #    「3 size - 어깨단면 49.5 / 가슴단면 63」 · 「1 - (women 1) - 허리 34.5 힙 45」.
+    rows3 = size_rows(lines)
+    if len(rows3) >= 2 and len({tuple(k for k, _ in kv) for _, _, kv in rows3}) == 1:
+        cols = {}
+        for _, _, kv in rows3:
+            for k, v in kv:
+                cols.setdefault(k, []).append(v)
+        cols["_names"] = [nm for nm, _, _ in rows3]
+        return cols
     return {}
+
+
+_ROW_HEAD = re.compile(r"^(?P<head>.{1,28}?)\s+[-–:：]\s+(?P<body>.+)$")
+_ROW_PAIR = re.compile(rf"([가-힣A-Za-z]{{1,8}})\s*({_TF_NUM})\s*(?:cm)?")
+_ROW_SIZE = re.compile(r"(?i)\b(?:x{0,3}[sml]|xxl|\d?xl|free|one\s*size|f|\d{1,3})\b")
+
+
+def size_rows(lines: list[str]) -> list[tuple[str, str, list[tuple[str, float]]]]:
+    """「사이즈 머리 - 라벨 값 라벨 값 …」 줄들 → [(사이즈 이름, 머리 원문, [(라벨, 값) …])].
+
+    머리는 짧고(28자 이하) 사이즈 낱말(1 · M · XL · one size …)을 품어야 한다. 몸통은 라벨 · 숫자 짝이
+    둘 이상이고, 짝을 걷어 낸 나머지가 구분자 · 괄호 덧말뿐이어야 한다 — 모델 정보 「men - height 185cm
+    bust 33」은 bust · waist 가 실측 라벨이 아니라서 걸러진다.
+    """
+    out = []
+    for l in lines:
+        m = _ROW_HEAD.match(l)
+        if not m:
+            continue
+        head, body = m.group("head").strip(), m.group("body")
+        if not _ROW_SIZE.search(head):
+            continue
+        body = re.sub(r"\([^)]*\)", " ", body)
+        pairs = [(re.sub(r"[().\s]", "", a).lower(), float(b)) for a, b in _ROW_PAIR.findall(body)]
+        rest = _ROW_PAIR.sub(" ", body)
+        if len(pairs) < 2 or re.search(r"[가-힣A-Za-z0-9]", rest):
+            continue
+        if not all(_known_label(k) and 3 <= v <= 200 for k, v in pairs):
+            continue
+        hd = re.sub(r"\([^)]*\)", " ", re.sub(r"(?i)\b(?:for|women|woman|men|man|size)\b|[-–]", " ", head))
+        nm = re.sub(r"\s+", " ", hd).strip() or head
+        out.append((nm[:12], head, pairs))
+    return out
 
 
 def extract_size_any(html_text: str) -> dict[str, list[float]]:
@@ -5156,7 +5235,9 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
                       None if len_bad else top_length(d.get("size_table")),
                       shoulder_width(d.get("size_table")), code,
                       waist_span(d.get("size_table")),
-                      d.get("description") or "")
+                      d.get("description") or "",
+                      d.get("detail_text") or "",
+                      d.get("options_all") or d.get("options") or [])
             cats = d.get("category_names", [])
             # 치수 조합 규칙(size_set_gender)이 쓸 두 가지: 이 옷이 브랜드 값을 그대로 받았나(「?」가 그대로
             # 나오면 어느 층도 말하지 않은 것), 그리고 매장 칸이 정답지로 쓸 만한가(이름·설명이 말이 없을 때만).
