@@ -2890,7 +2890,7 @@ def _fix_url(u: str, base: str) -> str:
 # 맞춰지므로 소매 길이가 총장 자리에 앉았다(전수 4,700여 벌 · 제너럴아이디어 무드인사이드 포에토 …,
 # 코덱스 검증 008 이 제너럴아이디어에서 짚었다 2026-09-28). 「소매통」은 일부러 안 넣는다 — 둘레로 적는 매장
 # (오스트카카 「사이즈는 둘레 기준」 소매통 61)을 가려 낼 길이 없어, 넣으면 틀린 값이 들어온다.
-SIZE_LABELS = (r"(총\s*장|총\s*길이|총\s*기장|(?<![매팔])(?<!매\s)(?<!팔\s)기장|어깨\s*너비|어깨\s*단면|어깨|가슴\s*단면|가슴|소매\s*길이|소매\s*기장|소매|화장|암홀|허리\s*단면|허리|밑위|팔\s*기장|팔\s*통|"
+SIZE_LABELS = (r"(총\s*장|총\s*길이|총\s*기장|(?<![매팔])(?<!매\s)(?<!팔\s)기장|어깨\s*너비|어깨\s*단면|어깨|가슴\s*단면|상동\s*단면|가슴|소매\s*길이|소매\s*기장|소매|화장|암홀|허리\s*단면|허리|밑위|팔\s*기장|팔\s*통|"
                r"허벅지\s*단면|허벅지|밑단\s*단면|밑단|엉덩이\s*단면|엉덩이|힙|sleeve\s*length|total\s*length|shoulder\s*width|chest\s*width|"
                r"leg\s*opening|out\s*seam|bottom\s*hem|bottom\s*width|hem\s*width|"
                r"front\s*rise|back\s*rise|팔\s*길이|"
@@ -3716,7 +3716,13 @@ def size_rows(lines: list[str]) -> list[tuple[str, str, list[tuple[str, float]]]
     bust 33」은 bust · waist 가 실측 라벨이 아니라서 걸러진다.
     """
     out = []
+    seen: set[str] = set()
     for l in lines:
+        # 설명글과 상세글에 같은 표가 두 번 들어 있다 — 같은 줄은 한 번만 읽는다(1~5 가 두 번 이어져 표가 버려졌다).
+        key = re.sub(r"\s+", " ", l).strip()
+        if key in seen:
+            continue
+        seen.add(key)
         m = _ROW_HEAD.match(l)
         if not m:
             continue
