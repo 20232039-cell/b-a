@@ -66,6 +66,7 @@ AXW = {"silhouette": .15, "material": .06, "design_element": .10, "construction"
        "finish_wash": .02, "color": .15, "neckline": .10, "sleeve_length": .06, "pants_type": .04, "hardware": .015, "function": .005}
 AXES = [a for a in AXW if a != "color"]
 KEEP, PER_BRAND, TOP_T, TOP_BRANDS, PER_NEIGHBOR = 40, 3, 150, 20, 5
+RERANK_N = 12          # 앞 12벌은 사진 닮음만으로 다시 줄 세운다(대표님 8차 57 → 73%, 2026-10-07)
 # 기준별 목록(앱 「비슷한 옷」 글자 줄 — 색·무늬 · 모양 · 소재, 대표님 결정 2026-10-06). 같은 큰 품목 안에서 그 기준 위주로 다시 찾는다.
 # 「전체 40벌 안 재정렬」로는 그 기준으로만 아주 비슷한 옷이 이미 빠져 있을 수 있어서 따로 뽑는다(코덱스 검토).
 #   cp 색·무늬 = .5·[무지끼리 · 또는 무늬(패턴 · 프린트)가 하나라도 같음] + .3·색(같음 1 · 계열 .6) + .1·워싱 · 가공 + .1·닮음
@@ -405,13 +406,22 @@ def main() -> int:
                     continue
                 Sv = (.95 - BRAND_W) * row[cand] + BRAND_W * Bi[bidx[cand]] + PRICE_W * np.exp(-np.abs(np.log(pr[cand] / pr[i])))
                 order = cand[np.argsort(-Sv)]; Sv = np.sort(Sv)[::-1]
-                keep = []; per: collections.Counter = collections.Counter(); seenf = set()
+                keep = []; per: collections.Counter = collections.Counter(); seenf = set(); kj = []
                 for j, sv in zip(order, Sv):
                     if per[bidx[j]] >= PER_BRAND or fk[j] in seenf:
                         continue
-                    keep += [int(idx[j]), int(round(float(sv) * 1000))]; per[bidx[j]] += 1; seenf.add(fk[j])
+                    keep += [int(idx[j]), int(round(float(sv) * 1000))]; per[bidx[j]] += 1; seenf.add(fk[j]); kj.append(j)
                     if len(keep) == KEEP * 2:
                         break
+                # 앞 RERANK_N 벌은 사진 닮음(옷만 자른 FashionSigLIP 코사인)만으로 다시 줄 세운다. 후보를 고르는 데는 태그 ·
+                # 브랜드 · 가격이 돕지만, 고른 뒤 순서는 그것들이 흐트러뜨렸다 — 대표님 블라인드 8차(처음 보는 25문제,
+                # 후보 = 이 판 상위 10)에서 지금 순서 57.3% → 사진만 72.6%, 3 · 4 · 5차 140문제에서는 73.0% → 73.6%.
+                # 점수는 그대로 두므로 목록이 점수 내림차순이 아닐 수 있다 — 앱은 목록 순서대로 보여 준다(점수로 다시 정렬 금지).
+                if RERANK_N and vobs[i] and len(kj) > 1:
+                    head = list(range(min(RERANK_N, len(kj))))
+                    cs = {p: (float(Ev[kj[p]] @ Ev[i]) if vobs[kj[p]] else -9.0) for p in head}
+                    new = sorted(head, key=lambda p: -cs[p]) + list(range(len(head), len(kj)))
+                    keep = [x for p in new for x in keep[2 * p:2 * p + 2]]
                 # ── 기준별 목록 ──
                 base_row = np.clip(row, 0, 1)
                 colsim = np.where(col == col[i], 1.0, np.where(fam == fam[i], 0.6, 0.0)) * (cobs & cobs[i])
@@ -453,7 +463,7 @@ def main() -> int:
     pid = lambda r: f'{r["brand_slug"]}-{r["product_no"]}'
     index = [pid(r) for r in rows]
     out = {pid(rows[i]): v for i, v in ((ix, out[rows[ix]["source_url"]]) for ix in range(N) if rows[ix]["source_url"] in out)}
-    config = {"photo": PHOTO_W, "fine_type_bonus": FINE_BONUS, "conflict_penalty": PEN_W, "look_material_penalty": LOOK_PEN_W, "look_material": LOOK_MAT, "brand": BRAND_W, "price": PRICE_W, "shrink": SHRINK, "axes": AXW,
+    config = {"photo": PHOTO_W, "rerank_photo_top": RERANK_N, "fine_type_bonus": FINE_BONUS, "conflict_penalty": PEN_W, "look_material_penalty": LOOK_PEN_W, "look_material": LOOK_MAT, "brand": BRAND_W, "price": PRICE_W, "shrink": SHRINK, "axes": AXW,
               "pool": "big_category", "keep": KEEP, "photo_emb": EMB_NAME}
     h = hashlib.sha1()   # 설정 · 색 계열표 · 입력 파일 내용 · 임베딩 조각까지 — 같은 주소라도 태그 · 가격이 바뀌면 version 이 바뀐다(코덱스 2026-10-05)
     h.update(json.dumps(config, sort_keys=True).encode())
