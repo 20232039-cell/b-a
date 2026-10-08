@@ -22,6 +22,21 @@ from datetime import date
 GARMENT = {"Outerwear", "Tops", "Shirts", "Knitwear", "Pants", "Denim", "Skirts", "Dresses"}
 LABELS = ("총장", "어깨", "가슴", "소매길이", "화장", "소매통", "밑단", "허리", "엉덩이", "허벅지", "밑위")
 MIN_N, MIN_FIT_N = 30, 15
+# 바지 종류 무리(앱 세션 · 사람 결정 2026-10-09): 반바지를 숏팬츠로 옮겨도 크기는 데님끼리 · 슬랙스끼리 견준다.
+# 「세부품목·종류」 열쇠를 세부품목 줄 옆에 더 싣는다. 종류는 pants_type 에서 이 차례로 처음 맞는 것(밴딩은 종류가 아니다).
+# 세부품목 이름이 이미 종류를 말하면(데님·진 · 슬랙스·슬랙스 · 카고팬츠·카고 …) 만들지 않는다. 핏별 중앙값은 이 무리엔 없다.
+PANTS_KINDS = ("진", "슬랙스", "스웨트", "치노", "카고", "조거", "트랙", "워크", "카펜터", "퍼티그", "파라슈트", "벌룬", "레깅스", "파자마")
+
+
+def pants_kind(subtype: str, pt: set) -> str | None:
+    for k in PANTS_KINDS:
+        if k in pt:
+            said = ("데님", "진") if k == "진" else (k,)
+            # 「파티그팬츠」는 퍼티그와 같은 말이다(표기만 다름)
+            if k == "퍼티그":
+                said = ("퍼티그", "파티그")
+            return None if any(w in (subtype or "") for w in said) else k
+    return None
 
 
 def _gender(g: str) -> str:
@@ -60,6 +75,7 @@ def build(rows: list[dict], tags: dict, sizes: dict) -> dict:
         band = "밴딩" in cons
         drop = bool(cons & {"드롭숄더", "래글런"})
         sil = _tags(t, "silhouette")
+        kind = pants_kind(r["subtype"], _tags(t, "pants_type")) if r.get("category") in ("Pants", "Denim") else None
         # 색만 다른 형제 — 이름 앞머리(색 표기 앞) · 값이 같으면 한 벌
         stem = re.split(r"[\(\[_/-]|\s-\s", r.get("name") or "")[0].strip().lower()
         sig = (r["brand_slug"], stem, tuple(sorted((k, tuple(v)) for k, v in sz.items() if isinstance(v, list))))
@@ -82,6 +98,8 @@ def build(rows: list[dict], tags: dict, sizes: dict) -> dict:
                     continue
                 base = f'{r["subtype"]}|{g}|{k}|{lab}'
                 samp[base].append(float(v))
+                if kind:
+                    samp[f'{r["subtype"]}·{kind}|{g}|{k}|{lab}'].append(float(v))
                 for s in sil:
                     fit[f"{base}|{s}"].append(float(v))
     out_rows: dict[str, dict] = {}
@@ -103,7 +121,8 @@ def build(rows: list[dict], tags: dict, sizes: dict) -> dict:
         "v": 1,
         "built": date.today().isoformat(),
         "unit": "단면 cm(가슴 · 허리 · 엉덩이 · 허벅지 · 밑단은 반 둘레). 둘레로 적힌 표는 게시 전에 반으로 맞췄다",
-        "key": "세부품목|성별갈래(MU=남성·유니섹스, W=여성)|사이즈(size_keys)|칸 — 핏별 중앙값은 끝에 |silhouette",
+        "key": "세부품목|성별갈래(MU=남성·유니섹스, W=여성)|사이즈(size_keys)|칸 — 핏별 중앙값은 끝에 |silhouette. "
+               "하의는 「세부품목·바지종류」 열쇠도 있다(pants_kind — 숏팬츠·진, 팬츠·카고)",
         "excluded": dict(dropped),
         "norm": {
             "설명": "옵션 · 표 이름 → 견줄 말. size_from_ocr.size_aliases 와 같은 규칙. 앞에서부터 처음 맞는 것",
