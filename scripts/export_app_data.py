@@ -270,6 +270,38 @@ def size_entry(e: dict | None, known_t: set[str] | None = None, row: dict | None
     return out
 
 
+# 앱 「이 옷 읽기」는 부위가 빈칸 · 「겉감」 · 「겉감 1」인 묶음만 겉감으로 읽는다(layer-web docs/garment-reading.md §5).
+# 그 규칙에 걸려 겉감이 아닌 것이 겉감으로 읽히거나, 겉감이 둘로 읽히는 꼴을 여기서 정리한다(2026-10-09 판매중 의류 전수):
+#   · 빈칸 묶음이 겉감 묶음과 값까지 같다(asp 「"" = 겉감」 중복) → 빈칸 묶음을 뺀다(안감과 같은 값은 흔하니 그대로)
+#   · 빈칸 묶음이 「겉감 2 · 3」과 함께 있고 「겉감 · 겉감 1」은 없다(eastlogue · grove 171벌) → 빈칸이 「겉감 1」이다
+#   · 빈칸 묶음이 「겉감 · 겉감 1」과 함께 있다(andersson-bell 퍼 봄버) → 어느 쪽이 몸판인지 모른다 — 빈칸을 「부분」으로
+#   · 빈칸 묶음이 충전 섬유뿐이다(diafvine 「다운 80 · 깃털 20」) → 「충전재」
+_FILL_FIBERS = {"다운", "덕다운", "구스다운", "깃털", "페더", "웰론", "솜", "오리털", "거위털", "신슐레이트", "프리마로프트"}
+
+
+def tidy_mat_parts(mat: list) -> list:
+    if not isinstance(mat, list) or not mat:
+        return mat
+    groups = [dict(g) for g in mat if isinstance(g, dict)]
+    names = [(g.get("p") or "") for g in groups]
+    out = []
+    for g, p in zip(groups, names):
+        if p == "":
+            # 겉감 쪽 묶음과 같을 때만 중복이다 — 겉감 · 안감이 둘 다 「폴리에스터 100」인 옷은 흔하다(209벌)
+            same = [q for q, pn in zip(groups, names) if pn.startswith("겉감") and q.get("v") == g.get("v")]
+            if same:
+                continue
+            fibers = {str(f) for f, *_ in (g.get("v") or []) if f}
+            if fibers and fibers <= _FILL_FIBERS:
+                g["p"] = "충전재"
+            elif any(pn in ("겉감", "겉감 1") for pn in names):
+                g["p"] = "부분"
+            elif any(pn.startswith("겉감 ") for pn in names):
+                g["p"] = "겉감 1"
+        out.append(g)
+    return out
+
+
 def full(r: dict, tags: dict, sizes: dict, crawl: dict,
          upref: dict | None = None) -> dict:
     """상세 한 벌 — 얇은 목록에 없는 것 전부."""
@@ -297,7 +329,7 @@ def full(r: dict, tags: dict, sizes: dict, crawl: dict,
     else:
         mat = product_desc.blend(d.get("description") or "")
     if mat:
-        out["mat"] = mat
+        out["mat"] = tidy_mat_parts(mat)
     out.update({
         "tags": fold_finish((tags.get(r["source_url"]) or {}).get("tags") or {}),
         "size": size_entry(sizes.get(r["source_url"]), KNOWN_T, r),
@@ -487,6 +519,12 @@ def main() -> int:
               for items in shard.values() for t in items]
     sn = write(out / "search.json", search, args.dry)
     files["search.json"] = {"n": len(search), "bytes": sn}
+    # 「이 옷 읽기」 범위표(size_ranges.py 주석 · layer-web docs/garment-reading.md §9)
+    import size_ranges
+    sr = size_ranges.build(rows, tags, sizes)
+    srn = write(out / "size-ranges.json", sr, args.dry)
+    files["size-ranges.json"] = {"n": len(sr["rows"]), "bytes": srn}
+    print(f"범위표 {len(sr['rows']):,}칸 · 뺀 표본 {sr['excluded']}")
     print(f"검색 조각 {len(search):,}줄 · 평문 {sn/1048576:.2f} MB (이름만)")
 
     print(f"목록 {len(rows):,}벌 · 갈래 {len(shard)}개 · 평문 {idx_gz/1048576:.1f} MB "
