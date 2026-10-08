@@ -2903,7 +2903,7 @@ SIZE_LABELS = (r"(총\s*장|총\s*길이|총\s*기장|(?<![매팔])(?<!매\s)(?<
                r"허벅지\s*단면|허벅지|밑단\s*단면|밑단|엉덩이\s*단면|엉덩이|힙|sleeve\s*length|total\s*length|shoulder\s*width|chest\s*width|"
                r"leg\s*opening|out\s*seam|bottom\s*hem|bottom\s*width|hem\s*width|"
                r"front\s*rise|back\s*rise|팔\s*길이|"
-               r"length|shoulder|chest|sleeve|waist|hip|thigh|hem|rise|inseam)")
+               r"length|shoulder|chest|bust|sleeve|waist|hip|thigh|hem|rise|inseam)")   # bust — kindersalmon 「Bust : 52 cm」(2026-10-08)
 # 「Length - 61cm Shoulder - 55cm」(anotheryouth)처럼 붙임표로 잇는 표기도 읽는다
 SIZE_RX = re.compile(SIZE_LABELS + r"\s*(?:\([^)]{0,20}\))?\s*[:：\-–—]?\s*((?:\d{1,4}(?:\.\d)?\s*(?:cm|mm)?\s*[/,|]?\s*){1,8})", re.I)
 
@@ -3080,6 +3080,16 @@ def extract_size_table(html_text: str) -> dict[str, list[float]]:
         label = re.sub(r"\s+", "", m.group(1)).lower()
         nums = [float(x) for x in re.findall(r"\d{1,4}(?:\.\d)?" if mm else r"\d{1,3}(?:\.\d)?", m.group(2))]
         nums = [n / 10 if mm else n for n in nums if lo <= n <= hi]
+        # 인치 표시가 붙은 값은 모델 치수다 — kindersalmon 「Model Height 177 cm / Bust 31 " - Waist 22.5 " - Hip 34.5 "」가
+        # 허리 22.5 · 엉덩이 34.5 실측으로 들어갔다(2026-10-08). 실측표는 cm 라 이 표시가 없다.
+        if re.match(r"\s*(?:[\"”″]|inch|in\b)", t[m.end():m.end() + 8], re.I) or re.search(r"[\"”″]\s*$", m.group(2)):
+            continue
+        # 「Bust」는 모델 몸 치수에도 쓴다(sinoon 「167 Bust 76 Waist 58」 · antome 「Bust 79」). 몸 가슴둘레는 75 넘고
+        # 옷 가슴 단면은 70 안쪽이라, 70 넘는 값이 있으면 이 라벨을 받지 않는다(2026-10-08 전수 대조 4,064벌).
+        # 36 아래(arend 「Bust 30.3 Waist 23.4」 — 인치 표시 없는 모델 치수)거나 표에 가슴 칸이 이미 있어도 받지 않는다.
+        if label == "bust" and (any(n > 70 or n < 36 for n in nums)
+                                or any(k in rows for k in ("가슴", "가슴단면", "chest", "chestwidth", "상동", "상동단면"))):
+            continue
         # 「… 소매 60 3 SIZE(cm) 총장 66 …」 — 다음 묶음의 이름(3)이 앞 라벨의 값으로 딸려 온다.
         # 그 한 칸 때문에 되풀이 묶음 파서가 「칸이 하나가 아니다」라며 표 접기를 포기해,
         # 매장이 두세 사이즈를 파는데 앞 사이즈만 남았다(fabrega 122 · divein 16, 2026-09-12).

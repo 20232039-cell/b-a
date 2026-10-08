@@ -4687,6 +4687,68 @@ def _sg_better(new: dict, old: dict) -> bool:
     return len(new) > len(old) and rn >= ro
 
 
+# 옷 갈래에 없는 칸 — 상의에 허리 · 엉덩이가 붙으면 거의 모델 몸 치수다(nick-nicole 민소매 「허리 29 · 엉덩이 43.5」,
+# mooneed 가디건 「허리 30」 — 2026-10-08 fill_gaps 첫 판에서 1,000벌 가까이 붙었다). 하의에 가슴 · 어깨도 같다.
+_GAP_BLOCK = {
+    "tops": {"허리", "엉덩이", "허벅지", "밑위", "뒤밑위"},
+    "outer": {"허리", "엉덩이", "허벅지", "밑위", "뒤밑위"},
+    "bottoms": {"가슴", "어깨", "소매길이", "화장", "소매통", "소매단", "암홀"},
+    "skirt": {"가슴", "어깨", "소매길이", "화장", "소매통", "소매단", "암홀", "허벅지", "밑위", "뒤밑위"},
+    "dress": {"허벅지", "밑위", "뒤밑위"},
+}
+
+
+def fill_gaps(sizes: dict, cands: list, cat: str | None = None) -> dict:
+    """빠진 칸만 다른 표에서 붙인다(부르는 자리 주석). 줄 수가 같고, 겹치는 칸이 둘 이상이며, 그 칸들의 값이
+    사이즈마다 1cm 안에서 같을 때만. 이미 있는 칸은 건드리지 않는다. 옷 갈래에 없는 칸(_GAP_BLOCK)은 붙이지 않는다."""
+    block = _GAP_BLOCK.get(cat or "", set())
+    rows = _rows_of(sizes)
+    out = dict(sizes)
+    for c in cands:
+        if not c or _rows_of(c) != rows:
+            continue
+        shared = [x for x in sizes if x in c and isinstance(sizes[x], list) and isinstance(c[x], list)]
+        if len(shared) < 2:
+            continue
+        ok = True
+        for x in shared:
+            if len(sizes[x]) != len(c[x]):
+                ok = False
+                break
+            for a, b in zip(sizes[x], c[x]):
+                if a is None or b is None:
+                    continue
+                if not isinstance(a, (int, float)) or not isinstance(b, (int, float)) or abs(a - b) > 1:
+                    ok = False
+                    break
+            if not ok:
+                break
+        if not ok:
+            continue
+        for x, v in c.items():
+            if x not in out and x not in block and not str(x).startswith("_") and isinstance(v, list) and len(v) == rows \
+                    and any(isinstance(y, (int, float)) for y in v):
+                out[x] = v
+    return out
+
+
+def _sg_adds(new: dict, old: dict, same_ok: bool = False) -> bool:
+    """넉넉한 표(old)를 창의 표(new)로 갈아 끼울 만한가 — 지금 칸을 다 갖고 칸이 늘며, 사이즈 줄 수가 같고
+    같은 칸의 값이 사이즈마다 1cm 안에서 맞을 때만(다른 표로 바꾸지 않는다)."""
+    if not new or not old or not (set(old) <= set(new) if same_ok else set(old) < set(new)) or _rows_of(new) != _rows_of(old):
+        return False
+    for c, v in old.items():
+        w = new.get(c)
+        if not isinstance(v, list) or not isinstance(w, list) or len(v) != len(w):
+            return False
+        for a, b in zip(v, w):
+            if a is None and b is None:
+                continue
+            if not isinstance(a, (int, float)) or not isinstance(b, (int, float)) or abs(a - b) > 1:
+                return False
+    return True
+
+
 def load_manual() -> dict[str, dict]:
     """data/manual_sizes.csv — 사람이 매장 그림을 보고 옮겨 적은 실측.
 
@@ -5234,6 +5296,157 @@ def _opt_keys(o: str) -> set[str]:
     if m:
         keys.add(m.group(1).upper())
     return keys
+
+
+_SK_FREE = re.compile(r"^(?:FREE|F|OS|O\.S\.?|ONE|ONESIZE|ONE-SIZE|FREESIZE|프리|원사이즈|단일)$")
+_SK_WORD = re.compile(r"SIZE|사이즈|=")
+
+
+def size_aliases(name) -> list[str]:
+    """사이즈 이름 하나가 가리킬 수 있는 말을 앞선 차례로 — 글자 사이즈 · 하나 사이즈(FREE) · 숫자.
+    「1(XS)」→ [XS, 1] · 「55(1)」→ [1, 55] · 「34size(free)」→ [34, FREE] · 「1 size small」→ [S, 1]."""
+    if name is None:
+        return []
+    o = _OPT_STOCK.sub("", _OPT_SOLDOUT.sub("", str(name))).strip().upper()
+    o = re.sub(r"\s+", "", o)
+    if not o:
+        return []
+    parts = [p for p in re.split(r"[/_\-]", o) if p]
+    out: list[str] = []
+    for c in [o] + ([parts[-1], parts[0]] if len(parts) > 1 else []):
+        c = _SK_WORD.sub("", c)
+        inner = [t.strip(".") for t in re.findall(r"[(（\[]([^)）\]]*)[)）\]]", c)]
+        outer = re.sub(r"[(（\[][^)）\]]*[)）\]]", "", c).strip(".")
+        letters, frees, nums = [], [], []
+        for t in [outer] + inner:
+            t2 = _SPELLED.get(t, t)
+            z = _ZERO_ALPHA.match(t2)
+            if z:
+                t2 = z.group(1)
+            m = re.match(r"^(\d{1,2})(XXS|XS|SMALL|MEDIUM|LARGE|XLARGE|XL|S|M|L)$", t2)
+            if m:
+                nums.append(str(int(m.group(1))))
+                t2 = _SPELLED.get(m.group(2), m.group(2))
+            if t2 in _SIZE_RANK:
+                letters.append("XXL" if t2 == "2XL" else t2)
+            elif _SK_FREE.match(t2):
+                frees.append("FREE")
+            elif re.fullmatch(r"\d{1,3}", t2):
+                nums.append(str(int(t2)))
+        # 숫자 둘(「55(1)」 · 「1 (55)」) — 매장 번호(한 자리)를 앞에
+        nums.sort(key=lambda x: (len(x) > 1,))
+        for t in letters + (frees if not nums or outer in ("FREE", "F", "OS", "ONESIZE") else []) + nums + frees:
+            if t not in out:
+                out.append(t)
+        if out:
+            return out
+    return out
+
+
+def size_key(name) -> str | None:
+    """사이즈 이름 하나를 견줄 수 있는 말로(size_aliases 의 첫째) — 「06」 · 「OS」 · 「SMALL」 · 「S SIZE」 · 「00S」.
+
+    앱이 「M 기준으로 견주기」를 하려면 표의 칸 이름과 구매 옵션이 같은 말이어야 한다(앱 세션 2026-10-08 —
+    「06 과 OS 처럼 이름이 다르면 비교가 틀어진다」)."""
+    a = size_aliases(name)
+    return a[0] if a else None
+
+
+def add_size_keys(out: dict, rows_by_url: dict, full_opts: dict) -> Counter:
+    """표의 칸마다 견줄 말(size_keys)을 붙이고, 구매 옵션과 맞춰 본다(size_match).
+
+    size_match: 「같음」 — 칸 말이 모두 옵션에 있음 · 「차례로」 — 말은 다르지만 칸 수가 옵션 수와 같아 차례대로
+    맞춘 것(kirsh 「1 · 2」 ↔ 옵션 「000 · 001」, aeae 「1」 ↔ 「OS」) · 「모름」 — 맞출 근거가 없음.
+    「차례로」는 size_keys 를 옵션 쪽 말로 바꿔 싣는다 — 앱이 고른 옵션으로 칸을 찾게."""
+    n: Counter = Counter()
+    for u, e in out.items():
+        if e.get("axis") == "head":
+            continue
+        sizes = e.get("sizes") or {}
+        cols = max((len(v) for v in sizes.values() if isinstance(v, list)), default=0)
+        if not cols:
+            continue
+        names = e.get("size_names") or []
+        r = rows_by_url.get(u) or {}
+        opts = full_opts.get(u) or [o.strip() for o in (r.get("options") or "").split("|") if o.strip()]
+        raw = lambda x: re.sub(r"\s+", "", _OPT_STOCK.sub("", _OPT_SOLDOUT.sub("", str(x)))).upper()
+        # 못 알아보는 이름(ader-error 「A1」)은 글자 그대로를 말로 쓴다 — 옵션과 글자가 같으면 맞는다
+        oal = [(size_key(o) or raw(o), set(size_aliases(o)) | {raw(o)}) for o in opts]
+        okeys = list(dict.fromkeys(k for k, _ in oal if k))
+        keys = [size_key(x) or raw(x) for x in names] if len(names) == cols else [None] * cols
+        # 칸마다 말이 겹치는 옵션을 찾는다(「1(XS)」 칸 ↔ 「XS」 옵션 · 「55(1)」 ↔ 「1 (55)」). 하나로 정해지면 옵션 쪽 말로.
+        matched = []
+        if len(names) == cols:
+            for x in names:
+                al = set(size_aliases(x)) | {raw(x)}
+                hit = list(dict.fromkeys(k for k, a in oal if al & a))
+                matched.append(hit[0] if len(hit) == 1 else None)
+        ranks = [_opt_rank(k) for k in okeys]
+        ordered = len(okeys) == cols and (cols == 1 or (None not in ranks and ranks == sorted(ranks)))
+        named_sizes = [k for k in okeys if size_key(k)]
+        if matched and all(matched) and len(set(matched)) == len(matched):
+            e["size_keys"], e["size_match"] = matched, "같음"
+        elif keys and all(keys) and all(size_key(k) for k in keys) and named_sizes and set(named_sizes) <= set(keys):
+            # 표가 옵션보다 칸이 많다 — 다 팔린 사이즈 칸이 표에 남은 것(frizmworks 「M · L · XL」 ↔ 옵션 「M · L」)
+            e["size_keys"], e["size_match"] = keys, "같음"
+        elif cols == 1 and not named_sizes:
+            # 한 칸 표인데 옵션에 사이즈 말이 없다(색만 · 옵션 없음) — 하나 사이즈다
+            e["size_keys"], e["size_match"] = ["FREE"], "같음"
+        elif ordered and all(m is None or m == okeys[i] for i, m in enumerate(matched or [None] * cols)):
+            # 말이 안 겹치거나 일부만 읽혔는데(coor 「S · 5cm · 69cm」) 칸 수가 옵션 수와 같고 옵션이 차례로 서 있으며
+            # 겹친 칸은 제자리다 — 차례대로 맞춘다. kirsh 처럼 겹친 칸이 자리가 어긋나면 안 맞춘다.
+            e["size_keys"], e["size_match"] = okeys, "차례로"
+        elif not okeys:
+            e["size_keys"], e["size_match"] = keys, ("같음" if all(keys) else "모름")
+        else:
+            e["size_keys"], e["size_match"] = [m or k for m, k in zip(matched, keys)] if matched else keys, "모름"
+        n[e["size_match"]] += 1
+    return n
+
+
+# 단면 · 둘레 섞임 막이 — 같은 표 안에서 한 칸만 둘레로 적힌 것을 단면으로 맞춘다(앱 세션 2026-10-08: 「단면과 둘레가
+# 섞이면 '조금 좁아요'가 통째로 틀린다. 빈칸보다 틀린 값이 더 위험하다」). 판 전 전수(84,662벌) 566벌:
+#   가슴 ≥85, 또는 ≥70 이면서 어깨의 1.7배 넘음(kirsh 8814 「어깨 37 · 가슴 84」) → 반
+#   허리 ≥58(nothing-written 스커트 「허리 60」), 또는 엉덩이보다 2cm 넘게 큼 → 반
+#   엉덩이 ≥75, 또는 66 넘으면서 허리의 2.2배 넘음(anglan 「허리 28 · 엉덩이 75」) → 반
+#   허리 규칙은 가슴이 있고 허리가 가슴의 1.15배 안이면 안 건다(오버핏 상의 · 원피스의 허리 단면)
+# 반으로 나눠도 범위 밖이면(둘레가 아니라 엉뚱한 값) 그 칸을 뺀다 — 틀린 값을 남기지 않는다.
+def unit_guard(out: dict) -> Counter:
+    n: Counter = Counter()
+
+    def lo(v):
+        v = [x for x in (v or []) if isinstance(x, (int, float))]
+        return min(v) if v else None
+
+    def half(e, s, c):
+        v = [round(x / 2 * 2) / 2 if isinstance(x, (int, float)) else x for x in s[c]]
+        rlo, rhi = RANGES.get(c, (0, 999))
+        if all(rlo <= x <= rhi for x in v if isinstance(x, (int, float))):
+            s[c] = v
+            n["반:" + c] += 1
+        else:
+            s.pop(c)
+            n["뺌:" + c] += 1
+
+    for u, e in out.items():
+        if e.get("axis") == "head" or not e.get("sizes"):
+            continue
+        s = dict(e["sizes"])
+        before = dict(s)
+        c, sh, w, h, th = (lo(s.get(k)) for k in ("가슴", "어깨", "허리", "엉덩이", "허벅지"))
+        if c is not None and (c >= 85 or (sh and c >= 70 and c >= 1.7 * sh)):
+            half(e, s, "가슴")
+        # 상의 허리는 가슴과 같은 단면이라 크다(generalidea 오버핏 「가슴 63.5 · 허리 60」) — 가슴의 1.15배 안이면 단면이다
+        if w is not None and (w >= 58 or (h and h < 75 and w > h + 2)) and not (c and w <= c * 1.15):
+            half(e, s, "허리")
+        w2 = lo(s.get("허리"))
+        if h is not None and (h >= 75 or (w2 and h >= 66 and h >= 2.2 * w2)):
+            half(e, s, "엉덩이")
+        # 허벅지 > 엉덩이는 대개 엉덩이 쪽이 틀린 값이다(mardi-mercredi 「엉덩이 34 · 허벅지 44」) — 허벅지는 건드리지 않는다
+        if s != before:
+            e["sizes"] = s     # 새 사전 — 형제에게 물려준 표가 같은 사전을 쓴다(trim_unsold_sizes 주석)
+            n["표"] += 1
+    return n
 
 
 def trim_unsold_sizes(out: dict, rows_by_url: dict, full_opts: dict) -> Counter:
@@ -6098,6 +6311,7 @@ def main():
         print("매장 공용 표로 판단해 버림:", sorted({b for b, _ in shared}))
     out: dict[str, dict] = {}
     src = Counter()
+    gap_fill: Counter = Counter()   # fill_gaps 로 빠진 칸을 채운 상품(매장별)
     per_brand_html, per_brand_ocr, per_brand_tot = Counter(), Counter(), Counter()
     head_todo: dict[str, tuple[str, str, str]] = {}
     full_opts: dict[str, list[str]] = {}       # 그 상품이 가진 옵션 값 전부(trim_unsold_sizes 주석)
@@ -6124,6 +6338,8 @@ def main():
                 st = _cc2.collapse_repeated_columns(dict(st))
             sizes, names, source = {}, None, None
             sg_rng: dict = {}   # 사이즈가이드 창의 밴딩 허리 범위(prep_grid_lines)
+            keep_rng: dict = {}  # 표는 그대로 두고 창의 밴딩 허리 범위만 붙일 때(mmlg — 아래 ③ 갈래)
+            sg_cand: dict = {}   # 창 표 — 갈아 끼우지 않았어도 빠진 칸 채우기(fill_gaps)에 쓴다
             # 늘어나는 허리 같은 폭 값(「_ranges」 — doucan 해석기) · 앱이 [작은값, 큰값]으로 그린다(사람 결정 2026-09-29).
             st_ranges = st.pop("_ranges", None) if isinstance(st, dict) else None
             # 한 벌에 표가 둘(위 · 아래)인 상품 — 크롤러가 둘째 표를 「_parts」로 넘긴다(sansan-gear INTRA-SUIT,
@@ -6289,7 +6505,10 @@ def main():
             # 칸이 둘 넘어도 **한 사이즈 줄뿐이거나 칸이 셋 미만**이면 창의 표를 본다 — 예전엔 칸 2개 미만일 때만 봐서,
             # 첫 사이즈 한 줄만 남은 표(saintpain · le17septembre)가 창에 온전한 표가 있어도 그대로였다(2026-10-08 Claude 판독).
             # 갈아 끼우는 것은 _sg_better 가 「칸을 잃지 않고 줄이나 칸이 늘 때」만이다.
-            if sg and (len(sizes) < 3 or _rows_of(sizes) < 2):
+            # 줄도 칸도 넉넉한 표라도 창의 표가 **칸을 더 갖고 같은 칸 값이 다 맞으면** 받는다 — noice 는 상세 글 표에
+            # 「Outside Length」(총장)가 빠지고 창 표에만 있어 221벌이 총장을 잃었다(2026-10-08 재점검).
+            sg_full = not (len(sizes) < 3 or _rows_of(sizes) < 2)
+            if sg:
                 # 이 갈래는 **이 창의 글에만** 건다. 창고 전수로 재 보니 OCR 글 전체에 걸었을 때
                 # 다른 매장의 표를 가로챈다 — 얻음 108벌 옆에서 **775벌이 값을 잃고 12벌이
                 # 통째로 사라졌다**(till-i-die 516 · crank 171 · known-better 81, 2026-09-18).
@@ -6326,8 +6545,13 @@ def main():
                         sg_rng = rg3
                 if pr:
                     s3 = clean_ocr(pr[1])
-                    if _sg_better(s3, sizes):
+                    sg_cand = s3
+                    if (_sg_better(s3, sizes) if not sg_full else _sg_adds(s3, sizes)):
                         sizes, names, source = s3, pr[0], "sizeguide"
+                    # 창 표가 지금 표와 같은데 밴딩 허리를 범위로만 적어 따로 뺐다면 그 범위는 붙인다 — mmlg 「WAIST 34~46」
+                    # 바지 56벌이 허리를 잃고 있었다(2026-10-08 재점검).
+                    elif sg_rng and _sg_adds(s3, sizes, same_ok=True):
+                        keep_rng = sg_rng
             # ④ 크리마 핏 위젯 표 — 매장 표를 위젯이 따로 들고 있다(roem). 글이라 사진보다 앞선다.
             if len(sizes) < 2 and r["source_url"] in crema:
                 s4 = clean_ocr(crema[r["source_url"]][1])
@@ -6376,6 +6600,31 @@ def main():
             # 길이는 총장이 맞는 말이라 남긴다.
             if r.get("category_code") in NO_SIZE_AXIS_CODES:
                 continue
+            # 표는 맞는데 칸이 빠진 상품 — 같은 상품의 다른 표(창 표 · 상세 글을 지금 해석기로 다시 읽은 표)에서
+            # **빠진 칸만** 가져온다. 겹치는 칸 둘 이상이 사이즈마다 1cm 안에서 같을 때만(같은 표라는 증거) — 값은
+            # 바꾸지 않는다. vibrate 「Total」 · noice 「Outside Length」 · facade-pattern · insilence 등 1,984벌이
+            # 해석기로는 읽히는데 갈래 조건에 막혀 칸을 잃고 있었다(2026-10-08 남은 5,721벌 전수 점검).
+            if 2 <= len(sizes) < 7:
+                gap_c = [sg_cand] if sg_cand else []
+                body_g = "\n".join(t for t in (d.get("description") or "", d.get("detail_text") or "") if t)
+                if body_g:
+                    import crawl_cafe24 as _cc3
+                    for fg in (_cc3.extract_size_text_forms, _cc3.extract_size_table):
+                        try:
+                            rawg = fg(body_g)
+                        except Exception:
+                            rawg = None
+                        if rawg:
+                            try:
+                                gap_c.append(clean_ocr(normalize_html(dict(rawg), k[0], girth_keys, label_med)))
+                            except Exception:
+                                pass
+                # 세트(셋업 · 투피스)는 위아래 칸이 다 맞는 말이라 갈래로 막지 않는다
+                gcat = None if _NOT_PLAIN_BOTTOM.search(r.get("name") or "") else r.get("category_code")
+                filled = fill_gaps(sizes, gap_c, gcat)
+                if len(filled) > len(sizes):
+                    sizes = filled
+                    gap_fill[k[0]] += 1
             # 사이즈 개수가 라벨마다 다르면(모델 치수 한 줄·OCR 누락) 칸 수를 골라 맞춘다.
             # 짧은 라벨은 뺀다 — 앞칸만 남겨 두면 M 의 치수가 그 옷의 유일한 치수로 적힌다.
             n = column_count(sizes, len(names or []))
@@ -6399,6 +6648,10 @@ def main():
                 rg = {c: v for c, v in st_ranges.items() if c not in sizes and isinstance(v, list) and len(v) == n}
                 if rg:
                     out[r["source_url"]]["ranges"] = rg
+            elif source == "html" and keep_rng:
+                rg = {c: v for c, v in keep_rng.items() if c not in sizes and len(v) == n}
+                if rg:
+                    out[r["source_url"]]["ranges"] = rg
             elif source == "sizeguide" and sg_rng:
                 # 창 표에서 따로 뺀 밴딩 허리 범위 — 위 html 갈래와 같은 모양으로 붙인다(prep_grid_lines 주석)
                 rg = {c: v for c, v in sg_rng.items() if c not in sizes and len(v) == n}
@@ -6406,6 +6659,8 @@ def main():
                     out[r["source_url"]]["ranges"] = rg
             src[source] += 1
             (per_brand_html if source in ("html", "browser") else per_brand_ocr)[k[0]] += 1
+    if gap_fill:
+        print(f"다른 표에서 빠진 칸만 채움 {sum(gap_fill.values())}벌: {dict(gap_fill.most_common(15))}")
     # 머리줄만 깨진 OCR 표를 매장 틀로 읽는다(template_pass 주석) — 사람 값 · 형제 물려주기보다 앞.
     tpl_added = template_pass(rows, ocr, out)
     if tpl_added:
@@ -6529,6 +6784,12 @@ def main():
         print(f"모자 실측(머리둘레 · 깊이 · 챙길이) {heads}벌")
     for u in wrong:             # 뒤 갈래가 다시 채웠어도 지운다
         out.pop(u, None)
+    ug = unit_guard(out)
+    if ug:
+        print(f"단면 · 둘레 섞임을 맞춘 표 {ug.pop('표', 0)}벌: {dict(ug.most_common())}")
+    sk = add_size_keys(out, {r["source_url"]: r for r in rows.values()}, full_opts)
+    if sk:
+        print(f"사이즈 견줄 말(size_keys): {dict(sk)}")
     OUT.write_text(json.dumps(out, ensure_ascii=False, indent=0), encoding="utf-8")
     print(f"사이즈 있는 상품 {len(out)} / {len(rows)} ({len(out)/len(rows):.0%}) — html {src['html']} · ocr {src['ocr']} → {OUT}")
     lab = Counter(c for e in out.values() for c in e["sizes"])
