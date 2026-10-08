@@ -287,7 +287,9 @@ ITEM_TYPE_VOCAB = {
              "트라우져"],
     "스커트": ["skirt", "스커트",
              # skort(스커트+팬츠) 19벌 — 매장은 하의 칸에 두지만 옷은 스커트다.
-             "skort", "pantskirt", "pant skirt", "판츠스커트", "팬츠스커트"],
+             "skort", "pantskirt", "pant skirt", "판츠스커트", "팬츠스커트",
+             # 「skirt pants」 · 「스커트팬츠」도 같은 옷이다 — 뒤 낱말 pants 가 이겨 팬츠로 섰다(총장 31~37, 2026-10-09)
+             "skirt pants", "skirt pant", "스커트팬츠", "스커트 팬츠"],
     # 「ops」는 원피스 약자다(「jersey contrast tiered ops」 · 「turtleneck ops」). 영문 낱말 경계로만 걸려 tops 에는 안 걸린다.
     # 상의로 섰더니 원피스 총장 121.5 가 「상의에 있을 수 없는 값」으로 지워졌다(코덱스 014 · le 2109).
     "원피스": ["dress", "원피스", "드레스", "one-piece", "onepiece", "one piece", "ops"],
@@ -1424,6 +1426,16 @@ _TAIL_ABBR = {"PT": "팬츠", "SK": "스커트", "OP": "원피스"}
 _TAIL_ABBR_RX = re.compile(r"\b(PT|SK|OP)(?=\s*(?:\(|\[|$))")
 
 
+_LONG_BOTTOM = {"팬츠", "데님", "슬랙스", "치노", "스웨트팬츠", "카고팬츠", "트랙팬츠", "조거팬츠", "카펜터팬츠", "파라슈트팬츠",
+                "파티그팬츠", "와이드팬츠", "트라우저"}
+# 「Half Banding Pants」 · 「하프 밴딩」은 허리 절반이 밴딩인 긴 바지다(anotheroffice · noirer 총장 105~109). 「bermuda layered」는
+# 긴 바지 위에 버뮤다를 겹친 옷(miseki-seoul 총장 104.5)이다 — 둘 다 거른다.
+_SHORT_BOTTOM_RX = re.compile(r"(?i)(?<![a-z])(?:shorts?|half(?!\s*-?\s*(?:zip|band))|bermuda(?!\s*layer)|jorts?)(?![a-z])|"
+                              r"(?:숏|쇼트)(?!\s*(?:슬리브|패딩|자켓|재킷|코트|기장))|쇼츠|하프(?!\s*(?:집|지퍼|넥|슬리브|코트|밴딩))|버뮤다(?!\s*레이어)|"
+                              r"반바지|(?<!\d)[35]부")
+_SHORT_BOTTOM_NOT = re.compile(r"(?i)half\s*(?:&|and)\s*half|(?:숏|short)\s*\.?\s*ver|shorts?\s*layer")
+
+
 def garment_head(name: str) -> str:
     """ITEM_TYPE_VOCAB 의 match_head. 홀로 선 「라이더 · 바이커」는 어휘에 없으므로(라이더자켓 주석) 따로 거를 것이 없다.
     아무것도 안 걸리면 이름 끝의 대문자 약어(PT · SK · OP)를 본다."""
@@ -1431,6 +1443,17 @@ def garment_head(name: str) -> str:
     # 「Mods Parka_Short」는 짧은 파카지 반바지가 아니다 — 겉옷 낱말 바로 뒤에 붙은 short 는 기장이다(3벌, 2026-10-06).
     if head in ("쇼츠", "숏팬츠") and re.search(r"(parka|jacket|coat|blouson|jumper)[ _\-]*short\b", name or "", re.I):
         head = match_head(re.sub(r"short\b", " ", name, flags=re.I), ITEM_TYPE_VOCAB)
+    # 「Short Pants」 · 「Bermuda Jeans」 · 「Half Slacks」 · 「하프 치노 팬츠」는 반바지다 — 뒤 낱말(pants · jeans · slacks)이 이겨
+    # 판매중 하의 약 1,050벌이 팬츠 789 · 데님 141 · 스웨트팬츠 54 · 슬랙스 23 … 으로 서 있었다(앱 세션이 사이즈 범위로 찾음 —
+    # 그 옷들의 총장이 75 아래, 2026-10-09). 긴 바지 품목인데 이름에 반바지 낱말이 있으면 숏팬츠(버뮤다 낱말이면 버뮤다).
+    # 「7부」 · 「카프리」는 반바지가 아니다. 「하프 집 · 하프 지퍼」는 상의 말이라 거른다.
+    # 「숏ver」(짧은 기장판 긴 바지 · roem 총장 97) · 「HALF & HALF」(반반 배색 · nomanual) · 「SHORTS LAYERED」(겹친 긴 바지)는 거른다.
+    if head in _LONG_BOTTOM and _SHORT_BOTTOM_RX.search(name or "") and not _SHORT_BOTTOM_NOT.search(name or ""):
+        head = "버뮤다" if re.search(r"(?i)bermuda|버뮤다", name or "") else "숏팬츠"
+    # 바시티 묶기(사람 결정 2026-10-09, 앱 세션 전달): 「스타디움 점퍼 · STADIUM JUMPER」, 이름에 VARSITY · 바시티가 있는 점퍼 ·
+    # 재킷 · 블루종은 바시티다(표본 46벌 중 21벌만 바시티였다). 바시티 니트 · 가디건 · 후드 · 맨투맨 · 티셔츠는 무늬 이름이라 그대로.
+    if head in ("점퍼", "재킷", "블루종") and re.search(r"(?i)varsity|바시티|stadium|스타디움", name or ""):
+        head = "바시티"
     # 「후드 티셔츠」 · 「hooded tee」는 후드다 — 뒤에서 끝나는 티셔츠가 이겨 롱슬리브 124 · 맨투맨 37벌이 후드를 잃고 있었다
     # (5차 평가 16번, 사람 「기준 사진 후드티야, 롱슬리브가 아니라」 2026-10-06). 니트 · 재킷 · 파카에 달린 후드는 그대로 둔다(모양 품목이 따로 있다).
     # 낱말 속의 후드는 아니다 — 「보이후드」 · 「차일드후드」(브랜드 · 그래픽 이름) · 「후디진호」 · neighborhood.
@@ -1440,7 +1463,11 @@ def garment_head(name: str) -> str:
     if head:
         return head
     m = _TAIL_ABBR_RX.search(name or "")
-    return _TAIL_ABBR[m.group(1)] if m else ""
+    head = _TAIL_ABBR[m.group(1)] if m else ""
+    # 끝 약어로 고른 팬츠에도 반바지 규칙을 건다(ava-molli 「TURN-UP HALF PT」)
+    if head in _LONG_BOTTOM and _SHORT_BOTTOM_RX.search(name or "") and not _SHORT_BOTTOM_NOT.search(name or ""):
+        head = "숏팬츠"
+    return head
 
 
 def material_outer(head_name: str, item: str) -> str:
@@ -5140,6 +5167,25 @@ def shoe_size_gender(rows: list[dict], meta: dict[tuple[str, str], tuple[bool, s
     return changed
 
 
+_PREV_LEN: dict | None = None
+
+
+def _prev_total_len(url: str) -> float | None:
+    """지난 판 product_sizes 의 총장 가운데 값(사이즈 줄의 중간) — 없으면 None."""
+    global _PREV_LEN
+    if _PREV_LEN is None:
+        p = CRAWL_DIR.parent / "product_sizes.json"
+        _PREV_LEN = {}
+        try:
+            for u, e in json.loads(p.read_text(encoding="utf-8")).items():
+                v = sorted(x for x in ((e or {}).get("sizes") or {}).get("총장") or [] if isinstance(x, (int, float)))
+                if v:
+                    _PREV_LEN[u] = v[len(v) // 2]
+        except (OSError, ValueError):
+            pass
+    return _PREV_LEN.get(url)
+
+
 def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
     import product_desc
     rows = []
@@ -5321,6 +5367,13 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
             # 바지를 가리키니 갈래가 하의일 때만 채운다 — 청바지 낱말이 있으면 데님이다.
             if not item and code == "bottoms" and SHOE_FALSE.search(head_name):
                 item = "데님" if re.search(r"데님|denim|jean|진(?![가-힣])", head_name, re.I) else "팬츠"
+            # 이름에 반바지 낱말이 없는데 실측 총장이 60 아래인 긴 바지 품목은 반바지다(grove 「STRIPE PANTS」 28 · rolarola
+            # 「PAJAMA PANTS」 38 — 판매중 239벌, 앱 세션이 범위표로 찾음 2026-10-09). 실측은 지난 판 product_sizes 를 본다
+            # (이 단계가 사이즈보다 먼저 돈다). 사람 고침(manual_items)이 있으면 그것이 이긴다.
+            if item in _LONG_BOTTOM and not (fix and fix.get("품목")):
+                tl = _prev_total_len(d.get("source_url") or "")
+                if tl is not None and tl < 60:
+                    item = "숏팬츠"
             if int(d.get("price") or 0) >= PLACEHOLDER_PRICE:
                 dropped_junk += 1     # 자리표시 값 — 룩북·이벤트 페이지다
                 continue
