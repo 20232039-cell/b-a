@@ -304,6 +304,28 @@ def fetch_brand(brand: str, recs: list[dict], delay: float, workers: int, limit:
             "images": n_img, "texts": n_txt, "shop_wide": len(shop_wide)}
 
 
+_SLEEVELESS = {"슬리브리스", "캐미솔", "튜브탑", "브라탑", "뷔스티에", "베스트", "니트베스트", "패딩베스트", "바디수트", "수영복"}
+
+
+def sizes_complete(sz: dict, cat: str, sub: str) -> bool:
+    """품목에 필요한 칸이 다 있고 사이즈 줄이 하나 이상인가 — 실측 점검(2026-10-07)과 같은 잣대.
+    상의 · 아우터: 총장 · (어깨|소매길이|화장) · 가슴 / 민소매: 총장 · 가슴 / 바지: 총장 · 허리 · (엉덩이|허벅지) /
+    스커트: 총장 · 허리 / 원피스: 총장 · (가슴|허리)."""
+    if not sz:
+        return False
+    if cat == "Skirts" or sub in ("스커트", "롱스커트"):
+        need = [("총장",), ("허리",)]
+    elif cat in ("Pants", "Denim"):
+        need = [("총장",), ("허리",), ("엉덩이", "허벅지")]
+    elif cat == "Dresses":
+        need = [("총장",), ("가슴", "허리")]
+    elif sub in _SLEEVELESS:
+        need = [("총장",), ("가슴",)]
+    else:
+        need = [("총장",), ("어깨", "소매길이", "화장"), ("가슴",)]
+    return all(any(x in sz for x in g) for g in need)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--brands", default="")
@@ -323,15 +345,21 @@ def main():
                     help="sizeguide: 카페24 사이즈가이드 창 · page: 상품 페이지의 사이즈 머리말 뒤")
     args = ap.parse_args()
 
-    cats = {}
+    cats, subs = {}, {}
     pf = DATA / "products_full.csv"
     if pf.exists():
         for r in csv.DictReader(pf.open(encoding="utf-8-sig")):
             cats[r["source_url"]] = r["category"]
+            subs[r["source_url"]] = r.get("subtype") or ""
+    # 「사이즈 있음」은 표가 **있기만** 한 게 아니라 품목에 필요한 칸이 다 찬 것이다. 예전엔 표가 아예 없는 옷만 물었더니
+    # 첫 사이즈 한 줄 · 가슴 빠진 표만 있는 saintpain(사이즈가이드 창에 표가 통째로 있다) 같은 매장을 안 물었다
+    # (2026-10-08 Claude 판독에서 드러남 — 판독이 이 창에서 찾은 표가 수백 벌).
     sized: set[str] = set()
     sp = DATA / "product_sizes.json"
     if sp.exists():
-        sized = set(json.loads(sp.read_text(encoding="utf-8")))
+        for u, e in json.loads(sp.read_text(encoding="utf-8")).items():
+            if sizes_complete(e.get("sizes") or {}, cats.get(u, ""), subs.get(u, "")):
+                sized.add(u)
 
     if args.brands:
         brands = [b for b in args.brands.split(",") if b]

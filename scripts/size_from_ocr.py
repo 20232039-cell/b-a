@@ -4661,6 +4661,23 @@ def load_wrong() -> set[str]:
     return {(r.get("링크") or "").strip() for r in csv.DictReader(WRONG.open(encoding="utf-8-sig")) if (r.get("링크") or "").strip()}
 
 
+def _rows_of(sz: dict) -> int:
+    return max((len(v) for v in sz.values() if isinstance(v, list)), default=0)
+
+
+def _sg_better(new: dict, old: dict) -> bool:
+    """사이즈가이드 창의 표로 갈아 끼울 만한가 — 지금 칸을 하나도 잃지 않고 칸이나 사이즈 줄이 늘 때만.
+    칸을 잃더라도 칸 수 자체가 늘고 줄이 안 줄면 받는다(예전 규칙 「칸이 더 많으면」과 같은 쪽)."""
+    if not new:
+        return False
+    if not old:
+        return True
+    rn, ro = _rows_of(new), _rows_of(old)
+    if set(old) <= set(new) and (len(new) > len(old) or rn > ro):
+        return True
+    return len(new) > len(old) and rn >= ro
+
+
 def load_manual() -> dict[str, dict]:
     """data/manual_sizes.csv — 사람이 매장 그림을 보고 옮겨 적은 실측.
 
@@ -6260,7 +6277,10 @@ def main():
             # 사람이 정한 차례다(2026-09-18): ①HTML → ②토글 펼친 HTML → ③버튼이 여는 창 →
             # ④그래도 없으면 사진. 글이 있으면 사진보다 훨씬 정확하니 앞에 세운다.
             sg = sg_text.get(r["source_url"])
-            if len(sizes) < 2 and sg:
+            # 칸이 둘 넘어도 **한 사이즈 줄뿐이거나 칸이 셋 미만**이면 창의 표를 본다 — 예전엔 칸 2개 미만일 때만 봐서,
+            # 첫 사이즈 한 줄만 남은 표(saintpain · le17septembre)가 창에 온전한 표가 있어도 그대로였다(2026-10-08 Claude 판독).
+            # 갈아 끼우는 것은 _sg_better 가 「칸을 잃지 않고 줄이나 칸이 늘 때」만이다.
+            if sg and (len(sizes) < 3 or _rows_of(sizes) < 2):
                 # 이 갈래는 **이 창의 글에만** 건다. 창고 전수로 재 보니 OCR 글 전체에 걸었을 때
                 # 다른 매장의 표를 가로챈다 — 얻음 108벌 옆에서 **775벌이 값을 잃고 12벌이
                 # 통째로 사라졌다**(till-i-die 516 · crank 171 · known-better 81, 2026-09-18).
@@ -6297,7 +6317,7 @@ def main():
                         sg_rng = rg3
                 if pr:
                     s3 = clean_ocr(pr[1])
-                    if len(s3) > len(sizes):
+                    if _sg_better(s3, sizes):
                         sizes, names, source = s3, pr[0], "sizeguide"
             # ④ 크리마 핏 위젯 표 — 매장 표를 위젯이 따로 들고 있다(roem). 글이라 사진보다 앞선다.
             if len(sizes) < 2 and r["source_url"] in crema:

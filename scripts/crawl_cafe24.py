@@ -1761,6 +1761,10 @@ def category_code_of(category_names: list[str]) -> str | None:
     return None
 
 
+_SINGLE_SHORT = re.compile(r"(?<![a-z])short(?![a-z])", re.I)
+_PLURAL_SHORTS = re.compile(r"shorts|쇼츠|숏팬츠|숏\s?팬츠|반바지|short\s?pants|jort", re.I)
+
+
 def classify_category(name: str, category_names: list[str], description: str = "",
                       options: list | None = None) -> str:
     if any(PET_CATEGORY.match(c or "") for c in category_names):
@@ -1777,6 +1781,11 @@ def classify_category(name: str, category_names: list[str], description: str = "
     # 잡화 세분류가 먼저다 — 옷 어휘와 겹치는 낱말(니트 스카프·플리스 베레·데님 캡)이 있고,
     # 상품명은 「무엇인지」를 뒤에 적으므로 뒤에 걸린 쪽이 머리 낱말이다.
     acc = match_acc(name)
+    # 홀로 선 단수 「short」는 반바지(Flight Short)일 수도 기장(짧은 비니 · 숏 부츠)일 수도 있다. 잡화 낱말 뒤에 붙으면
+    # 기장이다 — cayl 「logo beanie short」 7 · 「RAIN BOOTS SHORT」 5 · 「LEATHER BELT WH SHORT」가 단수 short(2026-10-06 추가)에
+    # 먼저 걸려 숏팬츠로 섰다(Claude 실측 판독에서 드러남, 2026-10-08). 반바지 복수형 · 「denim short」 같은 옷 낱말은 그대로 둔다.
+    if not acc and _SINGLE_SHORT.search(name) and not _PLURAL_SHORTS.search(name):
+        acc = match_acc(_SINGLE_SHORT.sub(" ", name))
     if acc:
         return ACC_TO_CATEGORY[acc]
     # 매장이 설명글에서 **제품 종류를 못박은 문장**은 이름 추측보다 낫다.
@@ -3124,7 +3133,7 @@ _NUM = r"\d{1,3}(?:\.\d{1,2})?"
 # 그리고 「1 size 29-30 81 102 …」처럼 라벨에 없는 인치 표기가 한 칸 끼기도 한다(rough-side). 이 칸을
 # 값으로 세면 그 줄이 통째로 버려지거나(size {}) 라벨이 한 칸씩 밀린다(기장 95·어깨 116cm).
 _ROW_LEAD = r"(?:\s*(?:size)?\s*(?:small|medium|large|x-?small|x-?large|free)?\s*(?:\([^)]{0,12}\))?\s*[:：\-|]?\s*(?:\d{1,2}\s*[-~]\s*\d{1,2}\s+)?)"
-_KNOWN = re.compile(r"^(?:" + SIZE_LABELS[1:-1] + r"|crotch|inseam|rise|arm|암홀|밑위|가슴둘레|허리둘레|밑단둘레|어깨너비|소매길이|가슴단면|상동)", re.I)   # 상동 = 가슴 단면(lookast · grove 「상동 53.5」, 2026-10-08 판독)
+_KNOWN = re.compile(r"^(?:" + SIZE_LABELS[1:-1] + r"|crotch|inseam|rise|arm|암홀|밑위|가슴둘레|허리둘레|밑단둘레|어깨너비|소매길이|가슴단면|상동|아웃심|outseam)", re.I)   # 상동 = 가슴 단면(lookast · grove 「상동 53.5」, 2026-10-08 판독)
 
 
 # 사이즈 이름과 표 사이의 꼴이 매장마다 다르다 — 실제로 본 것만 넷이다:
@@ -3706,7 +3715,48 @@ def extract_size_text_forms(text: str) -> dict[str, list[float]]:
     #      - S : 허리 31 허벅지 33.5 … 총기장 108 - M : 허리 33.5 …                          (junne)
     #    ③은 줄 단위라 첫 사이즈만 남았다(2026-10-08 Claude 그림 판독에서 lookast 684 · miseki 259 · junne 가
     #    「기존 표는 첫 사이즈 한 줄」로 드러남). 사이즈 머리 다음에 바로 라벨·수 짝이 와야 머리로 본다.
-    return inline_size_blocks(lines)
+    t = inline_size_blocks(lines)
+    if t:
+        return t
+    # ⑤ 머리 한 번을 빗금으로, 사이즈마다 「(이름) : 값 / 값 …」을 **한 줄에 이어** 적은 꼴(aeae):
+    #      SHOULDER / CHEST / SLEEVE / LENGTH (cm) (0) : 49 / 54 / 20 / 69 (1) : 51 / 57 / 21 / 71.5
+    #    ②는 사이즈마다 줄이 바뀌어야 읽혔다. 기존 표가 0 사이즈 값에 「1」 이름만 붙은 한 줄이었다(25벌, 2026-10-08 판독).
+    return slash_header_inline(lines)
+
+
+_SLASH_HEAD = re.compile(r"((?:[A-Za-z가-힣][A-Za-z가-힣 .]{0,14}\s*/\s*){1,9}[A-Za-z가-힣][A-Za-z가-힣 .]{0,14})\s*(?:\(\s*cm\s*\))?", re.I)
+_SLASH_ROW = re.compile(rf"\(?\s*([A-Za-z0-9]{{1,6}})\s*\)?\s*[:：]\s*({_TF_NUM}(?:\s*/\s*{_TF_NUM})+)")
+
+
+def slash_header_inline(lines: list[str]) -> dict[str, list[float]]:
+    """⑤ — 빗금 머리 뒤에 「(이름) : 값/값…」 덩이가 둘 이상 이어지면 받는다. 칸 수가 머리와 같고, 머리 칸 중 둘 이상이
+    아는 라벨일 때만. 같은 이름이 다시 나오면(설명글 · 상세글에 같은 표 두 번) 첫 묶음에서 끊는다."""
+    for l in lines:
+        for hm in _SLASH_HEAD.finditer(l):
+            # 머리 앞에 붙은 글(「MADE IN KOREA SHOULDER」)은 떼고 마지막 낱말로 본다
+            labs = []
+            for x in hm.group(1).split("/"):
+                lab = re.sub(r"[().\s]", "", x).lower()
+                if not _known_label(lab) and x.split():
+                    lab = re.sub(r"[().\s]", "", x.split()[-1]).lower()
+                labs.append(lab)
+            if sum(_known_label(x) for x in labs) < 2:
+                continue
+            pos, names, rows = hm.end(), [], []
+            for rm in _SLASH_ROW.finditer(l, pos):
+                if re.search(r"[A-Za-z가-힣]{3,}", l[pos:rm.start()]):
+                    break           # 덩이 사이에 다른 글이 끼면 끝
+                vals = [float(v) for v in re.split(r"\s*/\s*", rm.group(2))]
+                if len(vals) != len(labs) or rm.group(1) in names:
+                    break
+                names.append(rm.group(1)); rows.append(vals); pos = rm.end()
+            if len(rows) < 2:
+                continue
+            cols = {lab: [r[i] for r in rows] for i, lab in enumerate(labs) if _known_label(lab)}
+            if len(cols) >= 2 and all(3 <= v <= 200 for vs in cols.values() for v in vs):
+                cols["_names"] = names
+                return cols
+    return {}
 
 
 _INLINE_HEAD = re.compile(r"(?i)(?<![\w.])(?:-\s*)?(x{0,3}s|x{0,3}l|m|\d?xl|xxl|free|f|[0-6])\s*[:：]?\s+(?=[가-힣A-Za-z])")
