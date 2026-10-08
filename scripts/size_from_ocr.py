@@ -4646,6 +4646,21 @@ def color_base(name: str) -> str:
     return " ".join(parts)
 
 
+WRONG = DATA / "size_wrong.csv"   # 지금 표가 다른 상품 값인데 매장이 이 상품 실측은 안 적은 것 — 표를 지운다
+
+
+def load_wrong() -> set[str]:
+    """data/size_wrong.csv(링크, 왜) — 표를 **지워야** 하는 상품.
+
+    셋업 짝(lartisan-3376 자켓에 슬랙스 표) · 매장이 다른 상품 표를 복사해 둔 것(lmood-3861 니트 집업에 트렌치 표)처럼
+    지금 값이 틀렸는데 이 상품의 진짜 실측은 어디에도 없는 경우다(2026-10-08 Claude 판독에서 「기존 표는 다른 상품 값」).
+    manual_sizes 는 덮어쓰기만 할 수 있어 따로 둔다. 형제 물려주기도 막는다 — 그 형제 표가 바로 틀린 값의 출처일 수 있다.
+    """
+    if not WRONG.exists():
+        return set()
+    return {(r.get("링크") or "").strip() for r in csv.DictReader(WRONG.open(encoding="utf-8-sig")) if (r.get("링크") or "").strip()}
+
+
 def load_manual() -> dict[str, dict]:
     """data/manual_sizes.csv — 사람이 매장 그림을 보고 옮겨 적은 실측.
 
@@ -6384,6 +6399,10 @@ def main():
             print(f"   손으로 적은 값이 {out[u]['source']} 값을 덮는다 — {u}")
         out[u] = ent
         src["manual"] += 1
+    wrong = load_wrong() - set(load_manual())
+    for u in wrong:
+        if out.pop(u, None) is not None:
+            src["wrong_cleared"] += 1
 
     # 색만 다른 형제에게서 사이즈를 물려받는다 — 같은 옷이라 실측이 같다. 어디서 왔는지 남긴다.
     by_base = defaultdict(list)
@@ -6398,7 +6417,7 @@ def main():
             continue
         own = {s["source_url"] for s in sibs if s["source_url"] in out}
         for r in sibs:
-            if r["source_url"] in out or r.get("category") not in GARMENT_LABELS:
+            if r["source_url"] in out or r["source_url"] in wrong or r.get("category") not in GARMENT_LABELS:
                 continue
             d = donor
             # rolarola 는 같은 이름을 시즌을 넘겨 다시 쓰고 치수도 바뀐다 — 6861 HAIRY V NECK CARDIGAN VIOLET(2026, 그림 총장 61 ·
@@ -6479,6 +6498,8 @@ def main():
         heads += 1
     if heads:
         print(f"모자 실측(머리둘레 · 깊이 · 챙길이) {heads}벌")
+    for u in wrong:             # 뒤 갈래가 다시 채웠어도 지운다
+        out.pop(u, None)
     OUT.write_text(json.dumps(out, ensure_ascii=False, indent=0), encoding="utf-8")
     print(f"사이즈 있는 상품 {len(out)} / {len(rows)} ({len(out)/len(rows):.0%}) — html {src['html']} · ocr {src['ocr']} → {OUT}")
     lab = Counter(c for e in out.values() for c in e["sizes"])
