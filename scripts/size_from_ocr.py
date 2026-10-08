@@ -4442,8 +4442,15 @@ def reparse_thin_table(st: dict, text: str) -> dict:
         rows = max((len(v) for k, v in t.items() if not str(k).startswith("_") and isinstance(v, list)), default=0)
         return labs, rows
     cur_l, cur_r = shape(st)
-    if cur_r >= 2 and len(cur_l) >= 3:
-        return st
+    # 줄도 칸도 넉넉한 표는 새 표가 **같은 칸 값이 1cm 안에서 다 맞을 때만** 바꾼다 — lookast 는 크롤 때 「어깨 · 밑단 ·
+    # 총장」 세 칸 두 줄만 남기고 「상동 · 소매통 · 소매장」을 잃었다(2026-10-08 재점검 433벌 가슴 결손).
+    full = cur_r >= 2 and len(cur_l) >= 3
+    def agree(new: dict) -> bool:
+        cv = {canon_label(k): v for k, v in st.items() if not str(k).startswith("_") and isinstance(v, list)}
+        nv = {canon_label(k): v for k, v in new.items() if not str(k).startswith("_") and isinstance(v, list)}
+        return all(len(cv[c]) == len(nv.get(c) or []) and all(
+            isinstance(a, (int, float)) and isinstance(b, (int, float)) and abs(a - b) <= 1 for a, b in zip(cv[c], nv[c]))
+            for c in cv if c)
     import crawl_cafe24 as _cc
     for f in (_cc.extract_size_text_forms, _cc.extract_size_table):
         try:
@@ -4453,6 +4460,8 @@ def reparse_thin_table(st: dict, text: str) -> dict:
         if not new:
             continue
         nl, nr = shape(new)
+        if full and not (nr == cur_r and agree(new)):
+            continue
         if nl >= cur_l and (nr > cur_r or (nr == cur_r and len(nl) > len(cur_l))):
             out = dict(new)
             for k in ("_ranges", "_parts"):
