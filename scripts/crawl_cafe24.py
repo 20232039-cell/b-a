@@ -3124,7 +3124,7 @@ _NUM = r"\d{1,3}(?:\.\d{1,2})?"
 # 그리고 「1 size 29-30 81 102 …」처럼 라벨에 없는 인치 표기가 한 칸 끼기도 한다(rough-side). 이 칸을
 # 값으로 세면 그 줄이 통째로 버려지거나(size {}) 라벨이 한 칸씩 밀린다(기장 95·어깨 116cm).
 _ROW_LEAD = r"(?:\s*(?:size)?\s*(?:small|medium|large|x-?small|x-?large|free)?\s*(?:\([^)]{0,12}\))?\s*[:：\-|]?\s*(?:\d{1,2}\s*[-~]\s*\d{1,2}\s+)?)"
-_KNOWN = re.compile(r"^(?:" + SIZE_LABELS[1:-1] + r"|crotch|inseam|rise|arm|암홀|밑위|가슴둘레|허리둘레|밑단둘레|어깨너비|소매길이|가슴단면)", re.I)
+_KNOWN = re.compile(r"^(?:" + SIZE_LABELS[1:-1] + r"|crotch|inseam|rise|arm|암홀|밑위|가슴둘레|허리둘레|밑단둘레|어깨너비|소매길이|가슴단면|상동)", re.I)   # 상동 = 가슴 단면(lookast · grove 「상동 53.5」, 2026-10-08 판독)
 
 
 # 사이즈 이름과 표 사이의 꼴이 매장마다 다르다 — 실제로 본 것만 넷이다:
@@ -3699,6 +3699,68 @@ def extract_size_text_forms(text: str) -> dict[str, list[float]]:
             for k, v in kv:
                 cols.setdefault(k, []).append(v)
         cols["_names"] = [nm for nm, _, _ in rows3]
+        return cols
+    # ④ 사이즈들이 **한 줄에 이어 붙은** 꼴(줄바꿈이 사라진 상세 글):
+    #      S : 허리단면 33 힙단면 49 … 총장 36 M : 허리단면 35.5 힙단면 51.5 … 총장 36.5      (lookast)
+    #      Size detail (cm) * 1 Length 102.5 Waist 35.5 … 2 Length 105 Waist 38 …           (miseki-seoul)
+    #      - S : 허리 31 허벅지 33.5 … 총기장 108 - M : 허리 33.5 …                          (junne)
+    #    ③은 줄 단위라 첫 사이즈만 남았다(2026-10-08 Claude 그림 판독에서 lookast 684 · miseki 259 · junne 가
+    #    「기존 표는 첫 사이즈 한 줄」로 드러남). 사이즈 머리 다음에 바로 라벨·수 짝이 와야 머리로 본다.
+    return inline_size_blocks(lines)
+
+
+_INLINE_HEAD = re.compile(r"(?i)(?<![\w.])(?:-\s*)?(x{0,3}s|x{0,3}l|m|\d?xl|xxl|free|f|[0-6])\s*[:：]?\s+(?=[가-힣A-Za-z])")
+
+
+_INLINE_PAIR = re.compile(rf"([가-힣A-Za-z]{{1,10}})\s*({_TF_NUM})\s*(?:cm)?")   # frontrise 처럼 9자 라벨이 있다
+
+
+def inline_size_blocks(lines: list[str]) -> dict[str, list[float]]:
+    """한 줄 안의 「사이즈 머리 + 라벨·수 짝들」 덩이를 이어 읽는다. 덩이 둘 이상, 공통 라벨 둘 이상일 때만.
+
+    덩이마다 앞에서부터 이어지는 짝만 쓴다(뒤에 붙은 설명 글은 버린다). 같은 사이즈 이름이 다시 나오면
+    (설명글·상세글에 같은 표가 두 번) 첫 묶음에서 끊는다. 사이즈마다 라벨이 조금 다르면(lookast 5429 는 M 에
+    밑단이 없다) 모두에게 있는 라벨만 받는다 — 빈칸을 다른 값으로 메우지 않는다.
+    """
+    for l in lines:
+        heads = [m for m in _INLINE_HEAD.finditer(l)]
+        blocks: list[tuple[str, list[tuple[str, float]]]] = []
+        for i, m in enumerate(heads):
+            end = heads[i + 1].start() if i + 1 < len(heads) else len(l)
+            # 「Front-rise」 「back rise」는 한 라벨이다 — 붙여 두지 않으면 앞말이 끼어든 글로 보여 덩이가 끊긴다
+            seg, pos, pairs = re.sub(r"(?i)\b(front|back)[-\s]+(rise)\b", r"\1\2", l[m.end():end]), 0, []
+            for pm in _INLINE_PAIR.finditer(seg):
+                if re.search(r"[가-힣A-Za-z0-9]", seg[pos:pm.start()].replace("-", "")):
+                    break               # 짝 사이에 다른 글이 끼면 거기까지
+                lab = re.sub(r"[().\s]", "", pm.group(1)).lower()
+                if not _known_label(lab):
+                    break
+                pairs.append((lab, float(pm.group(2))))
+                pos = pm.end()
+            if len(pairs) < 2:
+                if blocks:
+                    break               # 덩이가 끊기면 그 줄의 표는 거기까지
+                continue
+            nm = m.group(1).upper()
+            prev = next((b for b in blocks if b[0] == nm), None)
+            if prev is not None:
+                if prev[1] != pairs:
+                    blocks = []         # 같은 이름에 다른 값 = 표가 둘(세트 · 숏/롱, miseki 3137) — 어느 쪽인지 모르니 안 읽는다
+                break
+            blocks.append((nm, pairs))
+        if len(blocks) < 2:
+            continue
+        common = [k for k, _ in blocks[0][1] if all(k in dict(p) for _, p in blocks[1:])]
+        if len(common) < 2:
+            continue
+        cols = {k: [dict(p)[k] for _, p in blocks] for k in common}
+        if not all(3 <= v <= 200 for vs in cols.values() for v in vs):
+            continue
+        # 사이즈가 커지는데 값이 1cm 넘게 줄면 사이즈 줄이 아니다(foeto 2489 「1 캐미 · 2 가디건」 같은 세트 조각,
+        # arend 499 의 L 허리 29 오기) — 표를 통째로 버린다. 판독과 대조해 이 꼴만 틀렸다(2026-10-08).
+        if any(b - a < -1 for vs in cols.values() for a, b in zip(vs, vs[1:])):
+            continue
+        cols["_names"] = [nm for nm, _ in blocks]
         return cols
     return {}
 
