@@ -49,6 +49,12 @@ jobs:
   fetch:
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    # 매장 목록을 여섯 몫으로 나눠 러너 여섯 대가 동시에 돈다(2026-10-08 — 한 대로는 덜 채워진 옷 1만 벌에 세 시간 가까이 걸렸다).
+    # 매장 하나는 한 러너만 맡으므로 매장마다 요청 간격은 그대로다. 몫마다 다른 파일(매장별 jsonl)만 쓰니 푸시가 엉키지 않는다.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5]
     defaults:
       run:
         working-directory: work
@@ -70,14 +76,15 @@ jobs:
           [ "${{ inputs.force }}" = "true" ] && RT="$RT --force"
           if [ -n "${{ inputs.brands }}" ]; then
             python scripts/fetch_sizeguide.py --brands "${{ inputs.brands }}" \
-              --source "$SRC" --workers 4 --delay 0.2 $RT
+              --source "$SRC" --workers 4 --delay 0.2 $RT --shard "${{ matrix.shard }}/6"
           else
             python scripts/fetch_sizeguide.py --all-missing \
-              --source "$SRC" --workers 4 --delay 0.2 $RT
+              --source "$SRC" --workers 4 --delay 0.2 $RT --shard "${{ matrix.shard }}/6"
           fi
       # 크리마 핏 위젯이 실측표를 따로 들고 있는 매장(2026-09-25 전수: roem 184벌 · insilence).
       # 주소 하나에 GET 한 번 — 사이즈 없는 옷만 본다. 받아 둔 상품은 건너뛴다.
       - name: 크리마 핏 실측표 받기
+        if: matrix.shard == 0
         shell: bash
         run: python scripts/fetch_cremafit.py --brands "roem,insilence" --only-missing --delay 1
       # 이미 받아 둔 상품은 건너뛰므로(sidecar 에 있으면 skip) 매번 돌려도 새것만 받는다.
@@ -86,10 +93,11 @@ jobs:
         run: |
           git add data/crawl/sizeguide/ data/crawl/pagesize/ data/crawl/cremafit/ 2>/dev/null || true
           git diff --cached --quiet && { echo "새로 받은 것 없음"; exit 0; }
-          git commit -m "사이즈표 그림 (Actions)"
-          for i in 1 2 3; do
+          git commit -m "사이즈표 그림 (Actions, 몫 ${{ matrix.shard }}/6)"
+          # 몫 여섯이 거의 같은 때 끝나므로 푸시가 부딪친다 — 다시 받아 얹고, 기다리는 시간을 조금씩 어긋나게
+          for i in 1 2 3 4 5 6; do
             git pull --rebase --autostash origin "$DATA_BRANCH" && git push && exit 0
             git rebase --abort 2>/dev/null || true
-            echo "푸시 실패, 재시도 $i"; sleep 10
+            echo "푸시 실패, 재시도 $i"; sleep $((10 + RANDOM % 30))
           done
           exit 1

@@ -341,6 +341,8 @@ def main():
     ap.add_argument("--retext", action="store_true",
                     help="그림만 받아 둔 기록을 다시 받아 **글**도 거둔다(글 거두기는 나중에 붙었다)")
     ap.add_argument("--workers", type=int, default=6)
+    ap.add_argument("--shard", default="",
+                    help="i/n — 매장 목록을 n 몫으로 나눠 i 번째만(Actions 여러 러너로 나눠 돌리기, 2026-10-08)")
     ap.add_argument("--source", choices=["sizeguide", "page", "both"], default="sizeguide",
                     help="sizeguide: 카페24 사이즈가이드 창 · page: 상품 페이지의 사이즈 머리말 뒤")
     args = ap.parse_args()
@@ -382,6 +384,12 @@ def main():
     else:
         ap.error("--brands 나 --all-missing 가운데 하나는 있어야 한다")
 
+    # 러너 여러 대로 나눠 돈다 — 목록이 덜 채워진 옷 많은 차례라 i, i+n, i+2n … 으로 고르면 몫마다 양이 비슷하다.
+    # 매장마다 요청 간격(--delay)은 그대로라 매장 서버 부담은 늘지 않고 전체 시간만 준다.
+    if args.shard:
+        i, n = (int(x) for x in args.shard.split("/"))
+        brands = brands[i::n]
+        print(f"몫 {i}/{n}: 매장 {len(brands)}곳", flush=True)
     sources = ["sizeguide", "page"] if args.source == "both" else [args.source]
     tot = collections.Counter()
     for b in brands:
