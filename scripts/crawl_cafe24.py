@@ -219,7 +219,7 @@ ITEM_TYPE_VOCAB = {
            "hood", "hoodysuit", "후디수트"],
     "집업": ["zip-up", "zipup", "zip up", "집업", "full zip", "풀집업"],
     # ── 2026-10-05 세분화(사람 「카테고리를 완전 나누자」). 모양 · 만듦새가 다른 것만 품목으로 가르고 색 · 무늬 · 소재 · 핏은 태그에 둔다 ──
-    "하프집업": ["half zip", "half-zip", "하프집업", "하프 집업", "half zip-up", "half zipup", "quarter zip", "quarter-zip", "쿼터 집", "쿼터집", "쿼터집업", "하프 지퍼", "half zipper", "하프집업 맨투맨", "하프 집업 맨투맨", "half zip sweatshirt", "half-zip sweatshirt", "하프집업 스웨트셔츠", "하프집업 스웻", "half zip pullover", "하프집업 풀오버", "하프집업 후드", "half zip hoodie"],
+    "하프집업": ["halfzip", "half zip", "half-zip", "하프집업", "하프 집업", "half zip-up", "half zipup", "quarter zip", "quarter-zip", "쿼터 집", "쿼터집", "쿼터집업", "하프 지퍼", "half zipper", "하프집업 맨투맨", "하프 집업 맨투맨", "half zip sweatshirt", "half-zip sweatshirt", "하프집업 스웨트셔츠", "하프집업 스웻", "half zip pullover", "하프집업 풀오버", "하프집업 후드", "half zip hoodie"],
     "하프집업니트": ["하프집업 니트", "하프 집업 니트", "half zip knit", "half-zip knit", "half zip sweater", "하프집업니트", "하프 집업 스웨터", "쿼터집업 니트", "quarter zip knit"],
     "니트집업": ["니트 집업", "니트집업", "knit zip-up", "knit zip up", "knit zipup", "zip-up knit", "zip up knit", "집업 니트", "집업니트", "zip knit", "zipped knit", "풀집업 니트"],
     "폴로니트": ["폴로 니트", "폴로니트", "polo knit", "knit polo", "니트 폴로", "카라 니트", "카라니트", "collar knit", "collared knit", "폴로 스웨터", "polo sweater"],
@@ -1439,6 +1439,8 @@ _SHORT_BOTTOM_NOT = re.compile(r"(?i)half\s*(?:&|and)\s*half|(?:숏|short)\s*\.?
 def garment_head(name: str) -> str:
     """ITEM_TYPE_VOCAB 의 match_head. 홀로 선 「라이더 · 바이커」는 어휘에 없으므로(라이더자켓 주석) 따로 거를 것이 없다.
     아무것도 안 걸리면 이름 끝의 대문자 약어(PT · SK · OP)를 본다."""
+    # 「down jacket (non hoody)」 — 「non hoody」는 후드가 없다는 말이다. 지우고 고른다(cayl 3벌이 후드로 섰다, 2026-10-09).
+    name = re.sub(r"(?i)\bnon[\s\-]*hood(?:y|ie|ed)?\b|노\s*후드|후드\s*없는", " ", name or "")
     head = match_head(name, ITEM_TYPE_VOCAB)
     # 「Mods Parka_Short」는 짧은 파카지 반바지가 아니다 — 겉옷 낱말 바로 뒤에 붙은 short 는 기장이다(3벌, 2026-10-06).
     if head in ("쇼츠", "숏팬츠") and re.search(r"(parka|jacket|coat|blouson|jumper)[ _\-]*short\b", name or "", re.I):
