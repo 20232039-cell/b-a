@@ -217,6 +217,24 @@ def denim_wash(name: str, rep_color: str, options: str) -> str:
     return ws.pop() if len(ws) == 1 and len(opts) > 0 else ""
 
 
+# ── 하의 디테일 dt (앱 세션 부탁 2026-10-10) — 세부품목은 한 상품에 하나라 「데님 카고」는 데님팬츠로만 보인다. 디테일은 따로 싣는다.
+# 근거는 **상품명**과 세부품목 이름만. 상세 글에서 뽑은 pants_type 태그는 안 쓴다 — 「slacks」에 벌룬, 「WIDE-LEG JEANS」에 카고가
+# 붙는 등 이름에 없는 태그 283(카고) · 125(벌룬)벌 중 표본이 대부분 틀렸다(2026-10-10 점검).
+DT_RULES = (("카고", r"카고|cargo"), ("카펜터", r"카펜터|carpenter"), ("퍼티그", r"퍼티그|파티그|fatigue"),
+            ("파라슈트", r"파라슈트|parachute"), ("벌룬", r"벌룬|balloon"))
+DT_RX = [(k, re.compile(rx, re.I)) for k, rx in DT_RULES]
+DT_OF_SUB = {"카고팬츠": "카고", "카펜터팬츠": "카펜터", "퍼티그팬츠": "퍼티그", "파라슈트팬츠": "파라슈트", "벌룬팬츠": "벌룬"}
+DT_CATS = {"Pants", "Denim", "Skirts"}
+
+
+def bottom_details(name: str, subtype: str) -> list[str]:
+    got = [k for k, rx in DT_RX if rx.search(name or "")]
+    s = DT_OF_SUB.get(subtype or "")
+    if s and s not in got:
+        got.append(s)
+    return [k for k, _ in DT_RULES if k in got]
+
+
 def thin_row(r: dict, tags: dict, bi: dict, ci: dict, pref: dict) -> dict:
     """목록 한 줄. 열쇠 뜻은 catalog.json 의 "fields" 에 적어 둔다."""
     t = (tags.get(r["source_url"]) or {}).get("tags") or {}
@@ -246,6 +264,7 @@ def thin_row(r: dict, tags: dict, bi: dict, ci: dict, pref: dict) -> dict:
                  ("dw", denim_wash(r.get("name") or "", r.get("representative_color") or "", r.get("options") or "")
                   if r.get("category") in DW_CATS and (r.get("category") == "Denim" or r.get("subtype") == "데님팬츠"
                                                        or (t.get("material") or [""])[0] == "데님") else ""),
+                 ("dt", bottom_details(r.get("name") or "", r.get("subtype") or "") if r.get("category") in DT_CATS else []),
                  ("ax", AX_FLAGS.get(f'{r["brand_slug"]}-{r["product_no"]}', 0) & 7),
                  ("pt", 1 if AX_FLAGS.get(f'{r["brand_slug"]}-{r["product_no"]}', 0) & 8 else 0)):
         if v:
@@ -828,6 +847,8 @@ def main() -> int:
             "tg": "스타일 태그 — tags 번호 배열, 드문 것부터 많아야 6(없으면 안 적힘)",
             "ax": "기준별 비슷한 옷이 있는 기준 비트 — 1 색·무늬 · 2 모양 · 4 소재(similar-axis 조각, 0 이면 안 적힘)",
             "pt": "1 이면 무늬 있음(스트라이프 · 체크 · 프린트 …) — 무지 · 모름은 안 적힘",
+            "dt": "하의 디테일 — 카고 · 카펜터 · 퍼티그 · 파라슈트 · 벌룬 중 여럿(배열). 하의 · 데님 · 스커트에만, 상품명 · 세부품목에서 읽는다. "
+                  "세부품목(t)과 따로라 데님 카고는 t=데님팬츠 · dt=[카고]. 없으면 안 적힘",
             "dw": "데님 워싱 단계 — 연청 · 중청 · 진청 · 생지 · 흑청 · 블랙 · 화이트 · 컬러 중 하나. 데님 옷에만, 대표색 · 이름 · 옵션 낱말로 정하고 "
                   "모르면 안 적힘(블루 · 인디고만으로는 정하지 않는다)",
         },

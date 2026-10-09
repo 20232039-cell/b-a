@@ -5256,6 +5256,36 @@ def _prev_len_of(url: str, label: str) -> float | None:
     return v[len(v) // 2] if v else None
 
 
+_PREV_TAGS: dict | None = None
+_PR_TROUSER = re.compile(r"(?i)trouser|트라우저|slack")
+_PR_SUIT = re.compile(r"(?i)tailored|테일러드|(?<![a-z])suit(?![a-z])|수트|정장|dress\s*pants|드레스\s*팬츠|set[\s-]*up\s*pants|셋업\s*팬츠")
+_PR_DENIM = re.compile(r"(?i)denim|데님|jean|(?<![가-힣])진(?![가-힣])")
+_PR_DENIM_NOT = re.compile(r"(?i)denim[\s-]*(?:waist|look|like|effect)|faux|trompe|wool|울|mesh|메쉬|leather|레더")
+
+
+def _pants_refine(name: str, url: str) -> str | None:
+    """「팬츠」를 데님 · 슬랙스로 옮길 근거가 분명할 때만 그 품목. 판매중 6,508벌 중 약 480벌(2026-10-10 상품표로 잼).
+    - 데님: 대표 소재가 데님이고 이름에 데님 · 진 낱말(「DENIM-WAIST WOOL TROUSERS」 · faux denim 은 뺀다) — 「Denim Balloon Pants」.
+    - 슬랙스: 이름에 tailored · suit · 정장 · 셋업 팬츠, 또는 대표 소재가 울 · 캐시미어이고 이름에 trouser 거나 턱 봉제.
+      나일론 · 폴리 「Trousers」는 트랙 바지일 수 있어 옮기지 않는다."""
+    global _PREV_TAGS
+    if _PREV_TAGS is None:
+        try:
+            _PREV_TAGS = json.loads((CRAWL_DIR.parent / "product_tags_full.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            _PREV_TAGS = {}
+    t = ((_PREV_TAGS.get(url) or {}).get("tags")) or {}
+    ma = (t.get("material") or [""])[0]
+    cons = set(t.get("construction") or [])
+    if ma == "데님" and _PR_DENIM.search(name) and not _PR_DENIM_NOT.search(name):
+        return "데님"
+    if _PR_SUIT.search(name):
+        return "슬랙스"
+    if ma in ("울", "캐시미어") and (_PR_TROUSER.search(name) or cons & {"원턱", "투턱", "핀턱"}):
+        return "슬랙스"
+    return None
+
+
 _SET_NAME = re.compile(r"(?i)\bset\b|set[\s-]*up|셋업|세트|\+")
 
 
@@ -5477,6 +5507,10 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
                 labs = _prev_labels(d.get("source_url") or "")
                 if labs & {"어깨", "소매길이", "화장"} and not labs & {"허리", "엉덩이", "허벅지", "밑위"}:
                     code = "tops"
+            # 뭉뚱그린 「팬츠」 가운데 근거가 분명한 것만 기존 세부품목으로(앱 세션 · 사람 확인 2026-10-10 — 하의 30%가 「팬츠」였다).
+            # 근거는 이름 + 지난 판 대표 소재 · 봉제 태그. 애매하면 팬츠로 둔다.
+            if item == "팬츠" and not (fix and fix.get("품목")):
+                item = _pants_refine(d.get("name") or "", d.get("source_url") or "") or item
             if int(d.get("price") or 0) >= PLACEHOLDER_PRICE:
                 dropped_junk += 1     # 자리표시 값 — 룩북·이벤트 페이지다
                 continue
