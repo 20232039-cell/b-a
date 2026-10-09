@@ -24,6 +24,7 @@ import argparse
 import csv
 import gzip
 import json
+import re
 from datetime import datetime, timezone
 from collections import Counter, defaultdict
 from urllib.parse import urlsplit
@@ -176,6 +177,46 @@ def ax_pairs(nb: list, aidx: list, ok_ids: set) -> list:
             if 0 <= j < len(aidx) and aidx[j] in ok_ids and sc / 1000 >= SIM_MIN]
 
 
+# ── 데님 워싱 단계 dw (앱 세션 부탁 2026-10-09 — 상·하의 색 조합 가이드가 데님을 연청 · 중청 · 진청 · 생지 · 흑청으로 나눠 말한다) ──
+# 데님 옷(데님 칸 · 데님팬츠 · 대표 소재 데님인 옷)에만. 대표색 → 이름 → 옵션(모두 한 단계일 때만) 차례로 낱말을 찾고,
+# 모르면 비운다(추측 금지). 「블루」 · 「인디고」 · 「네이비」만으로는 단계를 모른다. 「raw edge · raw hem」은 밑단 가공이라 생지가 아니다.
+DW_RULES = (
+    ("흑청", r"흑청|washed\s*black|faded\s*black|워시드\s*블랙|페이디드\s*블랙|black\s*(?:wash|fade)|블랙\s*워싱"),
+    ("생지", r"생지|(?<![a-z])raw(?!\s*-?\s*(?:edge|hem|cut|finish))(?![a-z])|rigid|unwashed|논워시|non[\s-]*wash|로우\s*(?:인디고|데님|진)|원워시|one[\s-]*wash|rinse|린스"),
+    ("연청", r"연청|light\s*(?:blue|wash|indigo|denim|vintage)|라이트\s*(?:블루|워시|인디고|데님|빈티지)|ice\s*blue|아이스\s*블루|bleach|블리치|sky\s*blue|스카이\s*블루|pale\s*blue|faded\s*blue|lt\.?\s*blue|l/blue"),
+    ("중청", r"중청|mid(?:dle|ium)?\s*(?:blue|wash|indigo|denim|vintage)|미드\s*(?:블루|워시|인디고|빈티지)|미디엄\s*(?:블루|워시|인디고)|m/blue"),
+    ("진청", r"진청|dark\s*(?:blue|wash|indigo|denim|navy|vintage)|다크\s*(?:블루|워시|인디고|데님|네이비|빈티지)|deep\s*(?:blue|indigo)|딥\s*(?:블루|인디고)|d/blue|dk\.?\s*blue"),
+    ("블랙", r"(?<![a-z])black(?![a-z])|블랙"),
+    ("화이트", r"(?<![a-z])white(?![a-z])|화이트|ecru|에크루|ivory|아이보리|cream|크림|off[\s-]*white"),
+    ("컬러", r"pink|핑크|brown|브라운|khaki|카키|green|그린|beige|베이지|red(?![a-z])|레드|grey|gray|그레이|charcoal|차콜|olive|올리브|purple|퍼플|yellow|옐로우|mocha|모카|camel|카멜|sand|샌드|mint|민트"),
+)
+DW_RX = [(k, re.compile(rx, re.I)) for k, rx in DW_RULES]
+DW_CATS = {"Outerwear", "Tops", "Shirts", "Knitwear", "Pants", "Denim", "Skirts", "Dresses"}
+
+
+def wash_of(text: str) -> str:
+    for k, rx in DW_RX:
+        if rx.search(text or ""):
+            return k
+    return ""
+
+
+def denim_wash(name: str, rep_color: str, options: str) -> str:
+    """대표색 → 이름 → 옵션(모두 한 단계일 때만). 모르면 빈칸."""
+    w = wash_of(rep_color)
+    if w and w != "컬러":
+        return w
+    w2 = wash_of(name)
+    if w2:
+        return w2
+    if w:
+        return w
+    opts = [o for o in re.split(r"\s*\|\s*", options or "") if o]
+    ws = {wash_of(o) for o in opts}
+    ws.discard("")
+    return ws.pop() if len(ws) == 1 and len(opts) > 0 else ""
+
+
 def thin_row(r: dict, tags: dict, bi: dict, ci: dict, pref: dict) -> dict:
     """목록 한 줄. 열쇠 뜻은 catalog.json 의 "fields" 에 적어 둔다."""
     t = (tags.get(r["source_url"]) or {}).get("tags") or {}
@@ -202,6 +243,9 @@ def thin_row(r: dict, tags: dict, bi: dict, ci: dict, pref: dict) -> dict:
                  ("ma", (t.get("material") or [""])[0]),
                  ("se", r.get("season") or ""),
                  ("cg", COLOR_GROUP.get(r["source_url"], 0)),
+                 ("dw", denim_wash(r.get("name") or "", r.get("representative_color") or "", r.get("options") or "")
+                  if r.get("category") in DW_CATS and (r.get("category") == "Denim" or r.get("subtype") == "데님팬츠"
+                                                       or (t.get("material") or [""])[0] == "데님") else ""),
                  ("ax", AX_FLAGS.get(f'{r["brand_slug"]}-{r["product_no"]}', 0) & 7),
                  ("pt", 1 if AX_FLAGS.get(f'{r["brand_slug"]}-{r["product_no"]}', 0) & 8 else 0)):
         if v:
@@ -784,6 +828,8 @@ def main() -> int:
             "tg": "스타일 태그 — tags 번호 배열, 드문 것부터 많아야 6(없으면 안 적힘)",
             "ax": "기준별 비슷한 옷이 있는 기준 비트 — 1 색·무늬 · 2 모양 · 4 소재(similar-axis 조각, 0 이면 안 적힘)",
             "pt": "1 이면 무늬 있음(스트라이프 · 체크 · 프린트 …) — 무지 · 모름은 안 적힘",
+            "dw": "데님 워싱 단계 — 연청 · 중청 · 진청 · 생지 · 흑청 · 블랙 · 화이트 · 컬러 중 하나. 데님 옷에만, 대표색 · 이름 · 옵션 낱말로 정하고 "
+                  "모르면 안 적힘(블루 · 인디고만으로는 정하지 않는다)",
         },
         # 무드는 **브랜드에만** 있다 — 상품마다 붙일 것이 아니다(아래 fold_mood 참고)
         "brand_fields": {"mo": "무드 — moods 안의 말만 쓴다",
