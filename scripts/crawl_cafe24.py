@@ -296,7 +296,8 @@ ITEM_TYPE_VOCAB = {
     "파자마": ["파자마", "pajama", "pyjama", "잠옷", "홈웨어", "라운지웨어", "loungewear"],
     "베스트": ["vest", "베스트"],
     "바람막이": ["windbreak", "windbreaker", "wind breaker", "바람막이", "윈드브레이커", "윈드스토퍼", "windstopper",
-              "wind stopper", "윈드 스토퍼", "아노락", "anorak"],
+              "wind stopper", "윈드 스토퍼", "아노락", "anorak",
+              "wind shell", "windshell", "윈드쉘", "윈드 쉘"],   # nomanual 「WIND SHELL」 4벌이 하의로 섰다(2026-10-09)
     "숏팬츠": ["shorts", "숏팬츠", "반바지", "숏츠", "쇼츠", "microshorts", "micro shorts", "마이크로쇼츠"],
     "점프수트": ["jumpsuit", "점프수트", "overall", "오버올"],
     # 영문 「cardigan」 · 「카디건」 표기가 니트 쪽 어휘에 있어 3,643벌이 가디건이 아니라 니트로 서 있었다(코덱스 사전 검증 244 ·
@@ -320,7 +321,7 @@ ITEM_TYPE_VOCAB = {
     # 탑·저지가 앞에 붙어도 뒤 낱말인 bodysuit 이 이긴다(2026-09-08).
     # 세부 품목 — 코덱스 사전 검증(244)이 「큰 분류로 뭉개져 품목 정보가 사라진다」고 짚은 것(사람 「뷔스티에 스크런치
     # 이런 세부 품목은 만들어야겠네」 2026-10-03). 「Bustier Top」은 뒤의 top 이 이기니 붙은꼴을 같이 넣는다.
-    "뷔스티에": ["뷔스티에", "bustier", "뷔스티에 탑", "bustier top", "뷔스티에탑"],
+    "뷔스티에": ["뷔스티에", "bustier", "뷔스티에 탑", "bustier top", "뷔스티에탑", "corset", "코르셋"],   # open-yy 「JEAN EFFECT CORSET」(2026-10-09)
     # 트랙 재킷 — 「track jacket」 134벌이 재킷, 「track top」 43벌이 탑에 있었다. 지퍼 달린 운동복 겉옷이다.
     "트랙재킷": ["track jacket", "트랙 자켓", "트랙자켓", "트랙 재킷", "트랙재킷", "track top", "트랙 탑", "트랙탑",
              "training jacket", "트레이닝 자켓", "트레이닝자켓", "트레이닝 재킷", "트레이닝재킷", "track jk"],
