@@ -158,6 +158,7 @@ NECKLESS = {"Pants", "Denim", "Skirts"}
 # 다른 품목에는 쓰지 않는다: 「Mini Logo Fitted Long Sleeve T-Shirt」·「Mini Pocket
 # Denim Pants」의 mini 는 로고와 주머니를 꾸미는 말이다(2026-09-06).
 MINI_NAME = re.compile(r"(?<![a-z])mini(?![a-z])|미니(?!멀)", re.I)
+WESTERN_NAME = re.compile(r"(?<![a-z])western(?![a-z])|웨스턴", re.I)
 ROBE_NAME = re.compile(r"(?<![a-z])robe(?![a-z])|(?<![가-힣])로브(?!스터)", re.I)
 SKIRTY = {"Skirts", "Dresses"}
 
@@ -1120,6 +1121,10 @@ class Tagger:
         # 「wardrobe」 · 「글로브」가 걸리지 않게 낱말 앞을 본다.
         elif ROBE_NAME.search(name):
             hits.setdefault("construction", set()).add("랩")
+        # 웨스턴셔츠도 품목에서 뺐다(사람 결정 2026-10-09) — 웨스턴 느낌은 앞뒤 요크로 남긴다. 스냅은 hardware 가 따로 잡는다.
+        # 바지 · 부츠의 「웨스턴」(부츠컷 · 웨스턴 부츠)은 요크 이야기가 아니라 윗옷만.
+        if category in ("Shirts", "Tops", "Outerwear", "Dresses") and WESTERN_NAME.search(name):
+            hits.setdefault("construction", set()).add("요크")
         if category not in NON_GARMENT:
             mats = hits.get("material") or set()
             if mats & WARM_MATERIALS:
