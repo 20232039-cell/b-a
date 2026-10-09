@@ -201,6 +201,20 @@ def wash_of(text: str) -> str:
     return ""
 
 
+_DW_PHOTO: dict | None = None
+
+
+def dw_photo(url: str) -> str:
+    """이름 · 색 · 옵션 낱말로 못 정한 데님의 사진 판정(scripts/denim_wash_photo.py — 교차검증 정밀도 90% 넘는 것만)."""
+    global _DW_PHOTO
+    if _DW_PHOTO is None:
+        try:
+            _DW_PHOTO = json.loads((DATA / "denim_wash_photo.json").read_text(encoding="utf-8")).get("items") or {}
+        except (OSError, ValueError):
+            _DW_PHOTO = {}
+    return (_DW_PHOTO.get(url) or {}).get("w", "")
+
+
 def denim_wash(name: str, rep_color: str, options: str) -> str:
     """대표색 → 이름 → 옵션(모두 한 단계일 때만). 모르면 빈칸."""
     w = wash_of(rep_color)
@@ -301,7 +315,8 @@ def thin_row(r: dict, tags: dict, bi: dict, ci: dict, pref: dict) -> dict:
                  ("ma", main_material(r, t, (tags.get(r["source_url"]) or {}).get("mat"))),
                  ("se", r.get("season") or ""),
                  ("cg", COLOR_GROUP.get(r["source_url"], 0)),
-                 ("dw", denim_wash(r.get("name") or "", r.get("representative_color") or "", r.get("options") or "")
+                 ("dw", (denim_wash(r.get("name") or "", r.get("representative_color") or "", r.get("options") or "")
+                         or dw_photo(r["source_url"]))
                   if r.get("category") in DW_CATS and (r.get("category") == "Denim" or r.get("subtype") == "데님팬츠"
                                                        or (t.get("material") or [""])[0] == "데님") else ""),
                  ("dt", bottom_details(r.get("name") or "", r.get("subtype") or "") if r.get("category") in DT_CATS else []),
@@ -890,7 +905,7 @@ def main() -> int:
             "dt": "하의 디테일 — 카고 · 카펜터 · 퍼티그 · 파라슈트 · 벌룬 중 여럿(배열). 하의 · 데님 · 스커트에만, 상품명 · 세부품목에서 읽는다. "
                   "세부품목(t)과 따로라 데님 카고는 t=데님팬츠 · dt=[카고]. 없으면 안 적힘",
             "dw": "데님 워싱 단계 — 연청 · 중청 · 진청 · 생지 · 흑청 · 블랙 · 화이트 · 컬러 중 하나. 데님 옷에만, 대표색 · 이름 · 옵션 낱말로 정하고 "
-                  "모르면 안 적힘(블루 · 인디고만으로는 정하지 않는다)",
+                  "모르면 안 적힘(블루 · 인디고만으로는 정하지 않는다). 낱말로 못 정한 것 일부는 사진 판정(교차검증 정밀도 90% 넘는 단계 · 확신만)",
         },
         # 무드는 **브랜드에만** 있다 — 상품마다 붙일 것이 아니다(아래 fold_mood 참고)
         "brand_fields": {"mo": "무드 — moods 안의 말만 쓴다",

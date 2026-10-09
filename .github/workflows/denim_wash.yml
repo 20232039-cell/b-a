@@ -1,0 +1,67 @@
+# 데님 워싱 단계(dw)를 사진으로 — 이름 · 색 · 옵션 낱말로 못 정한 데님 옷만(scripts/denim_wash_photo.py 머리말).
+#
+# 왜 있는가(2026-10-10): 앱 세션이 색 조합 가이드에 쓸 워싱 단계를 부탁했고, 판매중 데님 옷 2,239벌은 대표색이 블루 · 인디고 ·
+# 네이비뿐이라 낱말로 못 정한다. 사람 지시 「하이쿠 말고 깃액션으로 판정 안 되나」 — 언어 모델 토큰 대신 러너에서 공개 이미지
+# 모델(CLIP)로 특징을 뽑고, 이름으로 단계가 분명한 데님으로 분류기를 학습해 **교차검증 정밀도 90% 넘는 것만** 적는다.
+#
+# 비용: 러너 하나, 사진 4천 장 남짓 받기 + CPU 로 특징 뽑기 — 30~40분.
+# 결과: data/denim_wash_photo.json — export_app_data 가 dw 빈칸에만 쓴다(publish 때 반영).
+
+name: denim-wash-photo
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "시험용 — 정답 · 빈칸 각각 이만큼만(0 이면 전부)"
+        required: false
+        default: "0"
+      min_precision:
+        description: "단계마다 이 정밀도에 닿는 확신 문턱 이상만 적는다"
+        required: false
+        default: "0.9"
+
+env:
+  DATA_BRANCH: crawl/cafe24-full-catalog
+
+permissions:
+  contents: read
+
+concurrency:
+  group: denim-wash-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  judge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: work
+    steps:
+      - uses: actions/checkout@v4
+      - name: 데이터 저장소(비공개) 받기
+        uses: ./.github/actions/data-repo
+        with:
+          token: ${{ secrets.DATA_TOKEN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: 설치(CPU torch · open_clip · scikit-learn)
+        run: |
+          pip install -q torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          pip install -q open_clip_torch scikit-learn pillow requests numpy
+      - name: 사진으로 워싱 단계 판정
+        run: python scripts/denim_wash_photo.py --limit "${{ inputs.limit }}" --min-precision "${{ inputs.min_precision }}"
+      - name: commit & push (rebase 후, 3회 재시도)
+        shell: bash
+        run: |
+          git add data/denim_wash_photo.json
+          git diff --cached --quiet && { echo "바뀐 것 없음"; exit 0; }
+          git commit -m "데님 워싱 단계 사진 판정 (Actions)"
+          for i in 1 2 3; do
+            git pull --rebase --autostash origin "$DATA_BRANCH" && git push && exit 0
+            git rebase --abort 2>/dev/null || true
+            echo "푸시 실패, 재시도 $i"; sleep $((10 + RANDOM % 30))
+          done
+          exit 1
