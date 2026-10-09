@@ -297,7 +297,7 @@ ITEM_TYPE_VOCAB = {
     "베스트": ["vest", "베스트"],
     "바람막이": ["windbreak", "windbreaker", "wind breaker", "바람막이", "윈드브레이커", "윈드스토퍼", "windstopper",
               "wind stopper", "윈드 스토퍼", "아노락", "anorak"],
-    "숏팬츠": ["shorts", "숏팬츠", "반바지", "숏츠", "쇼츠"],
+    "숏팬츠": ["shorts", "숏팬츠", "반바지", "숏츠", "쇼츠", "microshorts", "micro shorts", "마이크로쇼츠"],
     "점프수트": ["jumpsuit", "점프수트", "overall", "오버올"],
     # 영문 「cardigan」 · 「카디건」 표기가 니트 쪽 어휘에 있어 3,643벌이 가디건이 아니라 니트로 서 있었다(코덱스 사전 검증 244 ·
     # 2026-10-03). 「Knit Cardigan」은 뒤 낱말 cardigan 이 이겨 가디건이 된다.
@@ -646,7 +646,7 @@ WAIST_UNRELIABLE = re.compile(
 
 # 품목으로도 같은 것을 거른다 — 어휘표가 든 동의어(「트레이닝 팬츠」·「숏츠」)를 이름
 # 정규식은 못 잡는다. 반대로 띄어 쓴 「SHORT PANTS」는 품목이 못 잡는다. 둘 다 건다.
-WAIST_UNRELIABLE_ITEM = {"숏팬츠", "쇼츠", "버뮤다", "스웨트팬츠", "레깅스", "조거팬츠",
+WAIST_UNRELIABLE_ITEM = {"숏팬츠", "쇼츠", "버뮤다", "버뮤다팬츠", "트레이닝팬츠", "스웨트팬츠", "레깅스", "조거팬츠",
                          # 허리가 밴딩·스트링이라 실측이 작게 나온다 — 성별을 못 가린다
                          "트랙팬츠", "파라슈트팬츠"}
 
@@ -1445,6 +1445,15 @@ def garment_head(name: str) -> str:
     # 「Mods Parka_Short」는 짧은 파카지 반바지가 아니다 — 겉옷 낱말 바로 뒤에 붙은 short 는 기장이다(3벌, 2026-10-06).
     if head in ("쇼츠", "숏팬츠") and re.search(r"(parka|jacket|coat|blouson|jumper)[ _\-]*short\b", name or "", re.I):
         head = match_head(re.sub(r"short\b", " ", name, flags=re.I), ITEM_TYPE_VOCAB)
+    # 이름 끝의 소재 · 색 낱말이 모양을 이긴 꼴 — 「…MK3 JACKET INDIGO DENIM」 · 「Over Shirt Denim Blue」(데님),
+    # 「Basque Tee, Bermuda/Pink」 · 「B.D.U Jacket, Bermuda」(색 이름 버뮤다). 그 낱말을 지워도 상의 · 아우터 모양 낱말이
+    # 남으면 그것이 품목이다(소재는 태그 — 앱 세션 · 사람 결정 2026-10-09). 데님 반바지 · 버뮤다 팬츠는 하의 낱말이 남아 그대로.
+    if head in ("데님", "버뮤다"):
+        # jeans · 진 · 청바지는 옷 낱말이라 남긴다(「Brushed Fleece … Jeans」는 청바지). 대괄호 속 색 약어(「[T/BL]」)도 지운다.
+        alt = match_head(re.sub(r"(?i)denim|데님|chambray|샴브레이|selvedge|셀비지|bermuda|버뮤다|\[[^\]]*\]",
+                                " ", name or ""), ITEM_TYPE_VOCAB)
+        if alt and ITEM_TO_CATEGORY.get(alt) in ("tops", "outer"):
+            head = alt
     # 「Short Pants」 · 「Bermuda Jeans」 · 「Half Slacks」 · 「하프 치노 팬츠」는 반바지다 — 뒤 낱말(pants · jeans · slacks)이 이겨
     # 판매중 하의 약 1,050벌이 팬츠 789 · 데님 141 · 스웨트팬츠 54 · 슬랙스 23 … 으로 서 있었다(앱 세션이 사이즈 범위로 찾음 —
     # 그 옷들의 총장이 75 아래, 2026-10-09). 긴 바지 품목인데 이름에 반바지 낱말이 있으면 숏팬츠(버뮤다 낱말이면 버뮤다).
@@ -1462,6 +1471,11 @@ def garment_head(name: str) -> str:
     if head in ("티셔츠", "롱슬리브", "반팔", "맨투맨") and \
             re.search(r"(?<![가-힣a-z])(?:후드|후디)|(?<![a-z])hood(?:ed|ie|y|tee)?(?![a-z])", name or "", re.I):
         head = "후드"
+    # 「TC TG SWEAT PT」 — 끝 약어 PT(팬츠)가 있는데 앞의 sweat 이 맨투맨으로 잡았다(앱 세션 2026-10-09). 상의 낱말보다 끝 약어가 맞다.
+    if head and ITEM_TO_CATEGORY.get(head) == "tops":
+        mt = _TAIL_ABBR_RX.search(name or "")
+        if mt and mt.group(1) == "PT":
+            head = "스웨트팬츠" if re.search(r"(?i)sweat|스웻|스웨트", name or "") else "팬츠"
     if head:
         return head
     m = _TAIL_ABBR_RX.search(name or "")
@@ -5169,7 +5183,57 @@ def shoe_size_gender(rows: list[dict], meta: dict[tuple[str, str], tuple[bool, s
     return changed
 
 
+# 세부품목 정리(사람 결정 2026-10-09, 앱 세션 전달 — 「모양이 품목, 소재 · 무늬 · 봉제는 태그」 노션 10/5 원칙).
+# 분류 규칙(ITEM_TYPE_VOCAB)의 이름은 그대로 두고 카탈로그에 쓰는 이름만 여기서 바꾼다 — 사람 고침(manual_items)의 옛 이름도 같이 바뀐다.
+#   케이블니트 · 아가일니트 → 니트(무늬는 태그) · 하프집업니트 · 하프집업 낱말 든 니트집업 → 하프집업 · 폴로니트 · 피케 → 폴로
+#   니트원피스 → 길이별 원피스 · 라글란 → 반팔 · 롱슬리브(봉제 태그 래글런) · 데님(하의) → 데님팬츠 · 버뮤다 → 버뮤다팬츠
+#   스웨트팬츠 · 조거팬츠 · 트랙팬츠 → 트레이닝팬츠(바지 종류 태그는 남는다) · 파티그팬츠 → 퍼티그팬츠 · 재킷 → 자켓 · 트랙재킷 → 트랙자켓
+SUBTYPE_RENAME = {"케이블니트": "니트", "아가일니트": "니트", "하프집업니트": "하프집업", "폴로니트": "폴로", "피케": "폴로",
+                  "데님": "데님팬츠", "버뮤다": "버뮤다팬츠", "스웨트팬츠": "트레이닝팬츠", "조거팬츠": "트레이닝팬츠",
+                  "트랙팬츠": "트레이닝팬츠", "파티그팬츠": "퍼티그팬츠", "재킷": "자켓", "트랙재킷": "트랙자켓"}
+_RG_SHORT = re.compile(r"(?i)반팔|반소매|short\s*-?\s*sleeve|half\s*sleeve|s/s|(?<![a-z])ss(?![a-z])|하프\s*슬리브")
+
+
+def final_subtype(item: str, name: str, url: str) -> str:
+    if item == "니트집업" and re.search(r"(?i)half\s*-?\s*zip|하프\s*집", name or ""):
+        return "하프집업"
+    if item == "라글란":
+        if _RG_SHORT.search(name or ""):
+            return "반팔"
+        sl = _prev_len_of(url, "소매길이")
+        return "반팔" if sl is not None and sl < 35 else "롱슬리브"
+    if item == "니트원피스":
+        n = (name or "").lower()
+        if re.search(r"미니|mini", n):
+            return "미니원피스"
+        if re.search(r"미디|midi", n):
+            return "미디원피스"
+        if re.search(r"롱|맥시|long|maxi", n):
+            return "롱원피스"
+        tl = _prev_total_len(url)
+        if tl is None:
+            return "원피스"
+        return "미니원피스" if tl < 90 else ("미디원피스" if tl < 115 else "롱원피스")
+    return SUBTYPE_RENAME.get(item, item)
+
+
 _PREV_LEN: dict | None = None
+
+
+_PREV_SZ: dict | None = None
+
+
+def _prev_len_of(url: str, label: str) -> float | None:
+    """지난 판 product_sizes 의 한 칸 가운데 값 — 없으면 None."""
+    global _PREV_SZ
+    if _PREV_SZ is None:
+        p = CRAWL_DIR.parent / "product_sizes.json"
+        try:
+            _PREV_SZ = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            _PREV_SZ = {}
+    v = sorted(x for x in (((_PREV_SZ.get(url) or {}).get("sizes") or {}).get(label) or []) if isinstance(x, (int, float)))
+    return v[len(v) // 2] if v else None
 
 
 def _prev_total_len(url: str) -> float | None:
@@ -5448,7 +5512,7 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
                 "crawled_at": d.get("crawled_at", ""),
                 "group": GROUP_OF.get(label, ""),
                 "category": label,
-                "subtype": item,
+                "subtype": final_subtype(item, d.get("name") or "", d.get("source_url") or ""),
                 "sub_code": sub_code,
                 "product_no": d["product_no"],
                 "category_path": " | ".join(d.get("category_names", [])),

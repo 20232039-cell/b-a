@@ -5485,7 +5485,8 @@ def trim_unsold_sizes(out: dict, rows_by_url: dict, full_opts: dict) -> Counter:
 #     셋이라 허리 · 엉덩이도 지운다(rolarola 「가슴 30 · 허리 23 · 엉덩이 34.5」, till-i-die 778 와이드 팬츠). 어른 하의 단면
 #     허리가 28 아래일 수는 없다. 엉덩이가 그 밖이면(lartisan 4694 「허리 28 · 엉덩이 44」) 옷 치수로 보고 가슴만 지운다.
 _BOTTOM_ITEMS = {"팬츠", "슬랙스", "스커트", "미니스커트", "미디스커트", "롱스커트", "숏팬츠", "스웨트팬츠", "치노", "카고팬츠", "트랙팬츠", "레깅스", "카펜터팬츠",
-                 "파티그팬츠", "파라슈트팬츠", "조거팬츠", "버뮤다"}
+                 "파티그팬츠", "파라슈트팬츠", "조거팬츠", "버뮤다",
+                 "트레이닝팬츠", "퍼티그팬츠", "버뮤다팬츠", "데님팬츠"}   # 2026-10-09 세부품목 새 이름(crawl_cafe24.SUBTYPE_RENAME)
 _NOT_PLAIN_BOTTOM = re.compile(r"(?i)(?<![a-z])set(?![a-z])|set-?up|세트|셋업|투피스|two[- ]?piece|&|\+|overall|오버롤|멜빵|"
                                r"점프|jump\s?suit|romper|롬퍼|(?<![a-z])bib(?![a-z])|2[- ]?way|투웨이|원피스|dress|브라|(?<![a-z])bra(?![a-z])")
 
