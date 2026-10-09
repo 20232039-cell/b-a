@@ -1434,7 +1434,9 @@ _LONG_BOTTOM = {"팬츠", "데님", "슬랙스", "치노", "스웨트팬츠", "�
 _SHORT_BOTTOM_RX = re.compile(r"(?i)(?<![a-z])(?:shorts?|half(?!\s*-?\s*(?:zip|band))|bermuda(?!\s*layer)|jorts?)(?![a-z])|"
                               r"(?:숏|쇼트)(?!\s*(?:슬리브|패딩|자켓|재킷|코트|기장))|쇼츠|하프(?!\s*(?:집|지퍼|넥|슬리브|코트|밴딩))|버뮤다(?!\s*레이어)|"
                               r"반바지|(?<!\d)[35]부")
-_SHORT_BOTTOM_NOT = re.compile(r"(?i)half\s*(?:&|and)\s*half|(?:숏|short)\s*\.?\s*ver|shorts?\s*layer")
+# 「SHORT SLV」 · 「Short-sleeved」는 반팔이다(insane-garage · mood-inside 가 숏팬츠로 섰다, 2026-10-09).
+_SHORT_BOTTOM_NOT = re.compile(r"(?i)half\s*(?:&|and)\s*half|(?:숏|short)\s*\.?\s*ver|shorts?\s*layer"
+                               r"|short[\s_-]*(?:sleeve|slv|sl(?![a-z]))")
 
 
 def garment_head(name: str) -> str:
@@ -5251,6 +5253,15 @@ def _prev_len_of(url: str, label: str) -> float | None:
     return v[len(v) // 2] if v else None
 
 
+_SET_NAME = re.compile(r"(?i)\bset\b|set[\s-]*up|셋업|세트|\+")
+
+
+def _prev_labels(url: str) -> set:
+    """지난 판 product_sizes 에서 이 상품 표의 칸 이름들."""
+    _prev_len_of(url, "총장")   # _PREV_SZ 를 채운다
+    return set(((_PREV_SZ or {}).get(url) or {}).get("sizes") or {})
+
+
 def _prev_total_len(url: str) -> float | None:
     """지난 판 product_sizes 의 총장 가운데 값(사이즈 줄의 중간) — 없으면 None."""
     global _PREV_LEN
@@ -5455,6 +5466,14 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
                 tl = _prev_total_len(d.get("source_url") or "")
                 if tl is not None and tl < 60:
                     item = "숏팬츠"
+            # 이름에 품목 낱말이 없어 매장 칸(하의)만 보고 하의에 선 상품 — 지난 판 실측에 어깨 · 소매 · 화장이 있고 허리 ·
+            # 엉덩이 · 허벅지 · 밑위가 하나도 없으면 상의 표다(ader-error 「Product. 82」 · pog-service 「LAYERED SLEEVE」 ·
+            # sinoon 「Balloon Puff Layered Sleeve」, 판매중 하의 칸 빈 품목 중 상의 표 30여 벌, 2026-10-09). 세트 이름은 두 표가
+            # 섞일 수 있어 건드리지 않는다. 품목은 모르니 비워 두고 갈래만 옮긴다.
+            if not item and code == "bottoms" and not (fix and fix.get("분류")) and not _SET_NAME.search(d.get("name") or ""):
+                labs = _prev_labels(d.get("source_url") or "")
+                if labs & {"어깨", "소매길이", "화장"} and not labs & {"허리", "엉덩이", "허벅지", "밑위"}:
+                    code = "tops"
             if int(d.get("price") or 0) >= PLACEHOLDER_PRICE:
                 dropped_junk += 1     # 자리표시 값 — 룩북·이벤트 페이지다
                 continue

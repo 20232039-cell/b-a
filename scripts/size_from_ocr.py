@@ -1847,6 +1847,47 @@ def parse_section_stack(lines: list[str]) -> tuple[list[str], dict[str, list[flo
     return (names, cols) if names and len(cols) >= 2 else None
 
 
+_LONG_HEAD = re.compile(r"(?i)^size\s*\|\s*measurement\s*\|\s*value_cm$")
+_LONG_ROW = re.compile(r"^([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*(\d+(?:\.\d+)?)$")
+
+
+def parse_long_rows(lines: list[str]) -> tuple[list[str], dict[str, list]] | None:
+    """「size | measurement | value_cm」로 한 줄에 한 값씩 세운 표 — 상품 페이지에 숨은 Virtusize 표(ader-error).
+
+        size | measurement | value_cm
+        M | 총장 | 67
+        M | 소매장 | 89.5
+
+    값 0 은 「안 잼」이다(어깨 없는 래글런은 어깨너비 0). 소매입구는 소매단이다(canon_label 은 소매로 본다).
+    어깨가 없거나 0 인데 소매장이 75 넘으면 목에서 잰 화장이다 — 209 「소매장 89.5」, 어깨 있는 265 는 60.5.
+    """
+    if not lines or not _LONG_HEAD.match(lines[0].strip()):
+        return None
+    names: list[str] = []
+    vals: dict[str, dict[str, float]] = defaultdict(dict)
+    for ln in lines[1:]:
+        m = _LONG_ROW.match(ln.strip())
+        if not m:
+            continue
+        sz, lab, v = m.group(1).strip(), m.group(2).strip(), float(m.group(3))
+        c = "소매단" if "입구" in lab else canon_label(lab)
+        if not c or v <= 0:
+            if sz not in names and c:
+                names.append(sz)
+            continue
+        if sz not in names:
+            names.append(sz)
+        vals[c].setdefault(sz, v)
+    if not vals or len(names) < 1:
+        return None
+    sl = vals.get("소매길이")
+    if sl and not vals.get("어깨") and min(sl.values()) >= 75:
+        vals["화장"] = vals.pop("소매길이")
+    out = {c: [d.get(n) for n in names] for c, d in vals.items()}
+    out = {c: v for c, v in out.items() if sum(isinstance(x, float) for x in v) * 2 >= len(v)}
+    return (names, out) if out else None
+
+
 def parse_pair_rows(lines: list[str]) -> tuple[list[str] | None, dict[str, list[float]]] | None:
     """**줄 하나가 사이즈 하나**이고, 그 줄 안에 「라벨 값」이 되풀이되는 표.
 
@@ -6520,7 +6561,7 @@ def main():
                 # (2026-09-18 실측: unaffected 4벌이 가슴 27·28.5·30·32 를 받았다. 인치다).
                 # parse_pair_rows 는 라벨 뒤에 수가 붙어야 받으므로 그 표를 구조적으로 거른다.
                 sgl = [x.strip() for x in halve_girth_lines(sg).splitlines() if x.strip()]
-                pr = parse_pair_rows(sgl)
+                pr = parse_long_rows(sgl) or parse_pair_rows(sgl)
                 # 표가 반대로 누운 매장은 parse_grid_rows 가 읽는다(「라벨 | 값 | 값」).
                 # 부르는 쪽이 매장 공용 줄을 이미 지웠고 이 갈래도 canon_label 을 통과하는
                 # 줄만 받으므로, 카페24 인치 환산표는 두 겹으로 걸린다.
@@ -6679,11 +6720,25 @@ def main():
         print(f"rolarola SIZE CHART: {dict(rr)}")
     # 사람이 직접 옮겨 적은 값. 기계가 못 읽는 자리(사이즈가이드 탭 그림 등)를 사람이 메운
     # 것이라 무엇보다 앞선다. 형제 물려주기보다 먼저 넣어야 같은 옷의 다른 색도 함께 산다.
+    _cat_of = {r["source_url"]: r.get("category_code") for r in rows.values()}
+    man_gap = 0
     for u, ent in load_manual().items():
         if u in out and out[u].get("source") != "manual":
             print(f"   손으로 적은 값이 {out[u]['source']} 값을 덮는다 — {u}")
+            # 사람(그림 판독)이 칸을 빠뜨렸으면 덮이는 기계 표에서 **빠진 칸만** 붙인다 — 겹치는 칸 둘 이상이 사이즈마다
+            # 1cm 안에서 같을 때만(fill_gaps). ader-error 는 상품 페이지의 숨은 표에 소매입구 · 밑위가 있는데 판독 값엔
+            # 없었다(2026-10-09). 사람 값은 바꾸지 않는다.
+            prev = out[u].get("sizes") or {}
+            if prev and (not ent.get("size_names") or not out[u].get("size_names")
+                         or len(ent["size_names"]) == len(out[u]["size_names"])):
+                filled = fill_gaps(ent["sizes"], [prev], _cat_of.get(u))
+                if len(filled) > len(ent["sizes"]):
+                    ent = {**ent, "sizes": filled}
+                    man_gap += 1
         out[u] = ent
         src["manual"] += 1
+    if man_gap:
+        print(f"사람 값에 빠진 칸을 기계 표에서 붙임 {man_gap}벌")
     wrong = load_wrong() - set(load_manual())
     for u in wrong:
         if out.pop(u, None) is not None:
