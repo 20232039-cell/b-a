@@ -158,6 +158,7 @@ NECKLESS = {"Pants", "Denim", "Skirts"}
 # 다른 품목에는 쓰지 않는다: 「Mini Logo Fitted Long Sleeve T-Shirt」·「Mini Pocket
 # Denim Pants」의 mini 는 로고와 주머니를 꾸미는 말이다(2026-09-06).
 MINI_NAME = re.compile(r"(?<![a-z])mini(?![a-z])|미니(?!멀)", re.I)
+ROBE_NAME = re.compile(r"(?<![a-z])robe(?![a-z])|(?<![가-힣])로브(?!스터)", re.I)
 SKIRTY = {"Skirts", "Dresses"}
 
 WARM_MATERIALS = {"다운", "기모", "시어링"}
@@ -1115,6 +1116,10 @@ class Tagger:
         # 잡화 4 · 가방 1, 2026-09-08 after6c).
         if category in NON_GARMENT | {"Jewelry", "Headwear"}:
             hits.get("construction", set()).discard("랩")
+        # 로브(robe)는 벨트로 여미는 랩 여밈이다 — 품목 로브코트를 없애고 여밈은 이 태그로 남긴다(사람 결정 2026-10-09).
+        # 「wardrobe」 · 「글로브」가 걸리지 않게 낱말 앞을 본다.
+        elif ROBE_NAME.search(name):
+            hits.setdefault("construction", set()).add("랩")
         if category not in NON_GARMENT:
             mats = hits.get("material") or set()
             if mats & WARM_MATERIALS:

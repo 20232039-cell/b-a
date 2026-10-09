@@ -5195,7 +5195,19 @@ SUBTYPE_RENAME = {"케이블니트": "니트", "아가일니트": "니트", "하
 _RG_SHORT = re.compile(r"(?i)반팔|반소매|short\s*-?\s*sleeve|half\s*sleeve|s/s|(?<![a-z])ss(?![a-z])|하프\s*슬리브")
 
 
+# 로브코트는 품목이 아니다(사람 결정 2026-10-09, 앱 세션 전달) — 로브는 벨트로 여미는 디테일이고 이름이 「발마칸 로브 코트」 ·
+# 「CASHMERE SINGLE ROBE COAT」처럼 다른 코트 모양과 겹쳐 그 모양에서 빠졌다. 이름의 모양으로 보내고(발마칸 > 트렌치 > 더블 > 싱글),
+# 단서가 없으면 코트. 여밈은 tag_items 가 봉제 「랩」으로 남긴다. 「double-faced」는 원단 이름이라 더블 여밈이 아니다.
+_ROBE_SHAPE = (("발마칸", r"발마칸|balmacaan"), ("트렌치", r"트렌치|trench"),
+               ("더블코트", r"더블(?!\s*페이스)|double(?!\s*-?\s*face)"), ("싱글코트", r"싱글|single"))
+
+
 def final_subtype(item: str, name: str, url: str) -> str:
+    if item == "로브코트":
+        for sub, rx in _ROBE_SHAPE:
+            if re.search(rx, name or "", re.I):
+                return sub
+        return "코트"
     if item == "니트집업" and re.search(r"(?i)half\s*-?\s*zip|하프\s*집", name or ""):
         return "하프집업"
     if item == "라글란":
