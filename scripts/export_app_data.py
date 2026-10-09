@@ -235,6 +235,43 @@ def bottom_details(name: str, subtype: str) -> list[str]:
     return [k for k, _ in DT_RULES if k in got]
 
 
+# ── 대표소재 ma — 가죽이 일부만 든 옷(앱 세션 제보 2026-10-10: 「B-15 레더 탭 쉐르파 봄버」 몸판 울 · 소매 가죽 바시티) ──
+# 태거는 가죽 말을 소재 축 맨 앞에 세운다. 가죽이 대표로 선 옷만 다시 본다: 부위별 혼용률(mat)이 있으면 겉감 · 몸판 부위의 첫 섬유,
+# 없으면 이름에 「레더 탭 · 포인트 · 슬리브 · 트림 · 배색 · 믹스드 레더」가 있거나 이름에 가죽 말 없는 바시티 · 울이 함께 적힌 바시티일 때
+# 다음 소재로. 몸판이 가죽이면(「믹스드 레더 바시티」 겉감 염소가죽) 그대로 가죽이다.
+LEATHER_MA = {"가죽", "인조가죽"}
+_PART_LEATHER_NAME = re.compile(r"(?i)(?:레더|가죽)\s*(?:탭|포인트|슬리브|소매|트림|배색|패치|파이핑)|leather\s*(?:tab|point|sleeve|trim|patch|piping)"
+                                r"|(?:믹스드?|mixed?)\s*(?:레더|leather)|leather\s*mix")
+_LEATHER_WORD = re.compile(r"(?i)레더|가죽|leather|스웨이드|suede|램스킨|lambskin|카우하이드|cowhide")
+_WOOL_WORD = re.compile(r"(?i)(?<![a-z])wool(?![a-z])|울(?![트])|멜톤|melton")
+_BODY_PART = re.compile(r"^(?:겉감|몸판|본체|몸통|앞판|shell|body)\s*1?$", re.I)
+
+
+def _is_leather_fiber(f: str) -> bool:
+    return "가죽" in f or f in ("램스킨", "스웨이드", "폴리우레탄", "PU", "인조피혁", "레더")
+
+
+def main_material(r: dict, t: dict, mat: list | None) -> str:
+    mats = t.get("material") or []
+    ma = mats[0] if mats else ""
+    if ma not in LEATHER_MA or r.get("category") not in DW_CATS:
+        return ma
+    name = r.get("name") or ""
+    partial = _PART_LEATHER_NAME.search(name) or (
+        r.get("subtype") == "바시티" and (not _LEATHER_WORD.search(name) or _WOOL_WORD.search(name)))
+    # 이름이 통째로 「레더 자켓」이면 몸판이 가죽이다 — 인조가죽은 겉감 혼용률이 폴리 · 스판으로 적혀 있어(「크랙 레더 자켓」 스판덱스)
+    # 혼용률을 따르면 틀린다. 이름에 가죽 말이 없거나 부분 가죽 말이 있을 때만 몸판 · 다음 소재를 본다.
+    if _LEATHER_WORD.search(name) and not partial:
+        return ma
+    body = next((g for g in (mat or []) if isinstance(g, dict) and _BODY_PART.match(str(g.get("p") or "").strip())), None)
+    if body and body.get("v"):
+        f = str(body["v"][0][0])
+        return ma if _is_leather_fiber(f) else f
+    if not partial:
+        return ma
+    return next((m for m in mats[1:] if m not in LEATHER_MA and not _is_leather_fiber(m)), "")
+
+
 def thin_row(r: dict, tags: dict, bi: dict, ci: dict, pref: dict) -> dict:
     """목록 한 줄. 열쇠 뜻은 catalog.json 의 "fields" 에 적어 둔다."""
     t = (tags.get(r["source_url"]) or {}).get("tags") or {}
@@ -258,7 +295,7 @@ def thin_row(r: dict, tags: dict, bi: dict, ci: dict, pref: dict) -> dict:
         row["op"] = int(r["list_price"])          # 할인 전 정가 — 할인 중일 때만(사람 2026-10-02 「정가 줄긋고 할인가 표시」)
     # 빈 값은 아예 안 적는다 — 11만 번 반복되면 그것만으로 수백 KB다
     for k, v in (("co", (t.get("color") or [""])[0]),
-                 ("ma", (t.get("material") or [""])[0]),
+                 ("ma", main_material(r, t, (tags.get(r["source_url"]) or {}).get("mat"))),
                  ("se", r.get("season") or ""),
                  ("cg", COLOR_GROUP.get(r["source_url"], 0)),
                  ("dw", denim_wash(r.get("name") or "", r.get("representative_color") or "", r.get("options") or "")
