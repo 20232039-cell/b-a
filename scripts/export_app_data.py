@@ -235,41 +235,44 @@ def bottom_details(name: str, subtype: str) -> list[str]:
     return [k for k, _ in DT_RULES if k in got]
 
 
-# ── 대표소재 ma — 가죽이 일부만 든 옷(앱 세션 제보 2026-10-10: 「B-15 레더 탭 쉐르파 봄버」 몸판 울 · 소매 가죽 바시티) ──
-# 태거는 가죽 말을 소재 축 맨 앞에 세운다. 가죽이 대표로 선 옷만 다시 본다: 부위별 혼용률(mat)이 있으면 겉감 · 몸판 부위의 첫 섬유,
-# 없으면 이름에 「레더 탭 · 포인트 · 슬리브 · 트림 · 배색 · 믹스드 레더」가 있거나 이름에 가죽 말 없는 바시티 · 울이 함께 적힌 바시티일 때
-# 다음 소재로. 몸판이 가죽이면(「믹스드 레더 바시티」 겉감 염소가죽) 그대로 가죽이다.
-LEATHER_MA = {"가죽", "인조가죽"}
-_PART_LEATHER_NAME = re.compile(r"(?i)(?:레더|가죽)\s*(?:탭|포인트|슬리브|소매|트림|배색|패치|파이핑)|leather\s*(?:tab|point|sleeve|trim|patch|piping)"
-                                r"|(?:믹스드?|mixed?)\s*(?:레더|leather)|leather\s*mix")
-_LEATHER_WORD = re.compile(r"(?i)레더|가죽|leather|스웨이드|suede|램스킨|lambskin|카우하이드|cowhide")
-_WOOL_WORD = re.compile(r"(?i)(?<![a-z])wool(?![a-z])|울(?![트])|멜톤|melton")
+# ── 대표소재 ma — 그 소재가 장식으로만 조금 든 옷(앱 세션 · 사용자 2026-10-10: 「그 소재가 룩의 주인공인가」) ──
+# 앱 garmentUnits.ts partialMaterial 과 같은 규칙: 소재 말 바로 뒤에 탭 · 포인트 · 트리밍 · 슬리브 · 배색 · 요크 · 커프스(퍼가 아니면 칼라도)가
+# 오는 옷(「B-15 레더 탭 쉐르파 봄버」 · 「코듀로이 포인트 셔츠」 · 「퍼 트리밍 조거」), 그리고 몸판 울 · 소매 가죽인 바시티(이름에 가죽 말이
+# 없거나 울이 같이 적힘). 믹스드 레더 · 퍼 후드 · 퍼 칼라처럼 그 소재가 주인공인 옷은 그대로 둔다. 걸리면 혼용률(mat)의 겉감 · 몸판 첫 섬유
+# (그것도 같은 소재면 그대로), 없으면 그 소재가 아닌 다음 소재, 그것도 없으면 빈칸.
+_MA_WORD = {"가죽": "레더|가죽|leather", "인조가죽": "레더|가죽|leather", "스웨이드": "스웨이드|suede", "데님": "데님|denim",
+            "트위드": "트위드|tweed", "코듀로이": "코듀로이|corduroy|골덴", "퍼": "퍼|fur|시어링|shearling|쉐르파|sherpa",
+            "린넨": "린넨|리넨|linen", "나일론": "나일론|nylon"}
+_MA_ACCENT = r"트리밍|trim|포인트|point|탭|tabs?\b|슬리브(?!리스)|sleeves?\b|배색|요크|yoke|커프스?|cuffs?"
+_MA_COLLAR = r"(?:칼라|카라)(?!리스)|collar(?!less)"
+_LEATHER_WORD = re.compile(r"(?i)레더|가죽|leather|램스킨|lamb|카우|cow|고트|goat|쉽스킨|sheep")
 _BODY_PART = re.compile(r"^(?:겉감|몸판|본체|몸통|앞판|shell|body)\s*1?$", re.I)
+_SAME_FIBER = {"가죽": ("가죽", "램스킨", "스웨이드", "폴리우레탄"), "인조가죽": ("가죽", "폴리우레탄", "인조")}
 
 
-def _is_leather_fiber(f: str) -> bool:
-    return "가죽" in f or f in ("램스킨", "스웨이드", "폴리우레탄", "PU", "인조피혁", "레더")
+def partial_material(ma: str, sub: str, name: str) -> bool:
+    w = _MA_WORD.get(ma)
+    if not w or not name:
+        return False
+    after = _MA_ACCENT if ma == "퍼" else f"{_MA_ACCENT}|{_MA_COLLAR}"
+    if re.search(f"({w})[\\s-]*({after})", name, re.I):
+        return True
+    if ma in ("가죽", "인조가죽") and sub == "바시티":
+        return not _LEATHER_WORD.search(name) or bool(re.search(r"(?i)울|wool", name))
+    return False
 
 
 def main_material(r: dict, t: dict, mat: list | None) -> str:
     mats = t.get("material") or []
     ma = mats[0] if mats else ""
-    if ma not in LEATHER_MA or r.get("category") not in DW_CATS:
+    if not ma or r.get("category") not in DW_CATS or not partial_material(ma, r.get("subtype") or "", r.get("name") or ""):
         return ma
-    name = r.get("name") or ""
-    partial = _PART_LEATHER_NAME.search(name) or (
-        r.get("subtype") == "바시티" and (not _LEATHER_WORD.search(name) or _WOOL_WORD.search(name)))
-    # 이름이 통째로 「레더 자켓」이면 몸판이 가죽이다 — 인조가죽은 겉감 혼용률이 폴리 · 스판으로 적혀 있어(「크랙 레더 자켓」 스판덱스)
-    # 혼용률을 따르면 틀린다. 이름에 가죽 말이 없거나 부분 가죽 말이 있을 때만 몸판 · 다음 소재를 본다.
-    if _LEATHER_WORD.search(name) and not partial:
-        return ma
+    same = _SAME_FIBER.get(ma, (ma,))
     body = next((g for g in (mat or []) if isinstance(g, dict) and _BODY_PART.match(str(g.get("p") or "").strip())), None)
     if body and body.get("v"):
         f = str(body["v"][0][0])
-        return ma if _is_leather_fiber(f) else f
-    if not partial:
-        return ma
-    return next((m for m in mats[1:] if m not in LEATHER_MA and not _is_leather_fiber(m)), "")
+        return ma if any(x in f for x in same) else f
+    return next((m for m in mats[1:] if m != ma and not any(x in m for x in same)), "")
 
 
 def thin_row(r: dict, tags: dict, bi: dict, ci: dict, pref: dict) -> dict:
