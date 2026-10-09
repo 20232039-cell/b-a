@@ -1444,6 +1444,9 @@ def garment_head(name: str) -> str:
     아무것도 안 걸리면 이름 끝의 대문자 약어(PT · SK · OP)를 본다."""
     # 「down jacket (non hoody)」 — 「non hoody」는 후드가 없다는 말이다. 지우고 고른다(cayl 3벌이 후드로 섰다, 2026-10-09).
     name = re.sub(r"(?i)\bnon[\s\-]*hood(?:y|ie|ed)?\b|노\s*후드|후드\s*없는", " ", name or "")
+    # 「SHORT SLV」 · 「Short-sleeved」는 반팔이다 — 어휘의 short(쇼츠)가 먼저 걸려 숏팬츠로 섰다(insane-garage · mood-inside, 2026-10-09).
+    # 「반팔」로 바꿔 두면 모양 낱말이 따로 없을 때 반팔로 선다.
+    name = re.sub(r"(?i)short[\s_\-]*(?:sleeved?|slv|sl(?![a-z]))", " 반팔 ", name)
     head = match_head(name, ITEM_TYPE_VOCAB)
     # 「Mods Parka_Short」는 짧은 파카지 반바지가 아니다 — 겉옷 낱말 바로 뒤에 붙은 short 는 기장이다(3벌, 2026-10-06).
     if head in ("쇼츠", "숏팬츠") and re.search(r"(parka|jacket|coat|blouson|jumper)[ _\-]*short\b", name or "", re.I):
