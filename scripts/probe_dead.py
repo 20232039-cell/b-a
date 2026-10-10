@@ -33,6 +33,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import requests
+from collections import Counter
 from urllib.parse import parse_qs, unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -75,6 +76,9 @@ def verdict(url: str) -> str | None:
     # 상세로 갔는데 상품이 아닌 곳으로 튕겼다. **튕겼을 때만** 본다 — 처음엔 「주소에 /product/ · product_no= 가 없으면」으로 봐서
     # 카페24 가 아닌 매장(ader-error /kr/shop/N · Shopify /products/ · goods_view.php · shop_view/?idx=)의 멀쩡한 상품 10,829벌을
     # 뺄 뻔했다(2026-10-10 전수 — rebuild 를 끊었다). 튕긴 뒤 주소에 상품을 가리키는 값(번호 · 마지막 경로 토막)이 남았으면 멀쩡하다.
+    # 카페24 「접속 차단」 화면(block_state.html)은 상품이 아니라 우리가 막힌 것이다 — anglan 판매중 222벌이 홈까지 다 이리로 갔다(2026-10-10).
+    if "block_state" in r.url or "/blocked" in r.url:
+        return None
     if r.history and _product_key(url) not in unquote(r.url):
         return "상품 페이지가 아닌 곳으로 넘어감"
     return None
@@ -163,6 +167,13 @@ def main() -> None:
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
         list(ex.map(one, cand))
 
+    # 매장 하나가 통째로(판매중 20벌 넘게 · 90% 넘게) 안 열리면 상품이 아니라 매장 쪽 문제(차단 · 이전 · 점검)로 본다 — 빼지 않고 알린다.
+    on_sale = Counter(slug for (slug, _), r in rows.items() if r["status"] == "ON_SALE")
+    flagged = Counter(x["브랜드"] for x in out)
+    whole = {b for b, n in flagged.items() if on_sale[b] >= 20 and n >= 0.9 * on_sale[b]}
+    for b in sorted(whole):
+        print(f"   매장 통째로 안 열림 — 빼지 않음: {b} {flagged[b]}/{on_sale[b]}", file=sys.stderr)
+    out = [x for x in out if x["브랜드"] not in whole]
     out.sort(key=lambda x: (x["왜"], x["브랜드"], x["상품명"]))
     if args.shard:
         (DATA / "dead").mkdir(exist_ok=True)
