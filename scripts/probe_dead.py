@@ -79,16 +79,25 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--all", action="store_true", help="판매중 상품 전부 (기본은 의심스러운 것만)")
     ap.add_argument("--workers", type=int, default=6)
+    # 판매중 전부(8만 벌 남짓)를 러너 하나로 돌렸더니 4시간 제한에 걸려 끊겼다(2026-10-10). 매장을 몫으로 나눠 러너 여럿이 돈다 —
+    # 몫마다 data/dead/<i>.csv 를 따로 써서 푸시가 엉키지 않는다. crawl_cafe24.load_dropped 가 그 파일들도 읽는다.
+    ap.add_argument("--shard", default="", help="i/N — 매장 이름 해시로 나눈 i번째 몫만")
     args = ap.parse_args()
 
     sizes = json.loads((DATA / "product_sizes.json").read_text(encoding="utf-8"))
     rows = {(r["brand_slug"], r["product_no"]): r
             for r in csv.DictReader((DATA / "products_full.csv").open(encoding="utf-8-sig"))}
 
+    import zlib
+    si, sn = (int(x) for x in args.shard.split("/")) if args.shard else (0, 1)
+
+    def mine(slug: str) -> bool:
+        return zlib.crc32(slug.encode()) % sn == si
+
     cand = []
     for path in sorted(DATA.glob("crawl/*.jsonl")):
         slug = path.stem
-        if slug.startswith("_"):
+        if slug.startswith("_") or not mine(slug):
             continue
         latest: dict = {}
         for line in path.read_text(encoding="utf-8").splitlines():
@@ -113,13 +122,14 @@ def main() -> None:
 
     # 지난번에 뺀 상품은 목록(products_full)에서 이미 빠져 위에서 안 잡힌다 — 그대로 두면 다음 판에 「멀쩡」으로 돌아와 목록에 다시 선다.
     # 지난 명단도 다시 열어 보고, 여전히 안 열리면 남긴다(다시 열리면 빠진다).
-    prev = DATA / "dead_products.csv"
-    if prev.exists():
-        seen = {(c[0], c[1]) for c in cand}
+    seen = {(c[0], c[1]) for c in cand}
+    for prev in [DATA / "dead_products.csv", *sorted((DATA / "dead").glob("*.csv"))]:
+        if not prev.exists():
+            continue
         with prev.open(encoding="utf-8-sig") as f:
             for row in csv.DictReader(f):
                 k = ((row.get("브랜드") or "").strip(), (row.get("상품번호") or "").strip())
-                if k[0] and k[1] and row.get("링크") and k not in seen:
+                if k[0] and k[1] and row.get("링크") and k not in seen and mine(k[0]):
                     cand.append((k[0], k[1], row["링크"].strip(), (row.get("상품명") or "")[:60]))
                     seen.add(k)
     print(f"열어 볼 상품 {len(cand):,}", file=sys.stderr)
@@ -138,7 +148,11 @@ def main() -> None:
         list(ex.map(one, cand))
 
     out.sort(key=lambda x: (x["왜"], x["브랜드"], x["상품명"]))
-    p = DATA / "dead_products.csv"
+    if args.shard:
+        (DATA / "dead").mkdir(exist_ok=True)
+        p = DATA / "dead" / f"{si}.csv"
+    else:
+        p = DATA / "dead_products.csv"
     with p.open("w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["왜", "브랜드", "상품명", "링크", "상품번호"])
         w.writeheader()

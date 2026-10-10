@@ -4889,8 +4889,8 @@ def load_dropped() -> set[tuple[str, str]]:
     브랜드 이름을 코드에 적지 않는다 — 매장은 바뀌고, 규칙을 박아 두면 썩는다.
     """
     out: set[tuple[str, str]] = set()
-    for name in ("dead_products.csv", "excluded_products.csv"):
-        p = DATA / name
+    # dead/<i>.csv — probe-dead.yml 이 몫마다 따로 쓴 것(2026-10-10)
+    for p in [DATA / "dead_products.csv", DATA / "excluded_products.csv", *sorted((DATA / "dead").glob("*.csv"))]:
         if not p.exists():
             continue
         with p.open(encoding="utf-8-sig") as f:
