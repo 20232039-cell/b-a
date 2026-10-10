@@ -94,7 +94,9 @@ def main() -> None:
         model_name = "fashion-clip(patrickjohncyh/fashion-clip) + 로지스틱 회귀"
 
         def encode(ims):
-            return fc.get_image_features(**fp(images=ims, return_tensors="pt"))
+            o = fc.get_image_features(**fp(images=ims, return_tensors="pt"))
+            # 새 transformers 는 텐서 대신 출력 묶음을 돌려준다 — 투영된 특징은 pooler_output(512)에 있다(2026-10-10 Actions 판에서 깨짐)
+            return o if isinstance(o, torch.Tensor) else o.pooler_output
     else:
         import open_clip
         model, _, prep = open_clip.create_model_and_transforms("ViT-B-32", pretrained="laion2b_s34b_b79k")
