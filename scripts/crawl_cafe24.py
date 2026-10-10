@@ -2195,9 +2195,11 @@ NAME_UNISEX = re.compile(r"\bunisex\b|유니섹스|남녀\s?공용", re.I)
 #
 # 「(M)」은 **안 넣는다.** 같은 매장에서 (M)·(S) 는 가방·슬리퍼의 치수였다
 # (PATENT SPORTS GYM BAG (M) / White). 남성을 뜻하는 (M) 은 한 벌도 못 찾았다.
-NAME_WOMEN = re.compile(r"(?<![A-Za-z0-9])[\(\[]\s*(?:w|women)\s*[\)\]]"
+# 「(woman)」 · 「[WOMAN]」도 여성 표시다 — mood-inside 판매중 49벌이 「(woman) 투웨이 숏패딩」인데 남성복으로 서 있었다(2026-10-10 점검).
+# 괄호 안의 홀로 선 「(man)」도 남성 표시로 받는다(괄호 밖 man 은 SPIDER MAN 같은 이름 조각이라 안 받는다).
+NAME_WOMEN = re.compile(r"(?<![A-Za-z0-9])[\(\[]\s*(?:w|women|woman)\s*[\)\]]"
                         r"|\bwomen'?s?\b|\bwmn\b|여성용?|우먼(?:즈)?", re.I)
-NAME_MEN = re.compile(r"\bmen'?s?\b|남성용?|맨즈", re.I)
+NAME_MEN = re.compile(r"\bmen'?s?\b|(?<![A-Za-z0-9])[\(\[]\s*man\s*[\)\]]|남성용?|맨즈", re.I)
 
 # 매장이 여성판·남성판을 이름 맨 앞의 한 글자로 가른다 — noice 는 같은 옷 24가지를
 # 「W …」와 「M …」 두 벌로 올려 두었고, insilence 는 유니섹스 티셔츠 옆에 「W 수피마
