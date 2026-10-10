@@ -33,6 +33,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import requests
+from urllib.parse import parse_qs, unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
@@ -40,8 +41,10 @@ GARMENTS = {"tops", "outer", "bottoms", "dress", "skirt", "suiting"}
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 # 카페24가 경고창으로 띄우는 말. 「로그인」만 보면 안 된다 — 머리글에도 있다.
-BLOCKED = re.compile(r"회원만\s*접근권한|접근이\s*불가능|회원\s*전용\s*상품|"
-                     r"등급의?\s*회원만|members\s*only", re.I)
+# 경고창(alert · historyBack) 안에 뜬 말만 본다 — 페이지 아무 데나 있는 「MEMBERS ONLY」(nomanual 네이버페이 층 제목)를 잡아
+# 1,192벌을 회원 전용으로 잘못 뺄 뻔했다(2026-10-10 전수).
+BLOCKED = re.compile(r"(?:alert|historyBack)\(\s*['\"][^'\"]{0,80}?(?:회원만\s*접근권한|접근이\s*불가능|회원\s*전용|"
+                     r"등급의?\s*회원만|members\s*only)", re.I)
 _last: dict[str, float] = {}
 _lock = threading.Lock()
 
@@ -69,10 +72,22 @@ def verdict(url: str) -> str | None:
         return None                      # 매장 쪽 일시 오류 — 지웠다고 볼 수 없다
     if BLOCKED.search(r.text):
         return "회원 전용 — 상세를 볼 수 없다"
-    # 상세로 갔는데 상품이 아닌 곳으로 튕겼다
-    if "product_no=" not in r.url and "/product/" not in r.url:
+    # 상세로 갔는데 상품이 아닌 곳으로 튕겼다. **튕겼을 때만** 본다 — 처음엔 「주소에 /product/ · product_no= 가 없으면」으로 봐서
+    # 카페24 가 아닌 매장(ader-error /kr/shop/N · Shopify /products/ · goods_view.php · shop_view/?idx=)의 멀쩡한 상품 10,829벌을
+    # 뺄 뻔했다(2026-10-10 전수 — rebuild 를 끊었다). 튕긴 뒤 주소에 상품을 가리키는 값(번호 · 마지막 경로 토막)이 남았으면 멀쩡하다.
+    if r.history and _product_key(url) not in unquote(r.url):
         return "상품 페이지가 아닌 곳으로 넘어감"
     return None
+
+
+def _product_key(url: str) -> str:
+    u = urlsplit(url)
+    q = parse_qs(u.query)
+    for k in ("product_no", "pno", "goodsNo", "idx", "branduid", "no"):
+        if q.get(k):
+            return q[k][0]
+    seg = [x for x in unquote(u.path).split("/") if x]
+    return seg[-1] if seg else url
 
 
 def main() -> None:
@@ -82,6 +97,7 @@ def main() -> None:
     # 판매중 전부(8만 벌 남짓)를 러너 하나로 돌렸더니 4시간 제한에 걸려 끊겼다(2026-10-10). 매장을 몫으로 나눠 러너 여럿이 돈다 —
     # 몫마다 data/dead/<i>.csv 를 따로 써서 푸시가 엉키지 않는다. crawl_cafe24.load_dropped 가 그 파일들도 읽는다.
     ap.add_argument("--shard", default="", help="i/N — 매장 이름 해시로 나눈 i번째 몫만")
+    ap.add_argument("--recheck", action="store_true", help="지난 명단(dead_products · dead/*.csv)만 다시 연다 — 판정 규칙을 고친 뒤 빨리 바로잡을 때")
     args = ap.parse_args()
 
     sizes = json.loads((DATA / "product_sizes.json").read_text(encoding="utf-8"))
@@ -117,7 +133,7 @@ def main() -> None:
                      and not (d.get("spec") or {}))
             nosize = (r["category_code"] in GARMENTS
                       and not (sizes.get(r["source_url"]) or {}).get("sizes"))
-            if args.all or empty or nosize:
+            if (args.all or empty or nosize) and not args.recheck:
                 cand.append((slug, no, r["source_url"], (d.get("name") or "")[:60]))
 
     # 지난번에 뺀 상품은 목록(products_full)에서 이미 빠져 위에서 안 잡힌다 — 그대로 두면 다음 판에 「멀쩡」으로 돌아와 목록에 다시 선다.

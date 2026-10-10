@@ -13,6 +13,11 @@ on:
   schedule:
     - cron: "40 16 * * 6"      # 매주 일요일 01:40 KST — 주간 수집 뒤 · 월요일 rebuild 앞
   workflow_dispatch:
+    inputs:
+      recheck:
+        description: "true 면 지난 명단만 다시 연다(판정 규칙을 고친 뒤 빨리 바로잡을 때)"
+        required: false
+        default: "false"
 
 env:
   DATA_BRANCH: crawl/cafe24-full-catalog
@@ -46,7 +51,9 @@ jobs:
           python-version: "3.11"
       - run: pip install -q requests
       - name: 판매중 상품 페이지 전부 열어 보기
-        run: python scripts/probe_dead.py --all --workers 16 --shard "${{ matrix.shard }}/8"
+        run: |
+          RC=""; [ "${{ inputs.recheck }}" = "true" ] && RC="--recheck"
+          python scripts/probe_dead.py --all --workers 16 --shard "${{ matrix.shard }}/8" $RC
       - name: commit & push (rebase 후, 3회 재시도)
         shell: bash
         run: |
