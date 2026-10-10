@@ -2172,7 +2172,8 @@ GROUP_OF = {
 }
 
 # 상품 이름이 성별을 대놓고 말하는 경우. 매장이 제 상품에 붙인 말이라 칸보다 정확하다.
-NAME_UNISEX = re.compile(r"\bunisex\b|유니섹스|남녀\s?공용", re.I)
+# 「남여공용」(순서 바뀐 표기)도 — mood-inside 푸퍼 숏패딩 3벌이 남성복이었다(2026-10-10)
+NAME_UNISEX = re.compile(r"\bunisex\b|유니섹스|남[녀여]\s?공용", re.I)
 # 「(W)」·「[W]」가 든 이름은 그 매장의 여성 라인이다. tonywack 313벌 · lmood 179 ·
 # the-coldest-moment 65 · afterpray 21 — 600벌인데 그중 314벌이 남성복으로 들어가 있었다
 # (2026-09-06).
