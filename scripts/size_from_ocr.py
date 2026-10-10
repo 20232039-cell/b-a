@@ -5422,21 +5422,27 @@ def add_size_keys(out: dict, rows_by_url: dict, full_opts: dict) -> Counter:
                 al = set(size_aliases(x)) | {raw(x)}
                 hit = list(dict.fromkeys(k for k, a in oal if al & a))
                 matched.append(hit[0] if len(hit) == 1 else None)
-        ranks = [_opt_rank(k) for k in okeys]
-        ordered = len(okeys) == cols and (cols == 1 or (None not in ranks and ranks == sorted(ranks)))
         named_sizes = [k for k in okeys if size_key(k)]
+        # 옵션에 색이 같이 섞여 있으면(「IVORY · 0 · BROWN」 · 「네온 · S · M」) 색을 빼고 사이즈 말만으로 차례를 본다 — 색 말까지 세면
+        # 칸 수가 안 맞아 판매중 하나 사이즈 옷 3,588벌이 「모름」으로 남았다(2026-10-10 점검).
+        sk = named_sizes if named_sizes and len(named_sizes) < len(okeys) else okeys
+        ranks = [_opt_rank(k) for k in sk]
+        ordered = len(sk) == cols and (cols == 1 or (None not in ranks and ranks == sorted(ranks)))
         if matched and all(matched) and len(set(matched)) == len(matched):
             e["size_keys"], e["size_match"] = matched, "같음"
         elif keys and all(keys) and all(size_key(k) for k in keys) and named_sizes and set(named_sizes) <= set(keys):
             # 표가 옵션보다 칸이 많다 — 다 팔린 사이즈 칸이 표에 남은 것(frizmworks 「M · L · XL」 ↔ 옵션 「M · L」)
             e["size_keys"], e["size_match"] = keys, "같음"
+        elif cols == 1 and len(named_sizes) == 1:
+            # 한 칸 표에 옵션 사이즈도 하나(색 옵션만 여럿) — 그 사이즈다
+            e["size_keys"], e["size_match"] = named_sizes, "같음"
         elif cols == 1 and not named_sizes:
             # 한 칸 표인데 옵션에 사이즈 말이 없다(색만 · 옵션 없음) — 하나 사이즈다
             e["size_keys"], e["size_match"] = ["FREE"], "같음"
         elif ordered and all(m is None or m == okeys[i] for i, m in enumerate(matched or [None] * cols)):
             # 말이 안 겹치거나 일부만 읽혔는데(coor 「S · 5cm · 69cm」) 칸 수가 옵션 수와 같고 옵션이 차례로 서 있으며
             # 겹친 칸은 제자리다 — 차례대로 맞춘다. kirsh 처럼 겹친 칸이 자리가 어긋나면 안 맞춘다.
-            e["size_keys"], e["size_match"] = okeys, "차례로"
+            e["size_keys"], e["size_match"] = sk, "차례로"
         elif not okeys:
             e["size_keys"], e["size_match"] = keys, ("같음" if all(keys) else "모름")
         else:
