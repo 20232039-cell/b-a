@@ -1,0 +1,56 @@
+# 열리지 않는 상품 페이지(404 · 회원 전용 · 홈으로 튕김)를 찾아 목록에서 뺀다 — scripts/probe_dead.py --all.
+#
+# 왜 있는가(2026-10-10): 매장이 상품을 내려도 목록 페이지 · 주간 수집에는 남아 판매중으로 보였다(lookast 1,083벌 중 369벌).
+# 사람 지시 「판매중 표시는 아예 없으면 제외해야 될 듯」. 결과 data/dead_products.csv 를 crawl_cafe24.load_dropped 가 읽어
+# 다음 rebuild 부터 목록에서 뺀다. 한 번 못 받은 것(연결 오류 · 5xx)은 지웠다고 보지 않는다.
+#
+# 비용: 판매중 8만 벌 남짓을 매장마다 0.4초 간격으로 — 러너 하나, 일꾼 16, 1~2시간.
+
+name: probe-dead
+
+on:
+  schedule:
+    - cron: "40 16 * * 6"      # 매주 일요일 01:40 KST — 주간 수집 뒤 · 월요일 rebuild 앞
+  workflow_dispatch:
+
+env:
+  DATA_BRANCH: crawl/cafe24-full-catalog
+
+permissions:
+  contents: read
+
+concurrency:
+  group: probe-dead-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    defaults:
+      run:
+        working-directory: work
+    steps:
+      - uses: actions/checkout@v4
+      - name: 데이터 저장소(비공개) 받기
+        uses: ./.github/actions/data-repo
+        with:
+          token: ${{ secrets.DATA_TOKEN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -q requests
+      - name: 판매중 상품 페이지 전부 열어 보기
+        run: python scripts/probe_dead.py --all --workers 16
+      - name: commit & push (rebase 후, 3회 재시도)
+        shell: bash
+        run: |
+          git add data/dead_products.csv
+          git diff --cached --quiet && { echo "바뀐 것 없음"; exit 0; }
+          git commit -m "열리지 않는 상품 (Actions probe-dead)"
+          for i in 1 2 3; do
+            git pull --rebase --autostash origin "$DATA_BRANCH" && git push && exit 0
+            git rebase --abort 2>/dev/null || true
+            echo "푸시 실패, 재시도 $i"; sleep $((10 + RANDOM % 30))
+          done
+          exit 1

@@ -15,6 +15,8 @@
 
 사용: py scripts/probe_dead.py [--all]
       기본은 「사이즈 없는 옷」과 「상세가 통째로 빈 상품」만 본다.
+      Actions(probe-dead.yml)가 매주 --all 로 판매중 전부를 연다 — 사람 지시(2026-10-10) 「판매중 표시는 아예 없으면 제외」.
+      lookast 판매중 1,083벌 중 369벌이 홈으로 튕기는데 목록엔 판매중으로 남아 있었다.
 """
 from __future__ import annotations
 
@@ -58,8 +60,9 @@ def verdict(url: str) -> str | None:
     """열리지 않으면 까닭을, 멀쩡하면 None."""
     try:
         r = polite(url)
-    except requests.RequestException as e:
-        return f"받기 실패({type(e).__name__})"
+    except requests.RequestException:
+        # 한 번 못 받은 것으로 지웠다고 보지 않는다 — 판매중 전부(--all)를 돌리면 일시 오류가 수십 벌 나온다(2026-10-10 facade-pattern 16벌).
+        return None
     if r.status_code == 404:
         return "404 — 페이지가 없다"
     if r.status_code >= 500:
@@ -108,6 +111,17 @@ def main() -> None:
             if args.all or empty or nosize:
                 cand.append((slug, no, r["source_url"], (d.get("name") or "")[:60]))
 
+    # 지난번에 뺀 상품은 목록(products_full)에서 이미 빠져 위에서 안 잡힌다 — 그대로 두면 다음 판에 「멀쩡」으로 돌아와 목록에 다시 선다.
+    # 지난 명단도 다시 열어 보고, 여전히 안 열리면 남긴다(다시 열리면 빠진다).
+    prev = DATA / "dead_products.csv"
+    if prev.exists():
+        seen = {(c[0], c[1]) for c in cand}
+        with prev.open(encoding="utf-8-sig") as f:
+            for row in csv.DictReader(f):
+                k = ((row.get("브랜드") or "").strip(), (row.get("상품번호") or "").strip())
+                if k[0] and k[1] and row.get("링크") and k not in seen:
+                    cand.append((k[0], k[1], row["링크"].strip(), (row.get("상품명") or "")[:60]))
+                    seen.add(k)
     print(f"열어 볼 상품 {len(cand):,}", file=sys.stderr)
     out, done = [], [0]
 
