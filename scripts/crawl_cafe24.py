@@ -257,7 +257,8 @@ ITEM_TYPE_VOCAB = {
     "블라우스": ["blouse", "블라우스", "블라우스 셔츠", "blouse shirt"],
     "하프셔츠": ["half shirt", "half shirts", "하프 셔츠", "하프셔츠", "반팔 셔츠", "반팔셔츠", "short sleeve shirt", "short-sleeve shirt",
               "short sleeves shirt", "s/s shirt", "1/2 shirt", "하프 슬리브 셔츠", "하프슬리브 셔츠", "half sleeve shirt"],
-    "니트": ["knit", "sweater", "니트", "스웨터", "pullover", "풀오버",
+    # knitwear · pull-over 는 붙여 쓰거나 줄을 넣은 꼴이라 knit · pullover 낱말 경계에 안 걸렸다(arend · ava-molli 판매중 빈 품목 12벌, 2026-10-10)
+    "니트": ["knit", "sweater", "니트", "스웨터", "pullover", "풀오버", "knitwear", "pull-over", "pull over", "니트웨어",
             "turtle neck", "turtleneck", "터틀넥", "mock neck", "모크넥", "하이넥", "high neck"],
     # 「fur」·「shearling」·「sheepskin」은 소재지 품목이 아니다. 품목으로 넣었더니
     # 「FUR MINIBAG」·「Real Mink Fur Hat」·「퍼 블랙 버블백」이 겉옷이 됐다(2026-09-05).
@@ -302,7 +303,8 @@ ITEM_TYPE_VOCAB = {
     "점프수트": ["jumpsuit", "점프수트", "overall", "오버올"],
     # 영문 「cardigan」 · 「카디건」 표기가 니트 쪽 어휘에 있어 3,643벌이 가디건이 아니라 니트로 서 있었다(코덱스 사전 검증 244 ·
     # 2026-10-03). 「Knit Cardigan」은 뒤 낱말 cardigan 이 이겨 가디건이 된다.
-    "가디건": ["가디건", "cardigan", "카디건", "shrug", "슈러그", "볼레로", "bolero",
+    # 트윈 세트는 가디건 + 니트 한 벌 — 겉에 입는 가디건으로 본다(ostkaka · foeto 빈 품목 21벌, 2026-10-10)
+    "가디건": ["가디건", "cardigan", "카디건", "shrug", "슈러그", "볼레로", "bolero", "twin set", "twinset", "트윈 세트", "트윈세트",
             # 카우치안은 두꺼운 니트 가디건 — 이름에 cardigan 이 없으면 빈칸이었다(10벌, 2026-10-05 앱 세션 제보)
             "cowichan", "카우치안", "코위찬"],
     "블레이저": ["blazer", "블레이저", "블레이져", "브레이저", "2버튼 재킷", "3버튼 재킷", "2버튼 자켓", "3버튼 자켓", "2 버튼 재킷", "3 버튼 재킷", "2 버튼 자켓", "3 버튼 자켓", "투버튼 재킷", "쓰리버튼 재킷", "투버튼 자켓", "쓰리버튼 자켓", "two button jacket", "three button jacket", "2b jacket", "3b jacket", "2-button jacket", "3-button jacket", "테일러드 자켓", "테일러드 재킷", "tailored jacket", "테일러드자켓"],
