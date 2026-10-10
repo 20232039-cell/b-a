@@ -5490,9 +5490,33 @@ def unit_guard(out: dict) -> Counter:
         if h is not None and (h >= 75 or (w2 and h >= 66 and h >= 2.2 * w2)):
             half(e, s, "엉덩이")
         # 허벅지 > 엉덩이는 대개 엉덩이 쪽이 틀린 값이다(mardi-mercredi 「엉덩이 34 · 허벅지 44」) — 허벅지는 건드리지 않는다
+        # 소매통 단면은 판매중 옷 가운데값이 19 남짓이고 볼륨 소매도 28 안팎이다 — 33 넘으면 둘레로 적은 것(and-you 「소매통 39 · 53」
+        # 판매중 437벌, 2026-10-10 점검)
+        sv = lo(s.get("소매통"))
+        if sv is not None and sv >= 33:
+            half(e, s, "소매통")
         if s != before:
             e["sizes"] = s     # 새 사전 — 형제에게 물려준 표가 같은 사전을 쓴다(trim_unsold_sizes 주석)
             n["표"] += 1
+    return n
+
+
+def sleeve_from_neck(out: dict, rows_by_url: dict) -> int:
+    """반팔 · 하프셔츠인데 어깨 칸 없이 소매길이가 40 넘으면 목에서 잰 화장이다(돌먼 · 래글런 — anotheroffice 「Pigment Dolman S/S Tee」 48,
+    ader-error 「Half Sleeve Shirt」 62). 판매중 111벌이 소매길이 칸에 앉아 앱이 「소매가 아주 길어요」라고 할 뻔했다(2026-10-10 점검).
+    화장 칸이 이미 있으면 건드리지 않는다."""
+    n = 0
+    for u, e in out.items():
+        r = rows_by_url.get(u) or {}
+        s = e.get("sizes") or {}
+        if r.get("subtype") not in ("반팔", "하프셔츠") or "어깨" in s or "화장" in s or not s.get("소매길이"):
+            continue
+        v = [x for x in s["소매길이"] if isinstance(x, (int, float))]
+        if v and min(v) >= 40:
+            s2 = dict(s)
+            s2["화장"] = s2.pop("소매길이")
+            e["sizes"] = s2
+            n += 1
     return n
 
 
@@ -6849,6 +6873,9 @@ def main():
     ug = unit_guard(out)
     if ug:
         print(f"단면 · 둘레 섞임을 맞춘 표 {ug.pop('표', 0)}벌: {dict(ug.most_common())}")
+    rg = sleeve_from_neck(out, {r["source_url"]: r for r in rows.values()})
+    if rg:
+        print(f"반팔 소매길이를 화장으로 본 표 {rg}벌")
     sk = add_size_keys(out, {r["source_url"]: r for r in rows.values()}, full_opts)
     if sk:
         print(f"사이즈 견줄 말(size_keys): {dict(sk)}")
