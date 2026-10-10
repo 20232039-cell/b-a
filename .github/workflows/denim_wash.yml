@@ -20,6 +20,10 @@ on:
         description: "단계마다 이 정밀도에 닿는 확신 문턱 이상만 적는다"
         required: false
         default: "0.9"
+      model:
+        description: "clip | fashion-clip"
+        required: false
+        default: "clip"
 
 env:
   DATA_BRANCH: crawl/cafe24-full-catalog
@@ -50,9 +54,9 @@ jobs:
       - name: 설치(CPU torch · open_clip · scikit-learn)
         run: |
           pip install -q torch torchvision --index-url https://download.pytorch.org/whl/cpu
-          pip install -q open_clip_torch scikit-learn pillow requests numpy
+          pip install -q open_clip_torch transformers scikit-learn pillow requests numpy
       - name: 사진으로 워싱 단계 판정
-        run: python scripts/denim_wash_photo.py --limit "${{ inputs.limit }}" --min-precision "${{ inputs.min_precision }}"
+        run: python scripts/denim_wash_photo.py --limit "${{ inputs.limit }}" --min-precision "${{ inputs.min_precision }}" --model "${{ inputs.model || 'clip' }}"
       - name: commit & push (rebase 후, 3회 재시도)
         shell: bash
         run: |

@@ -63,6 +63,8 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=0, help="시험용 — 정답 · 빈칸 각각 이만큼만")
     ap.add_argument("--min-precision", type=float, default=0.9)
     ap.add_argument("--min-support", type=int, default=15, help="문턱을 넘은 표본이 이보다 적으면 그 단계는 안 쓴다")
+    # fashion-clip: 패션 상품 사진 80만 장으로 더 배운 CLIP(patrickjohncyh/fashion-clip) — 사람 제안(2026-10-10 「패션클립 그 모델로 하는 건?」).
+    ap.add_argument("--model", choices=["clip", "fashion-clip"], default="clip")
     args = ap.parse_args()
 
     tags = json.loads((DATA / "product_tags_full.json").read_text(encoding="utf-8"))
@@ -85,9 +87,22 @@ def main() -> None:
     print(f"정답 {len(lab)}벌 {dict(Counter(w for *_, w in lab))} · 빈칸 {len(unl)}벌")
 
     import torch
-    import open_clip
-    model, _, prep = open_clip.create_model_and_transforms("ViT-B-32", pretrained="laion2b_s34b_b79k")
-    model.eval()
+    if args.model == "fashion-clip":
+        from transformers import CLIPModel, CLIPProcessor
+        fc = CLIPModel.from_pretrained("patrickjohncyh/fashion-clip").eval()
+        fp = CLIPProcessor.from_pretrained("patrickjohncyh/fashion-clip")
+        model_name = "fashion-clip(patrickjohncyh/fashion-clip) + 로지스틱 회귀"
+
+        def encode(ims):
+            return fc.get_image_features(**fp(images=ims, return_tensors="pt"))
+    else:
+        import open_clip
+        model, _, prep = open_clip.create_model_and_transforms("ViT-B-32", pretrained="laion2b_s34b_b79k")
+        model.eval()
+        model_name = "open_clip ViT-B-32 laion2b_s34b_b79k + 로지스틱 회귀"
+
+        def encode(ims):
+            return model.encode_image(torch.stack([prep(im) for im in ims]))
 
     def embed(urls: list[str]) -> np.ndarray:
         with ThreadPoolExecutor(16) as ex:
@@ -97,7 +112,7 @@ def main() -> None:
         for s in range(0, len(idx), 64):
             part = idx[s: s + 64]
             with torch.no_grad():
-                v = model.encode_image(torch.stack([prep(ims[i]) for i in part]))
+                v = encode([ims[i] for i in part])
                 v = v / v.norm(dim=-1, keepdim=True)
             vecs[part] = v.numpy()
         return vecs
@@ -147,7 +162,7 @@ def main() -> None:
                 items[src] = {"w": str(c), "p": round(float(p.max()), 3)}
     print(f"빈칸 {len(unl)}벌 중 사진으로 정함 {len(items)}벌 {dict(Counter(v['w'] for v in items.values()))}")
     OUT.write_text(json.dumps({
-        "v": date.today().isoformat(), "model": "open_clip ViT-B-32 laion2b_s34b_b79k + 로지스틱 회귀",
+        "v": date.today().isoformat(), "model": model_name,
         "trained_on": dict(Counter(yl.tolist())), "cv_accuracy": round(float(np.mean(pred == yl)), 3),
         "min_precision": args.min_precision, "report": report, "items": items,
     }, ensure_ascii=False, indent=1), encoding="utf-8")
