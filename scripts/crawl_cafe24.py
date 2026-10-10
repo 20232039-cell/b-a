@@ -210,7 +210,7 @@ ITEM_TYPE_VOCAB = {
     # 신발 — 이름 우선순위를 타야 한다. 카테고리 폴백에만 두면 「UNISEX MATTIO ZIP-UP
     # TRAINER」가 「zip-up」(집업)으로 잡혀 상의가 된다. match_vocab 은 가장 긴 낱말이
     # 이기므로 trainer(7)가 zip up(6)을 누른다(2026-09-05).
-    "스니커즈": ["sneaker", "스니커", "trainer", "트레이너", "runner", "러너", "clog", "클로그"],
+    "스니커즈": ["sneaker", "스니커", "trainer", "트레이너", "runner", "러너", "clog", "클로그", "slip-on", "slip on", "슬립온", "슬립 온"],
     "부츠": ["boots", "boot", "부츠", "chelsea boot", "첼시부츠", "워커"],
     "샌들": ["sandal", "샌들", "slipper", "슬리퍼", "mule", "뮬 "],
     "구두": ["loafer", "로퍼", "derby", "더비", "maryjane", "mary jane", "메리제인",
@@ -1134,7 +1134,7 @@ def match_vocab(text: str, vocab: dict) -> str:
 # 스카프이고, 「스카프 톱」은 스카프가 아니라 탑이다. match_vocab 의 「가장 긴 것」과 다르다.
 ACC_TYPE_VOCAB = {
     # 신발
-    "스니커즈": ["sneaker", "스니커", "trainer", "트레이너", "runner", "러너", "clog", "클로그"],
+    "스니커즈": ["sneaker", "스니커", "trainer", "트레이너", "runner", "러너", "clog", "클로그", "slip-on", "slip on", "슬립온", "슬립 온"],
     "부츠": ["boots", "boot", "부츠", "워커", "첼시"],
     "더비": ["derby", "더비", "oxford", "옥스포드", "monk", "monkstrap", "몽크", "몽크스트랩", "brogue", "브로그"],
     "로퍼": ["loafer", "로퍼"],
@@ -1665,10 +1665,13 @@ def match_acc(name: str) -> str:
     if not acc:
         return ""
     at_acc = head_end(n, ACC_TYPE_VOCAB, acc)
+    # 잡화 낱말 뒤의 홀로 선 short · long · 숏 · 롱은 기장이다 — 「logo beanie short」 · 「RUBBER BOOTS SHORT」가 쇼츠 낱말로 읽혀
+    # 비니 · 장화가 숏팬츠로 섰다(판매중 8벌, 2026-10-10 점검).
+    n_cmp = re.sub(r"(?i)(?<![a-z])(?:short|long)(?![a-z])|(?<![가-힣])(?:숏|롱)(?![가-힣])", " ", n)
     for label in ITEM_TYPE_VOCAB:
         if ITEM_TO_CATEGORY.get(label) in ("shoes", None):
             continue        # 신발은 위 어휘가 이미 본다
-        if head_end(n, ITEM_TYPE_VOCAB, label) > at_acc:
+        if head_end(n_cmp, ITEM_TYPE_VOCAB, label) > at_acc:
             return ""       # 옷 낱말이 더 뒤 = 그게 머리 낱말이다
     # 「옷 & 잡화 Set」 — 앞 토막의 머리 낱말이 옷이면 옷 세트다. bittercells 「Iris Shirt & Bonnet Set」가 새 낱말
     # bonnet 때문에 모자가 될 뻔했다(2026-10-01). 앞 토막도 잡화가 머리면(「Knit Beanie & Muffler Set」) 그대로 잡화다.
