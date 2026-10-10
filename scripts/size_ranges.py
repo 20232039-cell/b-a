@@ -69,6 +69,12 @@ def build(rows: list[dict], tags: dict, sizes: dict) -> dict:
         if e.get("size_match") not in ("같음", "차례로") or e.get("axis") == "head" or e.get("size_parts"):
             continue
         keys = e.get("size_keys") or []
+        # 기장 · 핏 선택이 사이즈와 엇갈린 표(arend 「xs-short · xs-long …」, lookast 「S · M · SHORT S」)는 같은 사이즈 말이 두 번 나온다 —
+        # 숏 · 롱 값이 한 사이즈에 섞여 범위를 흐린다. 표본에서 뺀다(판매중 210벌, 2026-10-10 점검).
+        kk = [k for k in keys if k]
+        if len(kk) != len(set(kk)):
+            dropped["기장 · 핏 선택이 섞인 표"] += 1
+            continue
         sz = e.get("sizes") or {}
         t = (tags.get(r["source_url"]) or {}).get("tags") or {}
         cons = _tags(t, "construction") | _tags(t, "pants_type")
