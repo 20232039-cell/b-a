@@ -44,7 +44,7 @@ jobs:
           python-version: "3.11"
       - name: 설치(CPU torch · transformers)
         run: |
-          pip install -q torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -q torch torchvision --index-url https://download.pytorch.org/whl/cpu
           pip install -q transformers pillow requests numpy
       - name: 판독 · 조금씩 커밋
         # 러너가 GitHub 쪽 종료 신호로 한꺼번에 꺼진 적이 있다(2026-10-11 ocr-paddle 12조각 중 11조각이 13분 만에, 끝 커밋도 못 하고).
@@ -67,10 +67,13 @@ jobs:
           start=$(date +%s); cap=${{ inputs.limit }}; cap=${cap:-0}; did=0
           while [ $(( $(date +%s) - start )) -lt 18000 ]; do
             n=640; if [ "$cap" -gt 0 ]; then n=$(( cap - did )); [ $n -gt 640 ] && n=640; [ $n -le 0 ] && break; fi
-            python -u scripts/worn_photo.py --shard "${{ matrix.shard }}/20" --limit $n --hours 5 2>&1 \
-              | grep -v "Loading weights\|download https\|iB/s" | tee /tmp/round | tee -a "$LOG" | tail -3 || true
+            rc=0; python -u scripts/worn_photo.py --shard "${{ matrix.shard }}/20" --limit $n --hours 5 > /tmp/raw 2>&1 || rc=$?
+            grep -v "Loading weights\|download https\|iB/s" /tmp/raw > /tmp/round || true
+            cat /tmp/round >> "$LOG"; tail -3 /tmp/round
             push || true
             did=$(( did + n ))
             grep -q "대상 0" /tmp/round && break
+            # 스크립트가 죽으면(설치 빠짐 등) 멈춘다 — 2026-10-11 worn-photo 가 torchvision 없이 5시간 헛돌며 로그만 커밋했다
+            if [ "$rc" != 0 ] && grep -q "Traceback" /tmp/round; then echo "스크립트 실패 — 멈춤"; exit 1; fi
           done
           push
