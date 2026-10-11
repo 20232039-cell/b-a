@@ -72,7 +72,7 @@ jobs:
           start=$(date +%s); cap=${{ inputs.limit }}; cap=${cap:-0}; did=0
           while [ $(( $(date +%s) - start )) -lt 18000 ]; do
             n=30; if [ "$cap" -gt 0 ]; then n=$(( cap - did )); [ $n -gt 30 ] && n=30; [ $n -le 0 ] && break; fi
-            rc=0; python -u scripts/ocr_paddle.py --shard "${{ matrix.shard }}/12" --brands "${{ inputs.brands }}" --limit $n --hours 5 > /tmp/raw 2>&1 || rc=$?
+            rc=0; python -u scripts/ocr_paddle.py --shard "${{ matrix.shard }}/12" --brands "${{ inputs.brands }}" --limit $n --hours 5 2>&1 | tee /tmp/raw | grep "^    " || rc=${PIPESTATUS[0]}
             grep -v "Loading weights\|download https\|iB/s" /tmp/raw > /tmp/round || true
             cat /tmp/round >> "$LOG"; free -m | sed -n 2p >> "$LOG"; tail -3 /tmp/round
             push || true

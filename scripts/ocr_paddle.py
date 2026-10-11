@@ -20,6 +20,7 @@ import csv
 import io
 import json
 import re
+import resource
 import sys
 import time
 import zlib
@@ -122,7 +123,9 @@ def main() -> None:
         return
 
     from paddleocr import PaddleOCR
-    ocr = PaddleOCR(lang="korean", use_angle_cls=False, show_log=False)
+    # rec_batch_num=1 — 글자 칸을 여러 개 묶어 읽으면 가장 긴 칸에 맞춰 메모리를 잡아, 글자 빽빽한 상세 그림 한 장에 5.5GB까지
+    # 뛰었다(러너가 「shutdown signal」로 꺼진 까닭, 2026-10-11 재 봄). 한 칸씩이면 1.5GB 에서 멈춘다.
+    ocr = PaddleOCR(lang="korean", use_angle_cls=False, show_log=False, rec_batch_num=1, enable_mkldnn=False)
     t0 = time.time()
     with open(out, "a", encoding="utf-8") as fh:
         for k, (r, urls) in enumerate(targets, 1):
@@ -133,7 +136,13 @@ def main() -> None:
             got = 0
             for u in urls:
                 try:
-                    im = Image.open(io.BytesIO(requests.get(u, headers=UA, timeout=25).content)).convert("RGB")
+                    im = Image.open(io.BytesIO(requests.get(u, headers=UA, timeout=25).content))
+                    # 러너가 토막 한가운데서 꺼진다(2026-10-11) — 어느 그림에서인지 Actions 로그에 남긴다(크기 · 메모리)
+                    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024
+                    print(f"    {r['brand_slug']} {r['product_no']} {im.size} 최대메모리 {rss}MB", flush=True)
+                    if im.size[0] * im.size[1] > 60_000_000:
+                        continue         # 6천만 화소 넘는 그림은 풀기만 해도 수 GB — 건너뛴다
+                    im = im.convert("RGB")
                     got += 1
                     lines += read_lines(ocr, im)
                 except Exception:
