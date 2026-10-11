@@ -1783,6 +1783,23 @@ def load_manual_mat() -> dict[str, list]:
     return out
 
 
+_PADDLE: dict[str, str] | None = None
+
+
+def load_paddle() -> dict[str, str]:
+    """crawl/ocr_paddle/*.jsonl → {source_url: 글}(scripts/ocr_paddle.py). 한 번만 읽는다."""
+    global _PADDLE
+    if _PADDLE is None:
+        _PADDLE = {}
+        for p in sorted((CRAWL / "ocr_paddle").glob("*.jsonl")):
+            for l in p.read_text(encoding="utf-8").splitlines():
+                if l.strip():
+                    o = json.loads(l)
+                    if o.get("text"):
+                        _PADDLE[o["source_url"]] = o["text"]
+    return _PADDLE
+
+
 def blend_of_brand(slug: str, items: list[dict], why: dict | None = None, raw: dict | None = None) -> dict[str, list]:
     """source_url → 혼용률(mat). 못 읽었거나 버린 상품은 없다. why 를 주면 상품마다 (까닭, 고른 출처)를 적는다(전후 대조용).
     raw 를 주면 고른 혼용률을 읽어 낸 원문 줄을 적는다(mat_raw — 표준 이름으로 합치기 전 「Superfine Merino Wool 100%」)."""
@@ -1823,6 +1840,11 @@ def blend_of_brand(slug: str, items: list[dict], why: dict | None = None, raw: d
         texts = {"desc": desc, "dt": dt, "spec": spec_texts(d.get("spec"))[0],
                  "sizeguide": (sg.get(no) or {}).get("size_text") or "", "browser": btext,
                  "ocr": _per if len(_per) > len(_raw) else _raw}
+        # PaddleOCR 로 다시 읽은 그림 글(scripts/ocr_paddle.py — 혼용률이 빈 옷만)은 같은 그림 글 출처 뒤에 붙인다.
+        # 판독기가 깨뜨리는 「1O0」 「COT TON」 「72NYLON」은 product_desc.ocr_fix 로 바로잡는다.
+        _pd = load_paddle().get(r["source_url"])
+        if _pd:
+            texts["ocr"] = (texts["ocr"] + "\n" if texts["ocr"] else "") + product_desc.ocr_fix(_pd)
         cs, lost = [], {}
         for k in _MAT_SRC:
             t = texts[k]

@@ -1,0 +1,73 @@
+# 혼용률이 빈 옷의 상세 그림을 PaddleOCR(한글)로 다시 읽는다 — scripts/ocr_paddle.py 머리말.
+# 사람 지시(2026-10-11 시험 뒤 「일단 진행해 봐」). 결과 data/crawl/ocr_paddle/<조각>.jsonl 은 다음 rebuild 의
+# tag_items.blend_of_brand 가 그림 글 출처로 쓴다. 이미 읽은 상품은 건너뛰므로 다시 돌려도 새 상품만 읽는다.
+#
+# 비용: 상품 하나 약 10초(그림 4장) — 혼용률 빈 8천 벌 남짓을 12조각으로 나눠 조각마다 2시간 안팎.
+
+name: ocr-paddle
+
+on:
+  workflow_dispatch:
+    inputs:
+      brands:
+        description: "쉼표로 나눈 매장(비우면 전부)"
+        required: false
+        default: ""
+      limit:
+        description: "조각마다 상품 수 상한(0 이면 전부)"
+        required: false
+        default: "0"
+
+env:
+  DATA_BRANCH: crawl/cafe24-full-catalog
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ocr-paddle-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    defaults:
+      run:
+        working-directory: work
+    steps:
+      - uses: actions/checkout@v4
+      - name: 데이터 저장소(비공개) 받기
+        uses: ./.github/actions/data-repo
+        with:
+          token: ${{ secrets.DATA_TOKEN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: 설치(PaddleOCR 2.x · CPU)
+        run: |
+          pip install -q "paddlepaddle==2.6.2" "paddleocr==2.8.1" "numpy<2" pillow requests
+      - name: 판독
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p data/crawl/ocr_paddle
+          python -u scripts/ocr_paddle.py --shard "${{ matrix.shard }}/12" --brands "${{ inputs.brands }}" \
+            --limit "${{ inputs.limit }}" --hours 5 2>&1 | tee "data/crawl/ocr_paddle/${{ matrix.shard }}.log" | tail -100
+      - name: commit & push (rebase 후, 5회 재시도)
+        if: always()
+        shell: bash
+        run: |
+          git add data/crawl/ocr_paddle/ 2>/dev/null || true
+          git diff --cached --quiet && { echo "바뀐 것 없음"; exit 0; }
+          git commit -m "혼용률 PaddleOCR 판독 조각 ${{ matrix.shard }} (Actions)"
+          for i in 1 2 3 4 5; do
+            git pull --rebase --autostash origin "$DATA_BRANCH" && git push && exit 0
+            git rebase --abort 2>/dev/null || true
+            echo "푸시 실패, 재시도 $i"; sleep $((10 + RANDOM % 40))
+          done
+          exit 1

@@ -922,6 +922,26 @@ def _mix_check(text: str, run: list[dict], used: list, ocr: bool = False, mc: bo
     return out, labeled, (run[0]["s"], run[-1]["e"])
 
 
+_OCR_FIBER_EN = sorted(set(_MIX_FUZZY) | {"wool", "silk", "spandex", "polyester"}, key=len, reverse=True)
+_OCR_SPLIT = re.compile(r"(?i)\b(?:" + "|".join(
+    re.escape(w[:i]) + " " + re.escape(w[i:]) for w in _OCR_FIBER_EN if len(w) >= 5 for i in range(2, len(w) - 1)) + r")\b")
+_OCR_FIB = "|".join(_OCR_FIBER_EN)
+_OCR_GLUED = re.compile(r"(?i)(?<![A-Za-z])(" + _OCR_FIB + r")(?![A-Za-z])")
+
+
+def ocr_fix(text: str) -> str:
+    """판독기가 흔히 깨뜨리는 혼용률 글자를 바로잡는다 — PaddleOCR 그림 글(crawl/ocr_paddle)에만 쓴다(till-i-die 시험 2026-10-11).
+    「COT TON」 → 「COTTON」, 「72NYLON」 · 「POLYESTER25」 → 칸을 띄운다, 「1O0」 · 「7ONYLON」(숫자 사이 · 뒤 영문 O) → 「100」 · 「70」,
+    「COTTON77 I POLYESTER23」(칸막이 | 를 I 로 읽음) → 「/」. 섬유 이름 곁만 고친다 — 「100D」 「30S」 「2XL」은 그대로."""
+    t = _OCR_SPLIT.sub(lambda m: m.group().replace(" ", ""), text or "")
+    t = re.sub(r"(?i)(\d)[Oo](?=(?:" + _OCR_FIB + r")(?![A-Za-z]))", r"\g<1>0", t)
+    t = _OCR_GLUED.sub(r" \1 ", t)
+    t = re.sub(r"(?<![A-Za-z])\d[\dOo]*(?![A-Za-z\d])",
+               lambda m: m.group().replace("O", "0").replace("o", "0"), t)
+    t = re.sub(r"[ \t]{2,}", " ", t)
+    return re.sub(r"(?<=\d) [Il|] (?=[A-Za-z가-힣])", " / ", t)
+
+
 def mix_cands(text: str, ocr: bool = False) -> tuple[list[dict], int, dict]:
     """한 글에서 검산을 통과한 혼용률 후보들 → ([{"m": 결과, "lab": 이름표, "span": (시작, 끝)}], 버린 줄기 수,
     버린 줄기의 흔적 {"parts": 부위 이름들, "ev": [(섬유들, 숫자 뺀 글)]}).
