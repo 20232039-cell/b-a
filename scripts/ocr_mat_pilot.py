@@ -101,17 +101,32 @@ def main() -> None:
                 part = im.crop((0, top, w, min(h, top + 1200)))
                 import numpy as np
                 res = ocr.ocr(np.array(part), cls=False) or []
+                # PaddleOCR 은 표의 칸마다 따로 낸다(「소재」 · 「COTTON 100」이 다른 줄) — 혼용률 해석기는 이름표가 같은 줄에
+                # 있어야 % 없는 숫자를 받으므로, 세로 가운데가 글자 높이 절반 안인 칸들을 왼쪽부터 한 줄로 잇는다.
+                boxes = []
                 for page in res:
                     for box in page or []:
                         try:
-                            lines.append(str(box[1][0]))
+                            ys = [p[1] for p in box[0]]
+                            xs = [p[0] for p in box[0]]
+                            boxes.append(((min(ys) + max(ys)) / 2, max(ys) - min(ys), min(xs), str(box[1][0])))
                         except Exception:
                             pass
+                boxes.sort()
+                row: list = []
+                for b in boxes:
+                    if row and abs(b[0] - row[-1][0]) > max(8, 0.5 * max(b[1], row[-1][1])):
+                        lines.append(" ".join(x[3] for x in sorted(row, key=lambda x: x[2])))
+                        row = []
+                    row.append(b)
+                if row:
+                    lines.append(" ".join(x[3] for x in sorted(row, key=lambda x: x[2])))
         text = "\n".join(lines)
         got, _, lp = product_desc.mix_cands(text, ocr=True)
         m, why = product_desc.mix_pick(got) if got else ([], "none")
         has_pct = bool(PCT.search(text))
-        status = "읽음" if m else ("%는 있음" if has_pct else "% 없음")
+        has_label = bool(re.search(r"(?i)소재|fabric|material|composition|혼용", text))
+        status = "읽음" if m else ("%는 있음" if has_pct else ("소재 낱말은 있음" if has_label else "% 없음"))
         st[(r["brand_slug"], status)] += 1
         items[r["source_url"]] = {"brand": r["brand_slug"], "name": r["name"], "status": status, "mat": m,
                                   "text": text[:1500]}
