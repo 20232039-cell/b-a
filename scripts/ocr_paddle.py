@@ -135,10 +135,10 @@ def main() -> None:
                     lines += read_lines(ocr, im)
                 except Exception:
                     continue
-            if not got:
-                continue                 # 그림을 하나도 못 받았으면 적지 않는다 — 적으면 다음 판에 「읽음」으로 건너뛴다
+            # 그림을 하나도 못 받았으면 글 없이 「fail」로 적는다 — 안 적으면 조각마다 다시 붙들고 맴돈다(워크플로가 조금씩 끊어 돈다).
+            # 다시 읽히려면 그 줄을 지우면 된다.
             fh.write(json.dumps({"source_url": r["source_url"], "brand_slug": r["brand_slug"],
-                                 "product_no": str(r["product_no"]), "text": "\n".join(lines),
+                                 "product_no": str(r["product_no"]), "text": "\n".join(lines), **({} if got else {"fail": True}),
                                  "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}, ensure_ascii=False) + "\n")
             fh.flush()
             if k % 25 == 0:

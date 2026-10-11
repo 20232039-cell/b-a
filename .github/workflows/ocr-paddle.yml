@@ -51,23 +51,31 @@ jobs:
       - name: 설치(PaddleOCR 2.x · CPU)
         run: |
           pip install -q "paddlepaddle==2.6.2" "paddleocr==2.8.1" "numpy<2" pillow requests
-      - name: 판독
+      - name: 판독 · 조금씩 커밋
+        # 러너가 GitHub 쪽 종료 신호로 한꺼번에 꺼진 적이 있다(2026-10-11 ocr-paddle 12조각 중 11조각이 13분 만에, 끝 커밋도 못 하고).
+        # 그래서 60개씩 끊어 돌고 그때마다 커밋한다 — 꺼져도 잃는 것은 한 토막뿐이고, 다시 돌리면 읽은 것은 건너뛴다.
         shell: bash
         run: |
-          set -o pipefail
           mkdir -p data/crawl/ocr_paddle
-          python -u scripts/ocr_paddle.py --shard "${{ matrix.shard }}/12" --brands "${{ inputs.brands }}" \
-            --limit "${{ inputs.limit }}" --hours 5 2>&1 | tee "data/crawl/ocr_paddle/${{ matrix.shard }}.log" | tail -100
-      - name: commit & push (rebase 후, 5회 재시도)
-        if: always()
-        shell: bash
-        run: |
-          git add data/crawl/ocr_paddle/ 2>/dev/null || true
-          git diff --cached --quiet && { echo "바뀐 것 없음"; exit 0; }
-          git commit -m "혼용률 PaddleOCR 판독 조각 ${{ matrix.shard }} (Actions)"
-          for i in 1 2 3 4 5; do
-            git pull --rebase --autostash origin "$DATA_BRANCH" && git push && exit 0
-            git rebase --abort 2>/dev/null || true
-            echo "푸시 실패, 재시도 $i"; sleep $((10 + RANDOM % 40))
+          LOG=data/crawl/ocr_paddle/${{ matrix.shard }}.log
+          push() {
+            git add data/crawl/ocr_paddle/ 2>/dev/null || true
+            git diff --cached --quiet && return 0
+            git commit -qm "혼용률 PaddleOCR 판독 조각 ${{ matrix.shard }} (Actions)"
+            for i in 1 2 3 4 5; do
+              git pull -q --rebase --autostash origin "$DATA_BRANCH" && git push -q && return 0
+              git rebase --abort 2>/dev/null || true
+              sleep $((10 + RANDOM % 40))
+            done
+            return 1
+          }
+          start=$(date +%s); cap=${{ inputs.limit }}; cap=${cap:-0}; did=0
+          while [ $(( $(date +%s) - start )) -lt 18000 ]; do
+            n=60; if [ "$cap" -gt 0 ]; then n=$(( cap - did )); [ $n -gt 60 ] && n=60; [ $n -le 0 ] && break; fi
+            python -u scripts/ocr_paddle.py --shard "${{ matrix.shard }}/12" --brands "${{ inputs.brands }}" --limit $n --hours 5 2>&1 \
+              | grep -v "Loading weights\|download https\|iB/s" | tee /tmp/round | tee -a "$LOG" | tail -3 || true
+            push || true
+            did=$(( did + n ))
+            grep -q "대상 0" /tmp/round && break
           done
-          exit 1
+          push

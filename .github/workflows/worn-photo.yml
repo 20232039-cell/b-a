@@ -46,23 +46,31 @@ jobs:
         run: |
           pip install -q torch --index-url https://download.pytorch.org/whl/cpu
           pip install -q transformers pillow requests numpy
-      - name: 판정
+      - name: 판독 · 조금씩 커밋
+        # 러너가 GitHub 쪽 종료 신호로 한꺼번에 꺼진 적이 있다(2026-10-11 ocr-paddle 12조각 중 11조각이 13분 만에, 끝 커밋도 못 하고).
+        # 그래서 640개씩 끊어 돌고 그때마다 커밋한다 — 꺼져도 잃는 것은 한 토막뿐이고, 다시 돌리면 읽은 것은 건너뛴다.
         shell: bash
         run: |
-          set -o pipefail
           mkdir -p data/worn_photo
-          python -u scripts/worn_photo.py --shard "${{ matrix.shard }}/20" --limit "${{ inputs.limit }}" --hours 5 2>&1 \
-            | grep -v "Loading weights" | tee "data/worn_photo/${{ matrix.shard }}.log" | tail -60
-      - name: commit & push (rebase 후, 5회 재시도)
-        if: always()
-        shell: bash
-        run: |
-          git add data/worn_photo/ 2>/dev/null || true
-          git diff --cached --quiet && { echo "바뀐 것 없음"; exit 0; }
-          git commit -m "착용컷 판정 조각 ${{ matrix.shard }} (Actions)"
-          for i in 1 2 3 4 5; do
-            git pull --rebase --autostash origin "$DATA_BRANCH" && git push && exit 0
-            git rebase --abort 2>/dev/null || true
-            echo "푸시 실패, 재시도 $i"; sleep $((10 + RANDOM % 40))
+          LOG=data/worn_photo/${{ matrix.shard }}.log
+          push() {
+            git add data/worn_photo/ 2>/dev/null || true
+            git diff --cached --quiet && return 0
+            git commit -qm "착용컷 판정 조각 ${{ matrix.shard }} (Actions)"
+            for i in 1 2 3 4 5; do
+              git pull -q --rebase --autostash origin "$DATA_BRANCH" && git push -q && return 0
+              git rebase --abort 2>/dev/null || true
+              sleep $((10 + RANDOM % 40))
+            done
+            return 1
+          }
+          start=$(date +%s); cap=${{ inputs.limit }}; cap=${cap:-0}; did=0
+          while [ $(( $(date +%s) - start )) -lt 18000 ]; do
+            n=640; if [ "$cap" -gt 0 ]; then n=$(( cap - did )); [ $n -gt 640 ] && n=640; [ $n -le 0 ] && break; fi
+            python -u scripts/worn_photo.py --shard "${{ matrix.shard }}/20" --limit $n --hours 5 2>&1 \
+              | grep -v "Loading weights\|download https\|iB/s" | tee /tmp/round | tee -a "$LOG" | tail -3 || true
+            push || true
+            did=$(( did + n ))
+            grep -q "대상 0" /tmp/round && break
           done
-          exit 1
+          push

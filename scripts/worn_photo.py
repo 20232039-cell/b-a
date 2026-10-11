@@ -79,7 +79,10 @@ def main() -> None:
                 break
             part = rows[s: s + 64]
             ims = list(ex.map(fetch, [img for _, img in part]))
-            ok = [(x, im) for x, im in zip(part, ims) if im is not None]   # 못 받은 사진은 적지 않는다 — 다음 판에 다시 잰다
+            ok = [(x, im) for x, im in zip(part, ims) if im is not None]
+            for (u, img), im in zip(part, ims):
+                if im is None:           # 못 받은 사진은 fr 없이 적는다 — 안 적으면 조각마다 다시 붙들고 맴돈다(다시 재려면 그 줄을 지운다)
+                    fh.write(json.dumps({"u": u, "img": img, "fr": None}, ensure_ascii=False) + "\n")
             for b in range(0, len(ok), 16):
                 chunk = ok[b: b + 16]
                 with torch.no_grad():
