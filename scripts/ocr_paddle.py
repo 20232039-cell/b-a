@@ -51,13 +51,16 @@ def pick_images(o: dict, n: int) -> list[str]:
 
 def read_lines(ocr, im: Image.Image) -> list[str]:
     import numpy as np
+    # 조각을 늘 1000×1200 으로 맞춘다(흰 바탕에 붙임) — 크기가 제각각이면 Paddle 이 모양마다 메모리를 새로 잡아 불어나고,
+    # 러너가 「shutdown signal」로 꺼졌다(2026-10-11, 12조각 중 8조각이 6~15분 만에). 너무 긴 그림(줄인 뒤 4만 px 넘게)은 앞만 읽는다.
     w, h = im.size
-    if w > 1000:
-        im = im.resize((1000, int(h * 1000 / w)))
-        w, h = im.size
+    im = im.resize((1000, max(1, int(h * 1000 / w))))
+    w, h = im.size
     lines: list[str] = []
-    for top in range(0, h, 1200):
-        res = ocr.ocr(np.array(im.crop((0, top, w, min(h, top + 1200)))), cls=False) or []
+    for top in range(0, min(h, 40000), 1200):
+        tile = Image.new("RGB", (1000, 1200), (255, 255, 255))
+        tile.paste(im.crop((0, top, w, min(h, top + 1200))), (0, 0))
+        res = ocr.ocr(np.array(tile), cls=False) or []
         boxes = []
         for page in res:
             for box in page or []:
