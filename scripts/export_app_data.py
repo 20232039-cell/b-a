@@ -201,6 +201,36 @@ def wash_of(text: str) -> str:
     return ""
 
 
+_WORN: dict | None = None
+_WORN_GARMENT = {"Outerwear", "Tops", "Shirts", "Knitwear", "Pants", "Denim", "Skirts", "Dresses"}
+
+
+def worn(r: dict) -> int:
+    """대표 사진이 착용컷인가(1) — scripts/worn_photo.py 가 잰 옷 분할 넓이로(앱 세션 부탁 2026-10-11, 브랜드 명패 · 카드에 착용컷 먼저).
+    사람 부위(팔 · 다리 0.8% 넘게, 머리카락 · 얼굴 1.3% 넘게)가 보이거나, 멀리서 찍은 전신 컷(윗옷 · 하의가 각 3% 넘고 얼굴 ·
+    머리카락이 조금이라도, 옷이면 신발이라도)이면 착용컷. 신발은 살색 신발을 다리로 칠하므로 다리 6% 넘게만.
+    표본 157장 사람 눈 대조: 정밀도 100% · 재현율 97%(놓친 것은 얼굴 · 팔다리 없는 허리 · 치마 컷). 잰 사진이 지금 대표 사진과
+    다르면(매장이 바꿈) 0."""
+    global _WORN
+    if _WORN is None:
+        _WORN = {}
+        for p in sorted((DATA / "worn_photo").glob("*.jsonl")):
+            for l in p.read_text(encoding="utf-8").splitlines():
+                if l.strip():
+                    o = json.loads(l)
+                    _WORN[o["u"]] = (o["img"], o["fr"])
+    img, fr = _WORN.get(r["source_url"], ("", None))
+    if fr is None or img != r.get("image_url"):
+        return 0
+    g = lambda *ks: sum(fr.get(str(k), 0) for k in ks)  # noqa: E731
+    hf, arm, leg, shoe = g(2, 11), g(14, 15), g(12, 13), g(9, 10)
+    if r.get("category") == "Shoes":
+        return int(hf >= 0.013 or arm >= 0.008 or leg >= 0.06)
+    return int(arm + leg >= 0.008 or hf >= 0.013
+               or (g(4) >= 0.03 and g(5, 6) >= 0.03
+                   and (hf >= 0.004 or (shoe >= 0.005 and r.get("category") in _WORN_GARMENT))))
+
+
 _DW_PHOTO: dict | None = None
 
 
@@ -321,7 +351,8 @@ def thin_row(r: dict, tags: dict, bi: dict, ci: dict, pref: dict) -> dict:
                                                        or (t.get("material") or [""])[0] == "데님") else ""),
                  ("dt", bottom_details(r.get("name") or "", r.get("subtype") or "") if r.get("category") in DT_CATS else []),
                  ("ax", AX_FLAGS.get(f'{r["brand_slug"]}-{r["product_no"]}', 0) & 7),
-                 ("pt", 1 if AX_FLAGS.get(f'{r["brand_slug"]}-{r["product_no"]}', 0) & 8 else 0)):
+                 ("pt", 1 if AX_FLAGS.get(f'{r["brand_slug"]}-{r["product_no"]}', 0) & 8 else 0),
+                 ("wn", worn(r))):
         if v:
             row[k] = v
     st = sorted(style_tags(t), key=lambda x: (TAG_DF[x], x))[:TAG_MAX]
@@ -902,6 +933,7 @@ def main() -> int:
             "tg": "스타일 태그 — tags 번호 배열, 드문 것부터 많아야 6(없으면 안 적힘)",
             "ax": "기준별 비슷한 옷이 있는 기준 비트 — 1 색·무늬 · 2 모양 · 4 소재(similar-axis 조각, 0 이면 안 적힘)",
             "pt": "1 이면 무늬 있음(스트라이프 · 체크 · 프린트 …) — 무지 · 모름은 안 적힘",
+            "wn": "1 이면 대표 사진(m)이 착용컷(사람이 입은 컷 — 얼굴이 잘려도 팔 · 다리가 보이면). 옷 분할 모델 판정, 아니거나 아직 안 쟀으면 안 적힘",
             "dt": "하의 디테일 — 카고 · 카펜터 · 퍼티그 · 파라슈트 · 벌룬 중 여럿(배열). 하의 · 데님 · 스커트에만, 상품명 · 세부품목에서 읽는다. "
                   "세부품목(t)과 따로라 데님 카고는 t=데님팬츠 · dt=[카고]. 없으면 안 적힘",
             "dw": "데님 워싱 단계 — 연청 · 중청 · 진청 · 생지 · 흑청 · 블랙 · 화이트 · 컬러 중 하나. 데님 옷에만, 대표색 · 이름 · 옵션 낱말로 정하고 "
