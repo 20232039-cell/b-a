@@ -499,8 +499,10 @@ _MIX_PART_END = re.compile(rf"(?i)(?<![A-Za-z가-힣])({_MIX_PART})(?:[ _]?(\d))
 _MIX_SEP = " \t\n,/+&|;:：-–—()[].·•▪*_"
 _MIX_NUM = re.compile(r"(?<![\d.,])(\d{1,5}(?:\.\d{1,2})?)(?!\d)(?:(\s?[%％])|([XxoO○°])(?![A-Za-z가-힣]))?")
 # 숫자 뒤가 단위면 혼용률이 아니다 — 「면 30수」 「COTTON 20'S」 「나일론 66」 뒤의 숫자, 「12oz」 …
-_MIX_UNIT = re.compile(r"(?i)\s*(?:cm|mm|kg|g\b|수|s\b|['’]s|oz|d\b|gg|게이지|데니어|cc|ml|원|krw|만|ea|개|벌|장|호|년|월|일|"
-                       r"세|도|°c|x\s?\d|\*\s?\d|[.,]\d|/\s?\d|~|-\s?\d)")
+# 단위는 같은 줄에서만 보고, 한 글자 한글 단위 뒤에 한글이 이어지면 단위가 아니다 — 그림 글이 「소재 COTTON 100」 다음 줄에
+# 「세탁 DRY CLEANING」을 두면 「100\n세」를 「100세」로 읽어 혼용률을 버렸다(till-i-die PaddleOCR 시험 36벌 전부, 2026-10-11).
+_MIX_UNIT = re.compile(r"(?i)[ \t]*(?:cm|mm|kg|g\b|(?:수|원|만|개|벌|장|호|년|월|일|세|도)(?![가-힣])|s\b|['’]s|oz|d\b|gg|게이지|데니어|"
+                       r"cc|ml|krw|ea|°c|x\s?\d|\*\s?\d|[.,]\d|/\s?\d|~|-\s?\d)")
 # 섬유 이름 뒤 괄호 속 다른 말 — 「폴리에스터 (Polyester) 100%」(carlyn) · 「Tencel(Lyocell) 33%」(espionage) · 「VISCOSE(RAYON) 29%」(noice)
 _MIX_WORDS_BEFORE = re.compile(r"([A-Za-z가-힣]+(?:[ \t\-(]+[A-Za-z가-힣]+){0,4})\)?[ \t]*[:：\-]?[ \t]*$")
 _MIX_WORDS_AFTER = re.compile(r"[ \t]*([A-Za-z가-힣]+(?:[ \t\-]+[A-Za-z가-힣]+){0,3})")
