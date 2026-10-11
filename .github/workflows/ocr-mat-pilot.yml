@@ -41,11 +41,17 @@ jobs:
         run: |
           pip install -q "paddlepaddle==2.6.2" "paddleocr==2.8.1" "numpy<2" pillow requests
       - name: 시험 판독
-        run: python scripts/ocr_mat_pilot.py --brands "${{ inputs.brands }}" --limit "${{ inputs.limit }}"
-      - name: commit & push
+        # 로그를 파일로도 남겨 데이터 저장소에 올린다 — 이 세션은 Actions 로그를 못 읽는다(첫 판이 8분 만에 「취소」로 끝났다)
         shell: bash
         run: |
-          git add data/ocr_mat_pilot.json
+          set -o pipefail
+          python -u scripts/ocr_mat_pilot.py --brands "${{ inputs.brands }}" --limit "${{ inputs.limit }}" 2>&1 | tee data/ocr_mat_pilot.log | tail -200
+          free -m | tee -a data/ocr_mat_pilot.log
+      - name: commit & push
+        if: always()
+        shell: bash
+        run: |
+          git add data/ocr_mat_pilot.json data/ocr_mat_pilot.log 2>/dev/null || true
           git diff --cached --quiet && { echo "바뀐 것 없음"; exit 0; }
           git commit -m "혼용률 PaddleOCR 시험 (Actions)"
           for i in 1 2 3; do

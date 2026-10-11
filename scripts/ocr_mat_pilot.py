@@ -94,11 +94,11 @@ def main() -> None:
                 continue
             # 긴 상세 그림은 세로로 잘라 읽는다(판독기가 긴 그림을 줄여 글자가 뭉개진다)
             w, h = im.size
-            if w > 1200:
-                im = im.resize((1200, int(h * 1200 / w)))
+            if w > 1000:
+                im = im.resize((1000, int(h * 1000 / w)))
                 w, h = im.size
-            for top in range(0, h, 1600):
-                part = im.crop((0, top, w, min(h, top + 1600)))
+            for top in range(0, h, 1200):
+                part = im.crop((0, top, w, min(h, top + 1200)))
                 import numpy as np
                 res = ocr.ocr(np.array(part), cls=False) or []
                 for page in res:
@@ -115,7 +115,7 @@ def main() -> None:
         st[(r["brand_slug"], status)] += 1
         items[r["source_url"]] = {"brand": r["brand_slug"], "name": r["name"], "status": status, "mat": m,
                                   "text": text[:1500]}
-        if k % 20 == 0:
+        if k % 5 == 0:
             print(f"  {k}/{len(sel)} · {time.time() - t0:.0f}초 · {dict(st)}", flush=True)
     summary = {"n": len(sel), "by": {f"{b}|{s}": n for (b, s), n in st.items()},
                "read": sum(n for (_, s), n in st.items() if s == "읽음"), "secs": round(time.time() - t0)}
