@@ -1,0 +1,56 @@
+# 혼용률을 PaddleOCR(한글)로 다시 읽어 보는 시험 — scripts/ocr_mat_pilot.py 머리말.
+# 사람 지시(2026-10-11 「깃액션으로 가능해?」 → 「해 봐」). 혼용률을 싣지 않고 얼마나 읽히는지만 잰다 — data/ocr_mat_pilot.json.
+
+name: ocr-mat-pilot
+
+on:
+  workflow_dispatch:
+    inputs:
+      brands:
+        description: "쉼표로 나눈 매장"
+        required: false
+        default: "till-i-die,roem"
+      limit:
+        description: "시험할 상품 수"
+        required: false
+        default: "200"
+
+env:
+  DATA_BRANCH: crawl/cafe24-full-catalog
+
+permissions:
+  contents: read
+
+jobs:
+  pilot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    defaults:
+      run:
+        working-directory: work
+    steps:
+      - uses: actions/checkout@v4
+      - name: 데이터 저장소(비공개) 받기
+        uses: ./.github/actions/data-repo
+        with:
+          token: ${{ secrets.DATA_TOKEN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: 설치(PaddleOCR 2.x · CPU)
+        run: |
+          pip install -q "paddlepaddle==2.6.2" "paddleocr==2.8.1" "numpy<2" pillow requests
+      - name: 시험 판독
+        run: python scripts/ocr_mat_pilot.py --brands "${{ inputs.brands }}" --limit "${{ inputs.limit }}"
+      - name: commit & push
+        shell: bash
+        run: |
+          git add data/ocr_mat_pilot.json
+          git diff --cached --quiet && { echo "바뀐 것 없음"; exit 0; }
+          git commit -m "혼용률 PaddleOCR 시험 (Actions)"
+          for i in 1 2 3; do
+            git pull --rebase --autostash origin "$DATA_BRANCH" && git push && exit 0
+            git rebase --abort 2>/dev/null || true
+            sleep $((10 + RANDOM % 30))
+          done
+          exit 1
