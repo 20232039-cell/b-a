@@ -939,7 +939,7 @@ def ocr_fix(text: str) -> str:
     t = re.sub(r"(?<![A-Za-z])\d[\dOo]*(?![A-Za-z\d])",
                lambda m: m.group().replace("O", "0").replace("o", "0"), t)
     t = re.sub(r"[ \t]{2,}", " ", t)
-    return re.sub(r"(?<=\d) [Il|] (?=[A-Za-z가-힣])", " / ", t)
+    return re.sub(r"(?<=[\d%]) [Il|] (?=[A-Za-z가-힣])", " / ", t)
 
 
 def mix_cands(text: str, ocr: bool = False) -> tuple[list[dict], int, dict]:
