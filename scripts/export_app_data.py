@@ -226,6 +226,9 @@ def worn(r: dict) -> int:
     hf, arm, leg, shoe = g(2, 11), g(14, 15), g(12, 13), g(9, 10)
     if r.get("category") == "Shoes":
         return int(hf >= 0.013 or arm >= 0.008 or leg >= 0.06)
+    # 옷이 아닌 상품(가방 · 벨트 · 모자 …)은 사람이 입은 옷도 보여야 한다 — 살색 가죽 벨트를 팔로 칠한 것(1차 결과 눈 대조 2026-10-11)
+    if r.get("category") not in _WORN_GARMENT and g(4, 5, 6, 7) < 0.03:
+        return 0
     return int(arm + leg >= 0.008 or hf >= 0.013
                or (g(4) >= 0.03 and g(5, 6) >= 0.03
                    and (hf >= 0.004 or (shoe >= 0.005 and r.get("category") in _WORN_GARMENT))))
