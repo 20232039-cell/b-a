@@ -1800,6 +1800,25 @@ def load_paddle() -> dict[str, str]:
     return _PADDLE
 
 
+_LLM_MAT: dict[str, str] | None = None
+
+
+def load_llm_mat() -> dict[str, str]:
+    """data/llm/mat.jsonl — 상세 그림에서 옮겨 적은 혼용률 글."""
+    global _LLM_MAT
+    if _LLM_MAT is None:
+        _LLM_MAT = {}
+        p = DATA / "llm" / "mat.jsonl"
+        if p.exists():
+            for l in p.read_text(encoding="utf-8").splitlines():
+                if l.strip():
+                    o = json.loads(l)
+                    c = ((o.get("out") or {}).get("composition") or "").strip()
+                    if c:
+                        _LLM_MAT[o["u"]] = c.replace("\n", " / ")
+    return _LLM_MAT
+
+
 def blend_of_brand(slug: str, items: list[dict], why: dict | None = None, raw: dict | None = None) -> dict[str, list]:
     """source_url → 혼용률(mat). 못 읽었거나 버린 상품은 없다. why 를 주면 상품마다 (까닭, 고른 출처)를 적는다(전후 대조용).
     raw 를 주면 고른 혼용률을 읽어 낸 원문 줄을 적는다(mat_raw — 표준 이름으로 합치기 전 「Superfine Merino Wool 100%」)."""
@@ -1845,6 +1864,9 @@ def blend_of_brand(slug: str, items: list[dict], why: dict | None = None, raw: d
         _pd = load_paddle().get(r["source_url"])
         if _pd:
             texts["ocr"] = (texts["ocr"] + "\n" if texts["ocr"] else "") + product_desc.ocr_fix(_pd)
+        _lm = load_llm_mat().get(r["source_url"])
+        if _lm:
+            texts["ocr"] = (texts["ocr"] + "\n" if texts["ocr"] else "") + "소재: " + _lm
         cs, lost = [], {}
         for k in _MAT_SRC:
             t = texts[k]
