@@ -4890,6 +4890,15 @@ def load_manual_items() -> dict[tuple[str, str], dict]:
     return out
 
 
+def load_manual_colors() -> dict[tuple[str, str], str]:
+    """data/manual_colors.csv — 브랜드, 상품번호, 색. 이름 · 설명으로 대표색을 못 정한 상품에만 쓴다."""
+    p = DATA / "manual_colors.csv"
+    if not p.exists():
+        return {}
+    return {((r.get("브랜드") or "").strip(), (r.get("상품번호") or "").strip()): (r.get("색") or "").strip()
+            for r in csv.DictReader(p.open(encoding="utf-8-sig")) if (r.get("색") or "").strip()}
+
+
 def load_dropped() -> set[tuple[str, str]]:
     """목록에서 뺄 상품 — 열리지 않는 것과 사람이 빼라고 한 것.
 
@@ -5350,6 +5359,7 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
     tbl_of: dict[tuple, str] = {}   # 같은 옷인지 가릴 때 실측표를 견준다
     gone = load_dropped()
     manual_items = load_manual_items()
+    manual_colors = load_manual_colors()
     seeded = seed_slugs()
     dropped_unseeded: dict[str, int] = {}
     for path in sorted(CRAWL_DIR.glob("*.jsonl")):
@@ -5593,7 +5603,7 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
                 "gender_target": classify_gender(cats, brand_gender.get(slug, "UNISEX"), *g_args, why=_gb),
                 "price": d["price"],
                 "representative_color": pick_color(d["name"], d.get("description", ""), d.get("spec"),
-                                                   d.get("options")),
+                                                   d.get("options")) or manual_colors.get((slug, str(d["product_no"])), ""),
                 "season": season_of(d["name"], d.get("detail_images"), d.get("category_names")),
                 "status": "SOLD_OUT" if (is_soldout(d) or d.get("delisted")) else "ON_SALE",
                 "image_url": d["image_url"],
