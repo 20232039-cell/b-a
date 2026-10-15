@@ -35,6 +35,7 @@ jobs:
         run: |
           python scripts/size_from_ocr.py > /tmp/size.log
           python scripts/photo_fill.py | tail -4   # 사진으로 소매 · 넥라인 채우기(확신 ≥0.8, 2026-10-05)
+          python scripts/llm_fill.py
           python scripts/refine_items.py | tail -2   # 소매 실측 · 태그로 반팔 · 롱슬리브 · 하프셔츠 다듬기(2026-10-05)
           python scripts/similar_items.py | tail -3   # 상품마다 비슷한 옷 40벌(v3, 2026-10-05) — 10분 · 3GB
           tail -3 /tmp/size.log
@@ -46,7 +47,8 @@ jobs:
         shell: bash
         run: |
           git add data/products_full.csv data/product_sizes.json data/product_tags_full.json
-          if [ -f data/photo_pred.json ]; then git add data/photo_pred.json; fi   # 사진 판정(photo_fill, 2026-10-05)
+          if [ -f data/photo_pred.json ]; then git add data/photo_pred.json; fi
+          if [ -f data/denim_wash_photo.json ]; then git add data/denim_wash_photo.json; fi   # 사진 판정(photo_fill, 2026-10-05)
           if [ -f data/similar_items.json ]; then git add data/similar_items.json; fi   # 비슷한 옷(similar_items, 2026-10-05)
           if [ -f data/similar_axes.json ]; then git add data/similar_axes.json; fi     # 기준별 비슷한 옷(색·무늬 · 모양 · 소재, 2026-10-06)
           for f in data/styles.csv data/styles_stats.json data/gender_basis.json; do if [ -f "$f" ]; then git add "$f"; fi; done
