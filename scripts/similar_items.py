@@ -280,6 +280,11 @@ def main() -> int:
     brands = sorted(set(brand))
     bi = {b: i for i, b in enumerate(brands)}
     BB = brand_matrix(rows, tags, brands)
+    # 브랜드마다 비슷한 브랜드 20곳(B 높은 순) — 앱 코디 카드 짝 고르기(brand-similar.json, 앱 세션 부탁 2026-10-15)
+    (DATA / "brand_similar.json").write_text(json.dumps({
+        "about": "브랜드 비슷함 B(0~1, 전체 쌍 백분위) — 장르 코사인 0.5 + 태그 벡터 코사인 0.5. 지도 밖 브랜드 쌍은 0.4. rebuild 마다 다시 계산",
+        "brands": {b: [[brands[j], round(float(BB[i, j]), 3)] for j in np.argsort(-BB[i])[:20] if j != i]
+                   for i, b in enumerate(brands)}}, ensure_ascii=False), encoding="utf-8")
     EMB_NAME = pick_emb_dir([r["source_url"] for r in rows])
     E, EI = load_emb(EMB_NAME)
     print(f"브랜드 {len(brands)} · 사진 {len(EI):,}장 · 특징 {VOC:,} ({time.time() - t0:.0f}s)", flush=True)

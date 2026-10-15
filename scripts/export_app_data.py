@@ -676,6 +676,10 @@ def main() -> int:
     sr = size_ranges.build(rows, tags, sizes)
     srn = write(out / "size-ranges.json", sr, args.dry)
     files["size-ranges.json"] = {"n": len(sr["rows"]), "bytes": srn}
+    bsp = DATA / "brand_similar.json"
+    if bsp.exists():
+        bs = json.loads(bsp.read_text(encoding="utf-8"))
+        files["brand-similar.json"] = {"n": len(bs.get("brands") or {}), "bytes": write(out / "brand-similar.json", bs, args.dry)}
     print(f"범위표 {len(sr['rows']):,}칸 · 뺀 표본 {sr['excluded']}")
     print(f"검색 조각 {len(search):,}줄 · 평문 {sn/1048576:.2f} MB (이름만)")
 
