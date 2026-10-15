@@ -5360,6 +5360,8 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
     gone = load_dropped()
     manual_items = load_manual_items()
     manual_colors = load_manual_colors()
+    _rf = DATA / "rep_image_fix.json"
+    rep_fix = json.loads(_rf.read_text(encoding="utf-8")) if _rf.exists() else {}   # 대표 사진이 색 칩이면 갤러리 사진(check_rep_images.py)
     seeded = seed_slugs()
     dropped_unseeded: dict[str, int] = {}
     for path in sorted(CRAWL_DIR.glob("*.jsonl")):
@@ -5606,7 +5608,7 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
                                                    d.get("options")) or manual_colors.get((slug, str(d["product_no"])), ""),
                 "season": season_of(d["name"], d.get("detail_images"), d.get("category_names")),
                 "status": "SOLD_OUT" if (is_soldout(d) or d.get("delisted")) else "ON_SALE",
-                "image_url": d["image_url"],
+                "image_url": rep_fix.get(d.get("source_url", ""), d["image_url"]),
                 # 회원 전용·리다이렉트로 홈 주소만 남은 건(badblood 208, haleine 14)은 cafe24 표준 상세 주소로 복원.
                 # 카페24 가 아닌 매장(platform 칸이 있는 줄)은 수집기가 적은 주소가 곧 상품 주소다 — 여기에 카페24
                 # 꼴을 붙여 렉토·Hyein Seo·PAF 710벌이 「…/products/x/product/detail.html?product_no=…」가 됐다(2026-09-23).
