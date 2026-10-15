@@ -146,6 +146,15 @@ def fold_mood(raw: str) -> list[str]:
     return out
 
 
+def chip_mood(v: dict, old: list[str]) -> list[str]:
+    """칩: 2점 전부 + 1점으로 셋까지."""
+    g = {k: w for k, w in (v.get("g") or {}).items() if k in MOOD_APP}
+    key = lambda k: (-g[k], old.index(k) if k in old else 99, MOOD_APP.index(k))
+    two = sorted([k for k in g if g[k] >= 2], key=key)
+    one = sorted([k for k in g if g[k] == 1], key=key)
+    return two + one[:max(0, 3 - len(two))]
+
+
 GENDER_CODE = {"WOMENSWEAR": "W", "MENSWEAR": "M", "UNISEX": "U"}
 
 
@@ -639,6 +648,11 @@ def main() -> int:
         for r in csv.DictReader(f):
             brand_name[r["slug"]] = r.get("name") or r["slug"]
             brand_mood[r["slug"]] = fold_mood(r.get("mood_tags") or "")
+    _lp = DATA / "mood_genre_labels.json"
+    if _lp.exists():
+        for s, v in (json.loads(_lp.read_text(encoding="utf-8")).get("labels") or {}).items():
+            if s in brand_mood and v.get("g") and not v.get("unk"):
+                brand_mood[s] = chip_mood(v, brand_mood[s]) or brand_mood[s]
 
     # 상품 주소도 매장마다 앞머리가 같다 — 사진과 같은 방식으로 접는다.
     # `by` 는 아래에서 만들어지므로 여기서는 rows 에서 바로 모은다(안 그러면 NameError).
