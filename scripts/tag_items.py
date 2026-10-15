@@ -1815,7 +1815,7 @@ def load_llm_mat() -> dict[str, str]:
                     o = json.loads(l)
                     c = ((o.get("out") or {}).get("composition") or "").strip()
                     if c:
-                        _LLM_MAT[o["u"]] = c.replace("\n", " / ")
+                        _LLM_MAT[o["u"]] = c
     return _LLM_MAT
 
 
