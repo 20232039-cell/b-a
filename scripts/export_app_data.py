@@ -31,6 +31,7 @@ from urllib.parse import urlsplit
 from pathlib import Path
 
 import product_desc
+import haeyo
 import size_from_ocr
 import tag_items
 from item_hier import HIER   # 품목 계층(갈래 → 큰 품목 → 세부) — catalog.json 에 싣는다. build_vocab 을 거치면 크롤러 의존성이 딸려 온다
@@ -829,7 +830,7 @@ def main() -> int:
     se_of = {o["u"]: (o.get("out") or {}).get("season") or [] for o in _llm("card")}
     card_of: dict[str, dict[str, dict]] = defaultdict(dict)
     for o in _llm("card3"):
-        t = ((o.get("out") or {}).get("s") or "").strip()
+        t = haeyo.to_haeyo(((o.get("out") or {}).get("s") or "").strip())[0]
         k = pid_of.get(o["u"])
         if t and k:
             card_of[k.rsplit("-", 1)[0]][k] = {"s": t, **({"se": se_of[o["u"]]} if se_of.get(o["u"]) else {})}
@@ -849,7 +850,8 @@ def main() -> int:
     for o in _llm("brandcard"):
         x = o.get("out") or {}
         if o["u"] in by and x.get("summary"):
-            bcards[o["u"]] = {"s": x["summary"], "sig": x.get("signature") or [], "price": x.get("price", ""), "fit": x.get("fit", "")}
+            bcards[o["u"]] = {"s": haeyo.to_haeyo(x["summary"])[0], "sig": x.get("signature") or [],
+                              "price": haeyo.to_haeyo(x.get("price", ""))[0], "fit": haeyo.to_haeyo(x.get("fit", ""))[0]}
     if bcards:
         files["brand-cards.json"] = {"n": len(bcards), "bytes": write(out / "brand-cards.json", bcards, args.dry)}
     print(f"AI 요약 {sum(len(m) for m in card_of.values()):,}벌 · 브랜드 카드 {len(bcards)}곳")
