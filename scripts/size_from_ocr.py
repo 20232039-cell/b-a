@@ -4790,6 +4790,34 @@ def _sg_adds(new: dict, old: dict, same_ok: bool = False) -> bool:
     return True
 
 
+def load_llm() -> dict[str, dict]:
+    """data/llm/size.jsonl"""
+    p = DATA / "llm" / "size.jsonl"
+    got: dict[str, dict] = {}
+    if not p.exists():
+        return got
+    for l in p.read_text(encoding="utf-8").splitlines():
+        if not l.strip():
+            continue
+        o = json.loads(l)
+        x = o.get("out") or {}
+        names = [str(n).strip() for n in (x.get("names") or []) if str(n).strip()]
+        if not names or (x.get("unit") or "cm") != "cm":
+            continue
+        sizes = {}
+        for k, v in (x.get("rows") or {}).items():
+            lab = canon_label(str(k).strip())
+            try:
+                nums = [float(t) for t in v]
+            except (TypeError, ValueError):
+                continue
+            if lab and len(nums) == len(names) and all(0 < t < 300 for t in nums):
+                sizes[lab] = nums
+        if sizes:
+            got[o["u"]] = {"size_names": names, "sizes": sizes}
+    return got
+
+
 def load_manual() -> dict[str, dict]:
     """data/manual_sizes.csv — 사람이 매장 그림을 보고 옮겨 적은 실측.
 
@@ -6769,6 +6797,24 @@ def main():
         src["manual"] += 1
     if man_gap:
         print(f"사람 값에 빠진 칸을 기계 표에서 붙임 {man_gap}벌")
+    _slug = {r["source_url"]: r["brand_slug"] for r in rows.values()}
+    llm_new = llm_named = 0
+    for u, ent in load_llm().items():
+        if u not in _slug:
+            continue
+        cur = out.get(u)
+        if not cur or not cur.get("sizes"):
+            out[u] = {"brand_slug": _slug[u], "source": "llm", **ent}
+            llm_new += 1
+        elif cur.get("source") != "manual" and not cur.get("size_names"):
+            same = [k for k in ent["sizes"] if k in cur["sizes"]]
+            if same and all(len(cur["sizes"][k]) == len(ent["size_names"])
+                            and all(a is None or abs(a - b) <= 1 for a, b in zip(cur["sizes"][k], ent["sizes"][k])) for k in same):
+                cur["size_names"] = ent["size_names"]
+                llm_named += 1
+    src["llm"] += llm_new
+    if llm_new or llm_named:
+        print(f"LLM 표: 새로 {llm_new}벌 · 이름 {llm_named}벌")
     wrong = load_wrong() - set(load_manual())
     for u in wrong:
         if out.pop(u, None) is not None:
