@@ -47,7 +47,7 @@ DATA = HERE.parent / "data"
 OUT = DATA / "similar_items.json"
 
 # ── 설정값(바꾸면 version 도 바뀐다) ──────────────────────────────────────────
-PHOTO_W = 0.5          # 사진 반 · 태그 반 — 0.3 · 0.7 · 0.9 보다 4차에서 나았다
+PHOTO_W = 0.8          # 2026-10-16
 FINE_BONUS = 0.10      # 세부 품목 같음
 PEN_W = 0.10           # 기장 · 넥라인 · 소매 묶음 어긋남(축마다)
 PEN_AXES = ("length", "neckline", "sleeve_length")
@@ -66,7 +66,7 @@ AXW = {"silhouette": .15, "material": .06, "design_element": .10, "construction"
        "finish_wash": .02, "color": .15, "neckline": .10, "sleeve_length": .06, "pants_type": .04, "hardware": .015, "function": .005}
 AXES = [a for a in AXW if a != "color"]
 KEEP, PER_BRAND, TOP_T, TOP_BRANDS, PER_NEIGHBOR = 40, 3, 150, 20, 5
-RERANK_N = 12          # 앞 12벌은 사진 닮음만으로 다시 줄 세운다(대표님 8차 57 → 73%, 2026-10-07)
+RERANK_N = 0           # 2026-10-16 끔(사진 .8)
 # 기준별 목록(앱 「비슷한 옷」 글자 줄 — 색·무늬 · 모양 · 소재, 대표님 결정 2026-10-06). 같은 큰 품목 안에서 그 기준 위주로 다시 찾는다.
 # 「전체 40벌 안 재정렬」로는 그 기준으로만 아주 비슷한 옷이 이미 빠져 있을 수 있어서 따로 뽑는다(코덱스 검토).
 #   cp 색·무늬 = .5·[무지끼리 · 또는 무늬(패턴 · 프린트)가 하나라도 같음] + .3·색(같음 1 · 계열 .6) + .1·워싱 · 가공 + .1·닮음
