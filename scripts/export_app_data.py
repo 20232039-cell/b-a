@@ -818,6 +818,41 @@ def main() -> int:
             buckets[int(k.rsplit("-", 1)[1]) % dp][k] = v
         for i, b in enumerate(buckets):
             desc_bytes += write(out / "descs" / f"{slug}.{i}.json", b, args.dry)
+    # AI 요약 — cards/<slug>.json {id: {s, se}} · brand-cards.json
+    def _llm(name):
+        p_ = DATA / "llm" / f"{name}.jsonl"
+        if p_.exists():
+            for l in p_.read_text(encoding="utf-8").splitlines():
+                if l.strip():
+                    yield json.loads(l)
+    pid_of = {r["source_url"]: f'{r["brand_slug"]}-{r["product_no"]}' for r in rows}
+    se_of = {o["u"]: (o.get("out") or {}).get("season") or [] for o in _llm("card")}
+    card_of: dict[str, dict[str, dict]] = defaultdict(dict)
+    for o in _llm("card3"):
+        t = ((o.get("out") or {}).get("s") or "").strip()
+        k = pid_of.get(o["u"])
+        if t and k:
+            card_of[k.rsplit("-", 1)[0]][k] = {"s": t, **({"se": se_of[o["u"]]} if se_of.get(o["u"]) else {})}
+    card_parts_of: dict[str, int] = {}
+    for slug, m in sorted(card_of.items()):
+        cp = max(1, -(-len(json.dumps(m, ensure_ascii=False, separators=(",", ":")).encode()) // DESC_PART_BYTES))
+        card_parts_of[slug] = cp
+        if cp == 1:
+            write(out / "cards" / f"{slug}.json", m, args.dry)
+            continue
+        buckets = [{} for _ in range(cp)]
+        for k, v in m.items():
+            buckets[int(k.rsplit("-", 1)[1]) % cp][k] = v
+        for i, b in enumerate(buckets):
+            write(out / "cards" / f"{slug}.{i}.json", b, args.dry)
+    bcards = {}
+    for o in _llm("brandcard"):
+        x = o.get("out") or {}
+        if o["u"] in by and x.get("summary"):
+            bcards[o["u"]] = {"s": x["summary"], "sig": x.get("signature") or [], "price": x.get("price", ""), "fit": x.get("fit", "")}
+    if bcards:
+        files["brand-cards.json"] = {"n": len(bcards), "bytes": write(out / "brand-cards.json", bcards, args.dry)}
+    print(f"AI 요약 {sum(len(m) for m in card_of.values()):,}벌 · 브랜드 카드 {len(bcards)}곳")
     split = [s for s, n in parts_of.items() if n > 1]
     print(f"설명 조각 {len(desc_of)}곳 · 합계 {desc_bytes/1048576:.1f} MB · "
           f"쪼갠 매장 {len(split)}곳 ({', '.join(f'{s}×{parts_of[s]}' for s in sorted(split))})")
@@ -934,6 +969,9 @@ def main() -> int:
     for slug, dp in parts_of.items():
         files[f"descs/{slug}.json" if dp == 1 else f"descs/{slug}.<0..{dp-1}>.json"] = {
             "n": len(desc_of[slug]), "parts": dp}
+    for slug, cp in card_parts_of.items():
+        files[f"cards/{slug}.json" if cp == 1 else f"cards/{slug}.<0..{cp-1}>.json"] = {
+            "n": len(card_of[slug]), "parts": cp}
     for slug, sp in sim_parts_of.items():
         files[f"similar/{slug}.json" if sp == 1 else f"similar/{slug}.<0..{sp-1}>.json"] = {
             "n": len(sim_of[slug]), "parts": sp}
@@ -964,7 +1002,7 @@ def main() -> int:
         "brand_fields": {"mo": "무드 — moods 안의 말만 쓴다",
                          "p": "사진 주소 앞머리", "up": "상품 주소 앞머리",
                          "bp": "brands 조각 수", "dp": "descs 조각 수(0 이면 없음)", "sp": "similar 조각 수(0 이면 없음)",
-                         "ap": "similar-axis 조각 수(0 이면 없음)"},
+                         "ap": "similar-axis 조각 수(0 이면 없음)", "cp": "cards(AI 요약) 조각 수(0 이면 없음)"},
         # 상세 조각(brands/<slug>.json) 한 벌에만 있는 열쇠
         "detail_fields": {"u": "상품 주소 — brands[b].up 을 앞에 붙인다",
                           "mat": "혼용률 — [{p: 부위(빈칸이면 구분 없음), v: [[소재, %], …]}, …]"},
@@ -982,7 +1020,7 @@ def main() -> int:
         "hier": [{"sec": sec, "cat": cat, **({"base": base} if base else {}), "subs": subs} for sec, cat, base, subs in HIER],
         "brands": [{"i": bi[s], "s": s, "n": brand_name.get(s, s), "p": pref.get(s, ""),
                     "c": len(by.get(s, [])), "bp": shards_of.get(s, 1), "dp": parts_of.get(s, 0), "sp": sim_parts_of.get(s, 0),
-                    "ap": ax_parts_of.get(s, 0),
+                    "ap": ax_parts_of.get(s, 0), "cp": card_parts_of.get(s, 0),
                     "im": next((r.get("image_url") for r in by.get(s, []) if r.get("image_url")), ""),
                     **({"up": upref[s]} if upref.get(s) else {}),
                     **({"mo": brand_mood[s]} if brand_mood.get(s) else {})}
