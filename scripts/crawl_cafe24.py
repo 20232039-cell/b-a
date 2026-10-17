@@ -5293,6 +5293,31 @@ _PR_DENIM = re.compile(r"(?i)denim|데님|jean|(?<![가-힣])진(?![가-힣])")
 _PR_DENIM_NOT = re.compile(r"(?i)denim[\s-]*(?:waist|look|like|effect)|faux|trompe|wool|울|mesh|메쉬|leather|레더")
 
 
+_JK_FLEECE = re.compile(r"(?i)fleece|플리스|후리스")
+_JK_FLEECE_NOT = re.compile(r"(?i)lin(?:ed|ing|er)|라이닝|안감")
+_JK_HOOD = re.compile(r"(?i)hood|후드|후디")
+_JK_ZIP = re.compile(r"(?i)zip|집업|지퍼")
+_JK_SWEAT = re.compile(r"(?i)sweat|스웻|스웨트|terry|테리|(?<![a-z])rib(?:bed)?(?![a-z])")
+_JK_KNIT = re.compile(r"(?i)knit|니트")
+_JK_KNIT_NOT = re.compile(r"(?i)twill|트윌|denim|데님|knit\s*collar|니트\s*(?:카라|배색)|panel|패널")
+
+
+def _jacket_refine(name: str) -> str | None:
+    """「재킷 · 점퍼」 가운데 조직이 분명한 것(앱 세션 2026-10-17).
+    - 플리스: 이름에 fleece · 플리스 · 후리스(안감 · 라이너 뜻은 뺀다).
+    - 후드집업: 스웻 · 테리 · 립 조직에 후드 + 집업 · 후디 자켓.
+    - 니트집업: 니트에 집업(트윌 · 데님 몸판에 니트 배색은 뺀다).
+    셰르파 · 저지는 안감 · 트랙탑일 수 있어 그대로 둔다."""
+    n = name or ""
+    if _JK_FLEECE.search(n):
+        return None if _JK_FLEECE_NOT.search(n) else "플리스"
+    if _JK_SWEAT.search(n) and _JK_HOOD.search(n) and (_JK_ZIP.search(n) or re.search(r"(?i)hoodie\s*jacket|후디\s*자켓", n)):
+        return "후드집업"
+    if _JK_KNIT.search(n) and _JK_ZIP.search(n) and not _JK_KNIT_NOT.search(n):
+        return "니트집업"
+    return None
+
+
 def _pants_refine(name: str, url: str) -> str | None:
     """「팬츠」를 데님 · 슬랙스로 옮길 근거가 분명할 때만 그 품목. 판매중 6,508벌 중 약 480벌(2026-10-10 상품표로 잼).
     - 데님: 대표 소재가 데님이고 이름에 데님 · 진 낱말(「DENIM-WAIST WOOL TROUSERS」 · faux denim 은 뺀다) — 「Denim Balloon Pants」.
@@ -5544,6 +5569,10 @@ def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
             # 근거는 이름 + 지난 판 대표 소재 · 봉제 태그. 애매하면 팬츠로 둔다.
             if item == "팬츠" and not (fix and fix.get("품목")):
                 item = _pants_refine(d.get("name") or "", d.get("source_url") or "") or item
+            if item in ("재킷", "점퍼") and not (fix and fix.get("품목")):
+                item = _jacket_refine(head_name) or item
+                if code == "outer" and ITEM_TO_CATEGORY.get(item) == "tops" and not (fix and fix.get("분류")):
+                    code = "tops"
             if int(d.get("price") or 0) >= PLACEHOLDER_PRICE:
                 dropped_junk += 1     # 자리표시 값 — 룩북·이벤트 페이지다
                 continue
