@@ -161,6 +161,10 @@ def pmood_fix(g: dict, bg: dict) -> dict:
     return g
 
 
+# 「허리께 · 가슴께」 — 바로 안 읽힌다(대표님 2026-10-17)
+KKE = re.compile(r"(가슴|허리선|허리|골반|엉덩이|무릎|종아리|발목|허벅지|중간|어깨|배꼽)께")
+
+
 def chip_mood(v: dict, old: list[str]) -> list[str]:
     """칩: 2점 전부 + 1점으로 셋까지."""
     g = {k: w for k, w in (v.get("g") or {}).items() if k in MOOD_APP}
@@ -857,8 +861,10 @@ def main() -> int:
     pid_of = {r["source_url"]: f'{r["brand_slug"]}-{r["product_no"]}' for r in rows}
     se_of = {o["u"]: (o.get("out") or {}).get("season") or [] for o in _llm("card")}
     card_of: dict[str, dict[str, dict]] = defaultdict(dict)
+    fix_of = {o["u"]: (o.get("out") or {}).get("s") for o in _llm("cardfix") if (o.get("out") or {}).get("s")}
     for o in _llm("card3"):
-        t = haeyo.to_haeyo(((o.get("out") or {}).get("s") or "").strip())[0]
+        t = haeyo.to_haeyo((fix_of.get(o["u"]) or (o.get("out") or {}).get("s") or "").strip())[0]
+        t = KKE.sub(r"\1쯤", t)
         k = pid_of.get(o["u"])
         if t and k:
             card_of[k.rsplit("-", 1)[0]][k] = {"s": t, **({"se": se_of[o["u"]]} if se_of.get(o["u"]) else {})}
