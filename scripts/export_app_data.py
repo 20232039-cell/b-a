@@ -676,8 +676,9 @@ def main() -> int:
         pid_ = {r["source_url"]: (r["brand_slug"], f'{r["brand_slug"]}-{r["product_no"]}') for r in rows}
         for l in _pp.read_text(encoding="utf-8").splitlines():
             o = json.loads(l) if l.strip() else {}
-            g = {k: int(v) for k, v in ((o.get("out") or {}).get("g") or {}).items() if k in MOOD_APP and v in (1, 2)}
-            if g and o.get("u") in pid_:
+            g = {("스트릿" if k == "스트리트" else k): int(v) for k, v in ((o.get("out") or {}).get("g") or {}).items()}
+            g = {k: v for k, v in g.items() if k in MOOD_APP and v in (1, 2)}
+            if g and len(g) <= 5 and o.get("u") in pid_:
                 b_, k_ = pid_[o["u"]]
                 PMOOD[k_] = dict(sorted(pmood_fix(g, brand_chip.get(b_, {})).items(), key=lambda x: (-x[1], MOOD_APP.index(x[0]))))
         print(f"상품 무드 {len(PMOOD):,}벌")
