@@ -48,6 +48,8 @@ MINED: dict[tuple, dict] = {}
 COLOR_GROUP: dict[str, int] = {}
 # 기준별 「비슷한 옷」(similar_axes.json) 의 상품 비트 — 줄의 ax(1 색·무늬 · 2 모양 · 4 소재) · pt(1 무늬 있음). 상품 id 열쇠.
 AX_FLAGS: dict[str, int] = {}
+# 상품 무드(pmood) — 상품 id → {무드: 2|1}
+PMOOD: dict[str, dict[str, int]] = {}
 SIM_MIN = 0.70    # 비슷한 옷 점수 문턱 — 이 아래는 내보내지 않는다(사람 답: 0.70 아래는 아홉 벌에 한 벌꼴로만 골랐다, 대표님 결정 2026-10-06)
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -145,6 +147,18 @@ def fold_mood(raw: str) -> list[str]:
         if x in MOOD_APP and x not in out:
             out.append(x)
     return out
+
+
+def pmood_fix(g: dict, bg: dict) -> dict:
+    """상품 무드 보정 — 사람 확인 96벌 기준."""
+    g = dict(g)
+    if bg.get("시크") == 2:
+        g.setdefault("시크", 1)
+        if not bg.get("캐주얼") and g.get("캐주얼") == 1:
+            g.pop("캐주얼")
+    if bg.get("스트릿") == 2:
+        g.setdefault("스트릿", 1)
+    return g
 
 
 def chip_mood(v: dict, old: list[str]) -> list[str]:
@@ -365,7 +379,9 @@ def thin_row(r: dict, tags: dict, bi: dict, ci: dict, pref: dict) -> dict:
                  ("dt", bottom_details(r.get("name") or "", r.get("subtype") or "") if r.get("category") in DT_CATS else []),
                  ("ax", AX_FLAGS.get(f'{r["brand_slug"]}-{r["product_no"]}', 0) & 7),
                  ("pt", 1 if AX_FLAGS.get(f'{r["brand_slug"]}-{r["product_no"]}', 0) & 8 else 0),
-                 ("wn", worn(r))):
+                 ("wn", worn(r)),
+                 ("pm", [MOOD_APP.index(k) for k, v in PMOOD.get(f'{r["brand_slug"]}-{r["product_no"]}', {}).items() if v >= 2]),
+                 ("pw", [MOOD_APP.index(k) for k, v in PMOOD.get(f'{r["brand_slug"]}-{r["product_no"]}', {}).items() if v == 1])):
         if v:
             row[k] = v
     st = sorted(style_tags(t), key=lambda x: (TAG_DF[x], x))[:TAG_MAX]
@@ -644,7 +660,7 @@ def main() -> int:
         c = r.get("category_code") or "other"
         cat_label.setdefault(c, r.get("category") or "")
         grp_label.setdefault(c, r.get("group") or "")
-    brand_name, brand_mood = {}, {}
+    brand_name, brand_mood, brand_chip = {}, {}, {}
     with (DATA / "brands_seed.csv").open(encoding="utf-8-sig") as f:
         for r in csv.DictReader(f):
             brand_name[r["slug"]] = r.get("name") or r["slug"]
@@ -654,6 +670,17 @@ def main() -> int:
         for s, v in (json.loads(_lp.read_text(encoding="utf-8")).get("labels") or {}).items():
             if s in brand_mood and v.get("g") and not v.get("unk"):
                 brand_mood[s] = chip_mood(v, brand_mood[s]) or brand_mood[s]
+                brand_chip[s] = v["g"]
+    _pp = DATA / "llm" / "pmood.jsonl"
+    if _pp.exists():
+        pid_ = {r["source_url"]: (r["brand_slug"], f'{r["brand_slug"]}-{r["product_no"]}') for r in rows}
+        for l in _pp.read_text(encoding="utf-8").splitlines():
+            o = json.loads(l) if l.strip() else {}
+            g = {k: int(v) for k, v in ((o.get("out") or {}).get("g") or {}).items() if k in MOOD_APP and v in (1, 2)}
+            if g and o.get("u") in pid_:
+                b_, k_ = pid_[o["u"]]
+                PMOOD[k_] = dict(sorted(pmood_fix(g, brand_chip.get(b_, {})).items(), key=lambda x: (-x[1], MOOD_APP.index(x[0]))))
+        print(f"상품 무드 {len(PMOOD):,}벌")
 
     # 상품 주소도 매장마다 앞머리가 같다 — 사진과 같은 방식으로 접는다.
     # `by` 는 아래에서 만들어지므로 여기서는 rows 에서 바로 모은다(안 그러면 NameError).
@@ -994,13 +1021,15 @@ def main() -> int:
             "tg": "스타일 태그 — tags 번호 배열, 드문 것부터 많아야 6(없으면 안 적힘)",
             "ax": "기준별 비슷한 옷이 있는 기준 비트 — 1 색·무늬 · 2 모양 · 4 소재(similar-axis 조각, 0 이면 안 적힘)",
             "pt": "1 이면 무늬 있음(스트라이프 · 체크 · 프린트 …) — 무지 · 모름은 안 적힘",
+            "pm": "상품 무드(중심) — moods 번호 배열. 사진으로 판정, 없으면 안 적힘",
+            "pw": "상품 무드(약간) — moods 번호 배열, 없으면 안 적힘",
             "wn": "1 이면 대표 사진(m)이 착용컷(사람이 입은 컷 — 얼굴이 잘려도 팔 · 다리가 보이면). 옷 분할 모델 판정, 아니거나 아직 안 쟀으면 안 적힘",
             "dt": "하의 디테일 — 카고 · 카펜터 · 퍼티그 · 파라슈트 · 벌룬 중 여럿(배열). 하의 · 데님 · 스커트에만, 상품명 · 세부품목에서 읽는다. "
                   "세부품목(t)과 따로라 데님 카고는 t=데님팬츠 · dt=[카고]. 없으면 안 적힘",
             "dw": "데님 워싱 단계 — 연청 · 중청 · 진청 · 생지 · 흑청 · 블랙 · 화이트 · 컬러 중 하나. 데님 옷에만, 대표색 · 이름 · 옵션 낱말로 정하고 "
                   "모르면 안 적힘(블루 · 인디고만으로는 정하지 않는다). 낱말로 못 정한 것 일부는 사진 판정(교차검증 정밀도 90% 넘는 단계 · 확신만)",
         },
-        # 무드는 **브랜드에만** 있다 — 상품마다 붙일 것이 아니다(아래 fold_mood 참고)
+        # 브랜드 무드는 brands[].mo, 상품 무드는 줄의 pm · pw
         "brand_fields": {"mo": "무드 — moods 안의 말만 쓴다",
                          "p": "사진 주소 앞머리", "up": "상품 주소 앞머리",
                          "bp": "brands 조각 수", "dp": "descs 조각 수(0 이면 없음)", "sp": "similar 조각 수(0 이면 없음)",
