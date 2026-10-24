@@ -1,0 +1,7688 @@
+"""cafe24 자사몰 전상품 크롤러 — brands_seed.csv 의 브랜드를 사이트맵으로 훑는다.
+
+왜 cafe24 하나만 보나: 상품이 있는 50개 브랜드의 자사몰이 전부 cafe24 다
+(2026-08-31 실측 — /product/detail.html?product_no= 또는 /product/<slug>/<no>/category/…
+SEO URL, 둘 다 cafe24 형식). 어댑터 하나로 50곳이 붙는다.
+
+전체 상품을 어떻게 세나:
+  1. /sitemap.xml — cafe24 가 자동으로 만들어 준다. /product/<slug>/<no>/ 가 상품 하나다.
+     카테고리 목록을 훑는 것보다 낫다: 중복이 없고, 어느 카테고리에도 안 걸린 상품도 잡힌다.
+     (없거나 비면 카테고리 목록 크롤로 내려간다.)
+  2. /product/list.html?cate_no=N — 상품이 어느 카테고리에 속하는지는 상세 페이지가 말해
+     주지 않는다(상세의 oCategoryInfo 는 「개인결제창」 같은 값이 들어 있었다). 그래서 목록을
+     한 번 훑어 product_no → 카테고리 이름들을 따로 얻는다. 목록은 48개/쪽이라 싸다.
+  3. 상세 페이지에서 이름·판매가·대표컷·품절·추가컷·설명·옵션.
+
+할인가(product_sale_price)도 받는다 — 2026-10-02 사람: 「할인가도 따로 받자. 앱엔 정가 줄긋고 할인가 표시」 ·
+「할인가는 우리가 시기별로 수집해서 기록해두자」. 전에는 「수시로 바뀐다」며 안 받았는데 공개 매장 무작위 40벌 중
+14벌이 할인 중이라 앱 값이 매장과 어긋났다(코덱스 023). 주간 갱신이 판매중 상품 상세를 7일마다 다시 읽으므로
+(weekly_update STALE_PRICE_DAYS) 할인가도 주마다 새로 보고, 바뀔 때마다 sale_log 에 한 줄 쌓는다(carry_over).
+
+예의:
+  · 호스트당 1초 간격(+지터). 여러 호스트는 병렬이지만 한 호스트에는 동시에 하나만.
+  · robots.txt 의 Disallow 를 존중한다(cafe24 기본값은 /exec/ /member/ /myshop/ 등 —
+    상품 페이지는 허용이고, 매장이 특정 cate_no 를 막아둔 경우가 있어 그건 건너뛴다).
+  · UA 에 정체와 연락처 성격의 이름을 적는다.
+
+재실행 가능: data/crawl/<slug>.jsonl 에 상품 단위로 바로 쓰고, 다시 돌리면 이미 있는
+product_no 는 건너뛴다. --refresh 를 주면 전부 다시 받는다.
+
+사용:
+    py scripts/crawl_cafe24.py                      # 상품이 있는 브랜드 전부
+    py scripts/crawl_cafe24.py --brands 9999archive coor
+    py scripts/crawl_cafe24.py --workers 8 --delay 1.0
+    py scripts/crawl_cafe24.py --build-csv          # jsonl → data/products_full.csv 만 다시 만든다
+"""
+from __future__ import annotations
+
+import argparse
+import collections
+import csv
+import html as htmlmod
+import json
+import os
+import random
+import re
+import statistics
+from collections import Counter
+import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field, asdict
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+from urllib.parse import urljoin, urlparse, parse_qs, unquote, quote, urlsplit, urlunsplit
+from urllib.robotparser import RobotFileParser
+
+import requests
+from bs4 import BeautifulSoup
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA = ROOT / "data"
+CRAWL_DIR = DATA / "crawl"
+BRANDS_CSV = DATA / "brands_seed.csv"
+PRODUCTS_SEED = DATA / "products_seed.csv"
+OUT_CSV = DATA / "products_full.csv"
+SUMMARY_JSON = CRAWL_DIR / "_summary.json"
+
+UA = "Mozilla/5.0 (compatible; LayerCatalog/0.2; +https://github.com/20232039-cell/layer-brand-agent)"
+
+# 같은 매장에서도 본품·추가 사진과 파일마다 큰 칸의 존재가 다르다.
+_BIG_OK: dict[str, bool] = {}
+_BIG_LOCK = threading.Lock()
+
+
+def _big_slot_ok(u: str) -> bool:
+    """실제 바꿀 주소만 확인한다. 못 열면 원래 주소를 보존한다."""
+    up = re.sub(r"/web/product/(extra/)?(small|medium|tiny)/",
+                lambda mm: f"/web/product/{mm.group(1) or ''}big/", u)
+    if up == u:
+        return True
+    with _BIG_LOCK:
+        if up in _BIG_OK:
+            return _BIG_OK[up]
+    try:
+        r = requests.get(up, headers={"User-Agent": UA}, timeout=20, stream=True)
+        try:
+            ok = r.status_code == 200 and "image/" in r.headers.get("Content-Type", "")
+        finally:
+            r.close()
+    except requests.RequestException:
+        return False
+    with _BIG_LOCK:
+        _BIG_OK[up] = ok
+    return ok
+
+TIMEOUT = 25
+KST = timezone(timedelta(hours=9))
+
+# ─── 어휘 — build_products_seed.py 와 같은 표. 새 값을 임의로 만들지 않는다(CLAUDE.md §3). ───
+
+# 합성 색이름(lightpink·seagreen·peppermint)은 낱말 경계를 두면 따로 적어야 걸린다 —
+# match_vocab 이 「앞뒤가 글자면 안 걸림」으로 바뀐 뒤 그 값들이 빠졌다(2026-09-05).
+COLOR_VOCAB = {
+    "블랙": ["black", "블랙", "onyx", "오닉스"],
+    "차콜": ["charcoal", "차콜", "챠콜", "graphite", "그라파이트"],
+    "화이트": ["off white", "white", "화이트"],
+    "아이보리": ["ivory", "아이보리", "ecru", "에크루"],
+    "크림": ["cream", "크림", "creambeige", "cream beige", "creamflower"],
+    "그레이": ["melange grey", "grey", "gray", "그레이", "멜란지"], "네이비": ["navy", "네이비"],
+    "블루": ["light blue", "lightblue", "blue", "블루"],
+    "민트": ["mint", "민트", "peppermint"],
+    "그린": ["green", "그린", "seagreen", "sea green", "greentea", "green tea",
+            "pistachio", "피스타치오", "sage", "세이지"],
+    "올리브": ["olive", "올리브"], "베이지": ["beige", "베이지"], "샌드": ["sand", "샌드"],
+    "카키": ["khaki", "카키"], "카멜": ["camel", "카멜"],
+    "브라운": ["brown", "브라운", "tobacco", "토바코", "chocolate", "초콜릿", "초콜렛",
+             "coyote", "코요테", "marron", "maroon", "마론"],
+    "초코": ["choco", "초코"], "옐로우": ["yellow", "옐로우", "lemon", "레몬"],
+    "핑크": ["pink", "핑크", "lightpink", "light pink", "hotpink", "hot pink",
+            "indipink", "babypink", "baby pink"],
+    "레드": ["red", "레드"], "버건디": ["burgundy", "버건디", "와인", "wine"],
+    "퍼플": ["purple", "퍼플", "violet", "바이올렛"],
+    "라벤더": ["lavender", "라벤더"], "라떼": ["latte", "라떼"], "피치": ["peach", "피치", "apricot", "애프리콧"],
+    "버터": ["butter", "버터"], "내추럴": ["natural", "내추럴"],
+    "차콜그레이": ["charcoal grey", "charcoal gray"], "스카이블루": ["sky blue", "skyblue", "스카이블루", "스카이"],
+    "실버": ["silver", "sliver", "실버"], "골드": ["gold", "골드", "golden"], "코발트": ["cobalt", "코발트"],
+    "머스타드": ["mustard", "머스타드"], "터콰이즈": ["turquoise", "터콰이즈"],
+    "오트밀": ["oatmeal", "오트밀"], "잉크": ["ink blue", "잉크"],
+    # 매장이 이름 뒤에 적어 두는데 어휘에 없어서 못 읽던 색(2026-09-05 실측)
+    "인디고": ["indigo", "인디고"], "오렌지": ["orange", "오렌지"],
+    "토프": ["taupe", "토프"], "탠": ["coyote tan", "탠", "tan"],
+    "머드": ["mud", "머드", "muddy"],
+    "살몬": ["salmon", "살몬"], "라임": ["lime", "라임"], "멀티": ["멀티"],
+    "모카": ["mocha", "모카"], "텐저린": ["tangerine", "텐저린"], "그레이프": ["그레이프"],
+    "마젠타": ["magenta", "마젠타"], "로즈": ["rose", "로즈"],
+    # 매장이 이름 끝에 쓰는데 어휘에 없던 색(2026-09-05: 색 빈 상품의 이름 끝 낱말을 세어
+    # 눈으로 골랐다). 색이 아닌 것은 넣지 않았다 — camo·stripe 는 무늬, NIMBUS·MARS·
+    # TROPICAL 은 매장이 지은 이름이라 무슨 색인지 알 수 없다.
+    "브릭": ["brick", "브릭"], "틸": ["teal", "틸"],
+    "스톤": ["stone", "스톤"], "클레이": ["clay", "클레이"], "앰버": ["amber", "앰버"],
+    "건메탈": ["gunmetal", "gun metal", "건메탈"], "그레이프": ["grape"],
+    "모브": ["mauve", "모브"], "브론즈": ["bronze", "브론즈"], "카라멜": ["caramel", "카라멜"],
+    "누드": ["nude", "누드"], "그레이지": ["greige", "그레이지"],
+    "카푸치노": ["cappuccino", "카푸치노"], "라일락": ["lilac", "라일락"],
+    "에그플랜트": ["eggplant", "에그플랜트"],
+}
+COLOR_VOCAB["브라운"] += ["chestnut", "체스트넛"]
+COLOR_VOCAB["초코"] += ["cocoa", "코코아"]
+COLOR_VOCAB["차콜"] += ["anthracite", "안트라사이트", "carbon", "카본", "chacoal"]
+COLOR_VOCAB["버건디"] += ["bordeaux", "보르도"]
+COLOR_VOCAB["그레이"] += ["heather grey", "heather gray", "헤더그레이"]
+# 「midnight」 홀로는 색이 아니다 — 45벌 중 16벌이 MIDNIGHT BLACK·MIDNIGHT GRAY·
+# 「Midnight star」(무늬 이름)인데 전부 네이비가 됐다(2026-09-05). 붙은 꼴만 받는다.
+COLOR_VOCAB["네이비"] += ["midnight blue", "미드나잇블루", "미드나잇 블루"]
+COLOR_VOCAB["멀티"] += ["multi", "멀티 컬러", "멀티컬러", "multi color", "multi colour"]
+# 매장이 쓰는 색 이름 — 사진을 열어 눈으로 확인하고 우리 이름으로 묶었다(2026-09-05).
+#   nimbus 회색 파카 · mars 올리브 베스트 · mayo 연노랑 파카 · soda 하늘색 집업 ·
+#   네온 형광 연두 · 세일링샴페인 크림색 폴로(사람은 와인색으로 짐작했으나 사진은 크림이다).
+COLOR_VOCAB["그레이"] += ["nimbus", "님버스", "w.mel", "melange", "heather"]
+COLOR_VOCAB["올리브"] += ["mars", "마스", "old moss", "forest night", "forest suede", "바질"]
+COLOR_VOCAB["버터"] += ["mayo", "마요"]
+COLOR_VOCAB["스카이블루"] += ["soda", "소다", "sora", "denim sky"]
+COLOR_VOCAB["라임"] += ["네온", "neon"]
+COLOR_VOCAB["크림"] += ["세일링샴페인", "샴페인", "champagne", "icy milk", "oat milk", "vanila", "vanilla", "콘실크"]
+COLOR_VOCAB["브라운"] += ["maple", "메이플", "sepia", "세피아", "toffee", "토피", "dark pecan",
+                        "polish wood", "blond wood", "ebony 브라운"]
+COLOR_VOCAB["블랙"] += ["ebony", "에보니", "bkny"]
+COLOR_VOCAB["레드"] += ["ruby", "루비", "cherry", "체리", "scarlet", "스칼렛", "카민", "carmine",
+                       "chili", "칠리", "cherry coke",
+                       # 판매중 미인식 옵션 4상품, 페이지·사진 확인(2026-10-22).
+                       "burntred",
+                       # 「크림슨」에 크림이 먼저 걸려 붉은 셔츠가 크림이었다(steady-everywear 5벌, 2026-10-27)
+                       "crimson", "크림슨"]
+COLOR_VOCAB["핑크"] += ["cotton candy", "코튼캔디", "strawberry", "스트로베리"]
+COLOR_VOCAB["옐로우"] += ["marigold", "메리골드", "바나나", "banana"]
+COLOR_VOCAB["그린"] += ["avocado", "아보카도", "applegreen", "apple green"]
+# 모카는 회색의 기운을 꾸미는 말이다. 긴 mocha가 gray를 누르던 꼴(siyazu 3565, 사진 QA 2026-10-27).
+COLOR_VOCAB["그레이"] += ["mocha gray", "mocha grey", "모카 그레이", "모카그레이"]
+# 플럼은 보라가 아니라 버건디다 — 사진 손 검증 4,723벌(qa27 vis/out_color, 2026-10-28)에서 PLUM 이름이 버건디로 몰렸다.
+COLOR_VOCAB["버건디"] += ["플럼", "plum"]
+# 「Ash blue」 · 「Dusty blue」 · 「Greyish blue」 · 「Mute blue」는 사진에서 회색이다(같은 손 검증). 「DIRTY WHITE」도 회색.
+COLOR_VOCAB["그레이"] += ["ash blue", "dusty blue", "greyish blue", "grayish blue", "mute blue", "muted blue",
+                        "dirty white", "dusty white", "애쉬블루", "애쉬 블루", "더스티블루", "더스티 블루"]
+COLOR_VOCAB["실버"] += ["antiqued nickel", "surgical steel", "니켈"]
+COLOR_VOCAB["화이트"] += ["ice", "아이스", "cloud", "클라우드"]
+COLOR_VOCAB["블루"] += ["mid denim", "light denim"]
+
+# 매장은 색을 붙여 쓰기도 한다 — MELANGEGRAY·DARKBROWN·OFFWHITE·JETBLACK. 낱말 경계를
+# 넣은 뒤로는 이런 것이 통째로 빠져서, 꾸밈말+색을 붙인 꼴을 어휘에 만들어 넣는다.
+# 「Laye(red)」·「(butter)fly」는 여전히 안 걸린다 — laye·fly 는 꾸밈말이 아니다.
+_C_MOD = ("light", "dark", "deep", "pale", "off", "jet", "dust", "soft", "medium", "melange")
+# 띄어 쓴 꼴도 함께 만든다. 붙여 쓴 꼴만 있어서 「Cloud Boucle Sweater Soft Pink」가
+# soft pink(9) 대신 pink(4)로만 걸렸고, 제품 라인 이름인 cloud(5)가 이겨 화이트가 됐다
+# (dunst, 2026-09-05). 매장은 두 꼴을 섞어 쓴다.
+for _lab, _keys in list(COLOR_VOCAB.items()):
+    _base = [k for k in _keys if re.fullmatch(r"[a-z]+", k)]
+    COLOR_VOCAB[_lab] = _keys + [m + b for b in _base for m in _C_MOD] \
+                              + [f"{m} {b}" for b in _base for m in _C_MOD]
+
+# 색 두 개를 붙여 적은 이름 — 앞의 색이 대표다(2026-09-05 실측으로 뽑은 것만).
+for _lab, _extra in (("카키", ["khakibeige"]), ("카멜", ["camelbeige"]),
+                     ("아이보리", ["ivoryblack"]), ("버건디", ["burgundygray", "burgundygrey"]),
+                     ("레드", ["redbrick"]), ("그레이", ["hotdrygrey", "hotdrygray"])):
+    COLOR_VOCAB[_lab] = COLOR_VOCAB[_lab] + _extra
+
+
+ITEM_TYPE_VOCAB = {
+    # 신발 — 이름 우선순위를 타야 한다. 카테고리 폴백에만 두면 「UNISEX MATTIO ZIP-UP
+    # TRAINER」가 「zip-up」(집업)으로 잡혀 상의가 된다. match_vocab 은 가장 긴 낱말이
+    # 이기므로 trainer(7)가 zip up(6)을 누른다(2026-09-05).
+    "스니커즈": ["sneaker", "스니커", "trainer", "트레이너", "runner", "러너", "clog", "클로그", "slip-on", "slip on", "슬립온", "슬립 온"],
+    "부츠": ["boots", "boot", "부츠", "chelsea boot", "첼시부츠", "워커"],
+    "샌들": ["sandal", "샌들", "slipper", "슬리퍼", "mule", "뮬 "],
+    "구두": ["loafer", "로퍼", "derby", "더비", "maryjane", "mary jane", "메리제인",
+            "pumps", "펌프스", "ballet flat", "발레플랫", "moccasin", "모카신"],
+    "후드": ["hoodie", "hoody", "후드", "후디", "sweat hoody", "sweat hoodie", "스웻 후드", "스웻후드",
+           "hood", "hoodysuit", "후디수트"],
+    "집업": ["zip-up", "zipup", "zip up", "집업", "full zip", "풀집업"],
+    # ── 2026-10-05 세분화(사람 「카테고리를 완전 나누자」). 모양 · 만듦새가 다른 것만 품목으로 가르고 색 · 무늬 · 소재 · 핏은 태그에 둔다 ──
+    "하프집업": ["halfzip", "half zip", "half-zip", "하프집업", "하프 집업", "half zip-up", "half zipup", "quarter zip", "quarter-zip", "쿼터 집", "쿼터집", "쿼터집업", "하프 지퍼", "half zipper", "하프집업 맨투맨", "하프 집업 맨투맨", "half zip sweatshirt", "half-zip sweatshirt", "하프집업 스웨트셔츠", "하프집업 스웻", "half zip pullover", "하프집업 풀오버", "하프집업 후드", "half zip hoodie",
+             # 「ORTE TERRY HALF ZIP UP HOODIE」 — 아래 후드집업의 「zip up hoodie」보다 길어야 하프집업이 이긴다(2026-10-18)
+             "half zip-up hoodie", "half zip up hoodie", "half zipup hoodie", "half zip hoody", "half zip-up hoody", "half zip up hoody",
+             "하프 집업 후디", "하프집업 후디", "하프 집업 후드", "하프 집업 후드티"],
+    "하프집업니트": ["하프집업 니트", "하프 집업 니트", "half zip knit", "half-zip knit", "half zip sweater", "하프집업니트", "하프 집업 스웨터", "쿼터집업 니트", "quarter zip knit"],
+    "니트집업": ["니트 집업", "니트집업", "knit zip-up", "knit zip up", "knit zipup", "zip-up knit", "zip up knit", "집업 니트", "집업니트", "zip knit", "zipped knit", "풀집업 니트"],
+    "폴로니트": ["폴로 니트", "폴로니트", "polo knit", "knit polo", "니트 폴로", "카라 니트", "카라니트", "collar knit", "collared knit", "폴로 스웨터", "polo sweater"],
+    "니트베스트": ["니트 베스트", "니트베스트", "knit vest", "스웨터 베스트", "sweater vest", "니트 조끼", "knitted vest"],
+    "패딩베스트": ["패딩 베스트", "패딩베스트", "padded vest", "padding vest", "puffer vest", "다운 베스트", "down vest", "덕다운 베스트", "구스다운 베스트", "패딩 조끼"],
+    "슬랙스": ["슬랙스", "slacks", "슬랙스 팬츠", "slacks pants", "슬렉스"],
+    "슬리브리스": ["sleeveless", "슬리브리스", "민소매", "tank", "탱크", "tank top", "탱크탑", "탱크 탑", "나시", "나시티", "슬리브리스 탑", "sleeveless top"],
+    "캐미솔": ["캐미솔", "camisole", "cami", "캐미", "캐미솔 탑", "camisole top", "cami top"],
+    "브라탑": ["브라렛", "bralette", "브라탑", "bra top", " 브라 ", "bra", "브라 탑"],
+    "튜브탑": ["튜브탑", "튜브 탑", "tube top", "밴도", "bandeau", "튜브"],
+    "로브코트": ["로브 코트", "로브코트", "robe coat", "로브", "robe", "가운 코트", "gown coat"],
+    "슬립원피스": ["슬립 원피스", "슬립원피스", "slip dress", "슬립 드레스", "슬립드레스", "slip one-piece", "slipdress"],
+    "니트원피스": ["니트 원피스", "니트원피스", "knit dress", "니트 드레스", "knit one-piece", "knit onepiece", "스웨터 원피스", "sweater dress", "knitdress"],
+    "셔츠원피스": ["셔츠 원피스", "셔츠원피스", "shirt dress", "셔츠 드레스", "셔츠드레스", "shirt one-piece", "shirts dress", "shirtdress"],
+    "미니스커트": ["미니 스커트", "미니스커트", "mini skirt", "miniskirt", "mini skirts", "미니 스컷"],
+    "미디스커트": ["미디 스커트", "미디스커트", "midi skirt", "midi skirts"],
+    "롱스커트": ["롱 스커트", "롱스커트", "long skirt", "long skirts", "맥시 스커트", "맥시스커트", "maxi skirt", "맥시 스컷"],
+    "미니원피스": ["미니 원피스", "미니원피스", "mini dress", "미니 드레스", "미니드레스", "mini one-piece", "mini ops",
+              # 매장이 붙여 쓴 꼴 — 「RUFFLE PUFF MINIDRESS」(s-e-o, 상의 칸에 둔 미니 원피스 2벌, 사람 지적 2026-10-06)
+              "minidress"],
+    "미디원피스": ["미디 원피스", "미디원피스", "midi dress", "미디 드레스", "mididress"],
+    "롱원피스": ["롱 원피스", "롱원피스", "long dress", "롱 드레스", "롱드레스", "맥시 원피스", "맥시원피스", "maxi dress", "맥시 드레스", "long one-piece", "long ops", "longdress", "maxidress"],
+    # 스웻은 별도 품목이 아니다(사람 결정 2026-09-02): 스웻셔츠=맨투맨, 스웻팬츠=스웨트팬츠. 품목 단어 없는 「스웻」은 build_csv 가 상의일 때만 맨투맨
+    "맨투맨": ["sweatshirt", "sweat shirt", "맨투맨", "crewneck", "crew neck", "스웻셔츠", "스웨트셔츠", "스웨트 셔츠", "스웻 셔츠", "스웻 크루넥", "sweat crew", "mtm", "엠티엠", "sweat", "스웻", "스웨트",
+             # 「SWEATSHIRT RAGLAN LILIES」는 뒤의 raglan 이 이겨 라글란(티셔츠 묶음)이 됐다 — 라글란 맨투맨은 맨투맨이다(2026-10-05 매장 분류 대조).
+             "sweatshirt raglan", "raglan sweatshirt", "라글란 맨투맨", "래글런 맨투맨", "raglan sweat"],
+    "티셔츠": ["t-shirt", "tshirt", "tee", "티셔츠", "t",
+             # 「WAFFLE HENLEY NECK」처럼 henley 가 머리 낱말인 이름 15벌 — 헨리넥은 넥라인이고 옷은 티셔츠다.
+             "henley",
+             # 「INSIDE-OUT T SHIRTS」「Tee shirt fox head」처럼 띄어 쓴 꼴은 뒤의 shirt(s) 가 이겨 셔츠가 됐다 — 491벌
+             # (2026-10-05 3차 익명 평가 메모 「기준옷은 롱슬리브야 셔츠가 아니라」). 붙은꼴을 넣어 끝자리를 같게 한다.
+             "t shirt", "t shirts", "t-shirts", "tshirts", "tee shirt", "tee shirts"],
+    "셔츠": ["shirt", "셔츠", "오버셔츠"],
+    # 2026-10-05 사람 품목 확인 — 「블라우스인듯」 「정확힌 하프셔츠」. 셔츠 묶음 안의 세부 품목으로 갈라낸다(블라우스 1,946 · 하프셔츠 924).
+    "블라우스": ["blouse", "블라우스", "블라우스 셔츠", "blouse shirt"],
+    "하프셔츠": ["half shirt", "half shirts", "하프 셔츠", "하프셔츠", "반팔 셔츠", "반팔셔츠", "short sleeve shirt", "short-sleeve shirt",
+              "short sleeves shirt", "s/s shirt", "1/2 shirt", "하프 슬리브 셔츠", "하프슬리브 셔츠", "half sleeve shirt"],
+    # knitwear · pull-over 는 붙여 쓰거나 줄을 넣은 꼴이라 knit · pullover 낱말 경계에 안 걸렸다(arend · ava-molli 판매중 빈 품목 12벌, 2026-10-10)
+    "니트": ["knit", "sweater", "니트", "스웨터", "pullover", "풀오버", "knitwear", "pull-over", "pull over", "니트웨어",
+            "turtle neck", "turtleneck", "터틀넥", "mock neck", "모크넥", "하이넥", "high neck"],
+    # 「fur」·「shearling」·「sheepskin」은 소재지 품목이 아니다. 품목으로 넣었더니
+    # 「FUR MINIBAG」·「Real Mink Fur Hat」·「퍼 블랙 버블백」이 겉옷이 됐다(2026-09-05).
+    # diafvine 가죽 겉옷 17벌은 「기타」로 남는다 — 모자·가방을 잃는 값보다 싸다.
+    "재킷": ["jacket", "자켓", "재킷", "jk",
+             # 「N-1 Deck jkt」처럼 jkt 로 줄여 쓰는 이름 10벌이 품목 빈칸이었다(2026-09-08). 다른 이름은 한 개도 안 움직인다.
+             "jkt",
+             # lekim 「BIKER WASHING LEATHER JAKET」 3벌 — 철자 틀림(2026-10-05)
+             "jaket"],
+    "코트": ["coat", "코트", "raincoat", "레인코트"],
+    "패딩": ["padding", "puffer", "푸퍼", "패딩", "다운", "duck down", "덕다운",
+            "구스다운", "goose down",
+            # 「다운 점퍼」「puffer jacket」은 뒤의 점퍼·jacket 이 이겨 점퍼 185벌 · 재킷 494벌이 패딩 밖에 서 있었다
+            # (2026-10-05 익명 평가 사유 「경량패딩인데 카테고리가 점퍼네」). 붙은꼴을 넣어야 끝나는 자리가 같아지고
+            # 긴 쪽이 이긴다(트렌치 주석과 같은 꼴). 베스트 · 파카는 모양 품목이라 그대로 둔다.
+            "다운 점퍼", "다운점퍼", "down jumper", "패딩 점퍼", "패딩점퍼", "puffer jumper",
+            "다운 자켓", "다운자켓", "다운 재킷", "다운재킷", "down jacket", "down jk", "padded jacket",
+            "패딩 자켓", "패딩자켓", "패딩 재킷", "패딩재킷", "puffer jacket", "puffer jk",
+            "다운 코트", "다운코트", "down coat", "패딩 코트", "패딩코트", "puffer coat",
+            "다운 블루종", "down blouson", "puffer blouson"],
+    # 「진」은 홀로 두면 「진주」에 걸린다 — 앞뒤가 빈칸일 때만.
+    "데님": ["jeans", "denim", "데님", "청바지", "jean", "진스", "쟌", "데님팬츠", "데님 팬츠", "denim pants", "denim pant", "데님 바지", "denim trousers", "진 팬츠", "jean pants",
+            "셀비지", "selvedge", " 진 "],
+    "팬츠": ["pants", "trousers", "trouser", "팬츠", "트라우저",
+            "판타롱", "pantalon",
+             # 「트라우져」 표기 5벌 — 「조거 트라우저」가 팬츠로 가듯 「조거 트라우져」도 팬츠로 간다(표기만 다른 13벌이 같은 답을 받는다).
+             "트라우져"],
+    "스커트": ["skirt", "스커트",
+             # skort(스커트+팬츠) 19벌 — 매장은 하의 칸에 두지만 옷은 스커트다.
+             "skort", "pantskirt", "pant skirt", "판츠스커트", "팬츠스커트",
+             # 「skirt pants」 · 「스커트팬츠」도 같은 옷이다 — 뒤 낱말 pants 가 이겨 팬츠로 섰다(총장 31~37, 2026-10-09)
+             "skirt pants", "skirt pant", "스커트팬츠", "스커트 팬츠"],
+    # 「ops」는 원피스 약자다(「jersey contrast tiered ops」 · 「turtleneck ops」). 영문 낱말 경계로만 걸려 tops 에는 안 걸린다.
+    # 상의로 섰더니 원피스 총장 121.5 가 「상의에 있을 수 없는 값」으로 지워졌다(코덱스 014 · le 2109).
+    "원피스": ["dress", "원피스", "드레스", "one-piece", "onepiece", "one piece", "ops"],
+    "파자마": ["파자마", "pajama", "pyjama", "잠옷", "홈웨어", "라운지웨어", "loungewear"],
+    "베스트": ["vest", "베스트"],
+    "바람막이": ["windbreak", "windbreaker", "wind breaker", "바람막이", "윈드브레이커", "윈드스토퍼", "windstopper",
+              "wind stopper", "윈드 스토퍼", "아노락", "anorak",
+              "wind shell", "windshell", "윈드쉘", "윈드 쉘"],   # nomanual 「WIND SHELL」 4벌이 하의로 섰다(2026-10-09)
+    "숏팬츠": ["shorts", "숏팬츠", "반바지", "숏츠", "쇼츠", "microshorts", "micro shorts", "마이크로쇼츠"],
+    "점프수트": ["jumpsuit", "점프수트", "overall", "오버올"],
+    # 2026-10-23 새 품목(앱 세션 · 대표님 「옷만」). 머리 낱말일 때만 선다 — 「Cape Coat」는 코트, 「Cape-effect dress」는 원피스.
+    "케이프/판초": ["cape", "케이프", "poncho", "판초"],
+    "투피스": ["two-piece", "two piece", "투피스"],
+    # 영문 「cardigan」 · 「카디건」 표기가 니트 쪽 어휘에 있어 3,643벌이 가디건이 아니라 니트로 서 있었다(코덱스 사전 검증 244 ·
+    # 2026-10-03). 「Knit Cardigan」은 뒤 낱말 cardigan 이 이겨 가디건이 된다.
+    # 트윈 세트는 가디건 + 니트 한 벌 — 겉에 입는 가디건으로 본다(ostkaka · foeto 빈 품목 21벌, 2026-10-10)
+    "가디건": ["가디건", "cardigan", "카디건", "shrug", "슈러그", "볼레로", "bolero", "twin set", "twinset", "트윈 세트", "트윈세트",
+            # 카우치안은 두꺼운 니트 가디건 — 이름에 cardigan 이 없으면 빈칸이었다(10벌, 2026-10-05 앱 세션 제보)
+            "cowichan", "카우치안", "코위찬"],
+    "블레이저": ["blazer", "블레이저", "블레이져", "브레이저", "2버튼 재킷", "3버튼 재킷", "2버튼 자켓", "3버튼 자켓", "2 버튼 재킷", "3 버튼 재킷", "2 버튼 자켓", "3 버튼 자켓", "투버튼 재킷", "쓰리버튼 재킷", "투버튼 자켓", "쓰리버튼 자켓", "two button jacket", "three button jacket", "2b jacket", "3b jacket", "2-button jacket", "3-button jacket", "테일러드 자켓", "테일러드 재킷", "tailored jacket", "테일러드자켓"],
+    # 「더블 하이넥 벨티드 트렌치 코트」가 트렌치가 아니라 코트로 갔다 — 뒤에 오는 「코트」가
+    # 이기기 때문이다. 붙은꼴을 넣어야 끝나는 자리가 같아지고 긴 쪽이 이긴다(2026-09-20).
+    "트렌치": ["trench", "트렌치", "트렌치 코트", "트렌치코트", "trench coat", "trenchcoat"],
+    "점퍼": ["jumper", "점퍼"],
+    "탑": ["top", "탑",
+             # 2026-10-05 세분화: 슬리브리스 · 캐미솔 · 브라탑 · 튜브탑은 제 품목으로. halter 는 넥라인이라 탑에 남긴다.
+             "halter"],
+    # 속옷·수영복도 실측 표가 있는 옷이다 — 매장이 ACC 카테고리에 넣어 두어 잡화로 갔다
+    # 「브라」만 두면 「브라운」에 걸린다 — 뒤에 빈칸이 오는 것만 받는다.
+    # 브라는 하의가 아니다 — 브라·브라탑·브라렛은 위 「탑」으로 옮겼다(2026-09-07).
+    # 세트(「브라탑 & 드로즈」·「브라렛 & 팬티」)는 뒷말이 이겨 그대로 언더웨어로 남는다.
+    # 바디수트는 어느 키에도 없어서 13벌이 품목 빈칸이었다. 「Tank Bodysuit」·「Jersey … Bodysuit」처럼
+    # 탑·저지가 앞에 붙어도 뒤 낱말인 bodysuit 이 이긴다(2026-09-08).
+    # 세부 품목 — 코덱스 사전 검증(244)이 「큰 분류로 뭉개져 품목 정보가 사라진다」고 짚은 것(사람 「뷔스티에 스크런치
+    # 이런 세부 품목은 만들어야겠네」 2026-10-03). 「Bustier Top」은 뒤의 top 이 이기니 붙은꼴을 같이 넣는다.
+    "뷔스티에": ["뷔스티에", "bustier", "뷔스티에 탑", "bustier top", "뷔스티에탑", "corset", "코르셋"],   # open-yy 「JEAN EFFECT CORSET」(2026-10-09)
+    # 트랙 재킷 — 「track jacket」 134벌이 재킷, 「track top」 43벌이 탑에 있었다. 지퍼 달린 운동복 겉옷이다.
+    "트랙재킷": ["track jacket", "트랙 자켓", "트랙자켓", "트랙 재킷", "트랙재킷", "track top", "트랙 탑", "트랙탑",
+             "training jacket", "트레이닝 자켓", "트레이닝자켓", "트레이닝 재킷", "트레이닝재킷", "track jk"],
+    # 셔츠 모양 겉옷 — 앱 garmentCategory.ts 의 오버셔츠 · 아우터셔츠(대표 갈래 아우터, also 상의 — 2026-10-03 갈래 결정).
+    # 한글 「오버셔츠」는 오버핏 셔츠를 뜻하기도 해 안 넣는다 — 영문 overshirt 와 셔켓만.
+    "오버셔츠": ["overshirt", "over shirt", "over-shirt", "셔켓", "shacket", "shirket", "셔킷", "shirt jacket",
+             "셔츠 자켓", "셔츠자켓", "셔츠 재킷"],
+    "바디수트": ["bodysuit", "body suit", "바디수트", "바디슈트"],
+    "언더웨어": ["boxer brief", "boxer", "brief", "브리프", "드로즈", "팬티", "언더웨어",
+             "underwear"],
+    "수영복": ["비키니", "bikini", "수영복", "swimsuit", "swimwear", "래쉬가드", "rashguard"],
+    # 「비키니 BOTTOM」·「비키니 바텀」처럼 반만 영어로 적는 매장이 있다 — 안 받으면 하의가 상의가 된다
+    "수영복하의": ["bikini bottom", "비키니 bottom", "비키니 바텀", "swim bottom", "비키니 하의",
+              "swim short", "보드숏", "board short"],
+    "롱슬리브": ["long sleeve", "long-sleeve", "longsleeve", "long sleeves",
+             "롱슬리브", "롱 슬리브", "긴팔", "l/s"],
+    "쇼츠": ["shorts", "쇼츠"],
+    "스웨트팬츠": ["sweatpants", "sweat pants", "sweat pant", "스웨트팬츠", "스웨트 팬츠", "스웻팬츠", "스웻 팬츠", "트레이닝 팬츠", "트레이닝팬츠", "training pants"],
+    "카고팬츠": ["cargo pants", "카고팬츠", "cargo", "카고 팬츠", "카고 바지", "cargo pant", "cargo trousers"],
+    # 2026-09-02 전상품 크롤에서 확인된 값 — 기존 subtype 표(products_seed.csv)에 이미 있던 이름만 쓴다.
+    "저지": ["jersey", "저지"],
+    "버뮤다": ["bermuda", "버뮤다"],
+    "파카": ["parka", "파카"],
+    # 「BOMBER JACKET」은 뒤의 jacket 이 이겨 재킷으로 갔다 — 붙은꼴을 넣는다(2026-09-20).
+    "MA-1/봄버": ["bomber", "ma-1", "봄버", "봄버 자켓", "봄버자켓", "봄버 재킷",
+               "bomber jacket", "ma-1 jacket"],
+    "플리스": ["fleece", "플리스"],
+    # 「hood zipup parka」는 파카가 아니라 후드집업이다 — 일본식 쓰임(パーカー = 후드티)을 따르는 매장(izm 24벌). 사람 3차 메모 q357(2026-10-05).
+    # 후드 · 집업 낱말이 둘 다 붙었을 때만. 「hoody down parka」(102벌)는 진짜 파카라 그대로.
+    # 「ZIP-UP HOODIE」처럼 집업이 앞이면 뒤의 hoodie 가 이겨 후드가 됐다 — 판매중 226벌(2026-10-18 검수). 붙은꼴을 넣는다.
+    "후드집업": ["zip-up hoodie", "zip up hoodie", "zipup hoodie", "zip hoodie", "zip-up hoody", "zip up hoody", "zipup hoody", "zip hoody",
+             "zip-up hooded", "zip up hooded", "zip-up hood", "zip up hood", "집업 후디", "집업후디", "집업 후드", "집업후드", "집업 후드티",
+             "hood zip-up", "hood zipup", "hood zip up", "hooded zip-up", "hooded zipup", "hooded zip up", "후드 집업", "후디 집업", "hoodie zip-up", "hoodie zip up", "hood zip", "hooded zip", "후드집업", "hoodie zip",
+             "hood zipup parka", "hood zip-up parka", "hood zip up parka", "hooded zipup parka", "hooded zip-up parka", "후드집업 파카", "후드 집업 파카"],
+    "반팔": ["half sleeve", "short sleeve", "half t", "half tee", "반팔", "하프 슬리브", "하프슬리브", "s/s tee", "ss tee",
+           # 「숏슬리브」를 낱말 그 자체로 품목처럼 쓰는 매장이 있다(「헨리넥 숏슬리브」 「스쿱넥 포켓 숏슬리브」).
+           # 하프슬리브는 있는데 숏슬리브가 없어서 15벌이 품목 빈칸이었다(2026-09-08). 이름 37,519개에서
+           # 바뀌는 것은 그 13벌(빈칸 → 반팔)뿐이다 — 「숏슬리브 셔츠」는 뒤 낱말이 이겨 셔츠로 남는다.
+           "숏슬리브", "숏 슬리브", "s/s"],
+    # 「폴로 셔츠」「POLO SHIRT」는 뒤의 셔츠가 이겨 셔츠로 갔다(441벌, 2026-10-05 매장 분류 대조 — 매장은 TEE 로 둔다). 붙은꼴로 되돌린다.
+    "피케": ["polo", "pique", "피케", "폴로", "polo shirt", "polo shirts", "폴로 셔츠", "폴로셔츠", "polo tee", "폴로 티", "폴로티", "pique shirt", "피케 셔츠", "피케셔츠"],
+    "레깅스": ["leggings", "레깅스"],
+    "조거팬츠": ["jogger", "조거", "조거 팬츠", "조거팬츠", "jogger pants", "jogger pant"],
+
+    # ── 굵은 통을 가른다 (사람 요청 2026-09-20, 전수 조사로 고른 것만) ──────────────
+    # 「재킷」 10,021벌의 64%가 아우터 전체였다. 이름을 전수로 헤아려 **진짜 다른 옷**만
+    # 골랐다 — 소재(울·코듀로이)와 핏(와이드·스트레이트)은 이미 태그에 있으니 안 넣는다.
+    # 레더 · 스웨이드 · 트위드는 품목이 아니라 소재 태그다(사람 2026-10-05: 「레더 자켓 · 블루종 · 트러커가 거의 같이 생겼는데
+    # 어떻게 묶지」→ 모양이 품목, 소재는 태그). 「레더 블루종」은 블루종 + 가죽, 「레더 자켓」은 재킷 + 가죽이다.
+    # 무스탕만 소재이면서 생김새(털 안감 · 두툼한 코트꼴)가 따로 있어 품목으로 남긴다.
+    #
+    # match_head 는 이름에서 **가장 뒤에 끝나는** 낱말을 고른다. 그래서 「TRUCKER JACKET」은
+    # jacket 이 뒤라 계속 재킷이 이긴다 — 붙은꼴을 통째로 넣어야 갈린다.
+    # 라이더(바이커)는 모양이다 — 비대칭 지퍼 · 짧은 기장. 소재는 가죽이 많지만 스웨이드 · 인조가죽도 있어 태그에 맡긴다.
+    # 홀로 선 「라이더 · 바이커 · rider · biker」는 넣지 않는다 — 무늬 · 그래픽 · 핏 이름일 때가 많았다
+    # (outstanding 「MOT SERIES TEE(HOONING BIKER)」 6벌이 아우터로 섰던 일, 코덱스 감사 023 26번 2026-10-02).
+    # 홀로 선 「라이더스」도 넣지 않는다 — noice 「WAVE RIDERS CLUB TWIST T-SHIRT」 · vibrate 「RIDERS JOGGER PANTS」(코덱스 2026-10-05).
+    "라이더자켓": ["라이더 자켓", "라이더자켓", "라이더 재킷", "라이더재킷", "라이더스 자켓", "라이더스 재킷", "라이더스자켓", "라이더스재킷",
+              "rider jacket", "riders jacket", "rider jk", "riders jk", "biker jacket", "biker jk", "바이커 자켓", "바이커자켓", "바이커 재킷", "바이커재킷",
+              # 「싱글 · 더블 라이더」는 겉옷 낱말 없이도 라이더 재킷이다(diafvine 「Fringe Single Rider Vegetable Calfskin」)
+              "싱글 라이더", "싱글라이더", "더블 라이더", "더블라이더", "single rider", "double rider"],
+    # 무스탕(시어링 · 무톤)은 스웨이드 겉면에 털 안감이라 「스웨이드 자켓」에 섞여 있었다 — 스웨이드자켓 332벌 중 19벌,
+    # 품목 빈칸에 87벌(2026-10-05 익명 평가 사유 「스웨이드가 아니라 무스탕인가」). shearling · 시어링은 홀로 두지 않는다 —
+    # 「Teddy Shearling Fleece Zip Up」은 집업이고 「시어링 링클 셔츠」의 시어링은 주름(shirring)이다.
+    "무스탕": ["무스탕", "mustang", "mouton", "무톤", "무스탕 자켓", "무스탕자켓", "무스탕 재킷", "무스탕 코트", "무스탕코트",
+             "mustang jacket", "mustang coat", "shearling jacket", "shearling jk", "shearling coat", "shearling jumper",
+             "shearling blouson", "시어링 자켓", "시어링자켓", "시어링 재킷", "시어링 코트", "시어링 점퍼", "시어링 블루종",
+             # 홀로 선 shearling — 「DV.LOT 692 Type B-6 Sheep Shearling 18-20mm」(diafvine 11벌)처럼 모양 낱말이 없는 이름.
+             # 모양 낱말이 있으면 match_head 가 뒤에 오는 그쪽(zip up · coat)을 고르므로 안전하다.
+             "shearling", "sheep shearling"],
+    "레이서자켓": ["레이서 자켓", "레이서자켓", "레이서 재킷", "racer jacket", "racer jk", "레이싱 자켓", "레이싱 재킷", "racing jacket", "모터사이클 자켓", "motorcycle jacket"],
+    # 「데님 자켓」은 트러커로 보내지 않는다 — 데님 트러커 · 워크자켓 · 셔츠자켓 어느 것도 될 수 있다(사람 2026-10-05). 일반 재킷.
+    "트러커": ["트러커", "trucker", "트러커 자켓", "트러커자켓", "트러커 재킷", "trucker jacket"],
+    "워크자켓": ["워크 자켓", "워크자켓", "워크 재킷", "work jacket", "카바롤", "coverall"],
+    "필드자켓": ["필드 자켓", "필드자켓", "필드 재킷", "field jacket", "밀리터리 자켓",
+             "military jacket", "m-65", "m65", "m-64"],
+    # 해링턴·바시티는 블루종의 한 갈래다 — 더 좁은 쪽이 이기게 붙은꼴을 같이 넣는다
+    "해링턴": ["해링턴", "harrington", "해링턴 블루종", "harrington blouson",
+            "해링턴 자켓", "해링턴자켓", "harrington jacket"],
+    "바시티": ["바시티", "varsity", "스타디움 자켓", "stadium jacket", "바시티 블루종",
+            "바시티 자켓", "바시티자켓", "바시티 재킷", "varsity jacket"],
+    "코치자켓": ["코치 자켓", "코치자켓", "코치 재킷", "coach jacket"],
+    "사파리자켓": ["사파리 자켓", "사파리자켓", "사파리 재킷", "safari jacket"],
+    "퀼팅자켓": ["퀼팅 자켓", "퀼팅자켓", "quilted jacket", "quilting jacket"],
+    "블루종": ["블루종", "blouson", "블루종 자켓", "블루종 재킷", "블루종 점퍼", "blouson jacket", "blouson jumper"],
+    # 코트 — 매장이 이름에 적는 것만. 코트 2,115벌 중 981벌(46%)이 갈린다.
+    # 싱글·더블은 여밈이지만 매장이 그것을 **옷 이름으로** 쓴다(「스텔란 싱글 코트」),
+    # 무신사도 갈라 둔다(사람 2026-09-20). 겹치는 58벌은 더 좁은 이름이 이긴다.
+    "발마칸": ["발마칸", "balmacaan", "발마칸 코트", "발마칸코트", "balmacaan coat"],
+    "더플코트": ["더플 코트", "더플코트", "duffle coat", "duffel coat"],
+    "맥코트": ["맥 코트", "맥코트", "mac coat"],
+    "피코트": ["피 코트", "피코트", "pea coat", "peacoat"],
+    "싱글코트": ["싱글 코트", "싱글코트", "single coat", "single breasted coat",
+              "싱글 브레스티드 코트", "싱글브레스티드 코트"],
+    "더블코트": ["더블 코트", "더블코트", "double coat", "double breasted coat",
+              "더블 브레스티드 코트", "더블브레스티드 코트"],
+    # 하의 — 「이지팬츠」는 안 넣는다. 167벌이 거의 한 매장의 라인 이름이었다
+    # (「Flow Banding Easy Pants」·「River Easy Pants」), 사람이 찾는 갈래가 아니다.
+    "치노": ["치노", "chino", "치노 팬츠", "치노팬츠", "chino pants"],
+    "카펜터팬츠": ["카펜터", "carpenter", "카펜터 팬츠", "카펜터팬츠", "carpenter pants"],
+    "파티그팬츠": ["파티그", "fatigue", "파티그 팬츠", "fatigue pants"],
+    "파라슈트팬츠": ["파라슈트", "parachute", "파라슈트 팬츠", "parachute pants", "파라수트", "파라수트 팬츠", "파라수트팬츠", "parasute pants"],
+    "트랙팬츠": ["트랙 팬츠", "트랙팬츠", "track pants", "트랙팬트"],
+    # 상의
+    "케이블니트": ["케이블 니트", "케이블니트", "cable knit", "케이블 스웨터", "cable sweater"],
+    "아가일니트": ["아가일", "argyle", "아가일 니트", "argyle knit"],
+    "링거티": ["링거", "ringer", "링거 티", "링거티", "ringer tee", "ringer t-shirt"],
+    "라글란": ["라글란", "래글런", "raglan"],
+    "웨스턴셔츠": ["웨스턴 셔츠", "웨스턴셔츠", "western shirt"],
+}
+
+# item_type → 대분류. categories_seed.csv 의 depth-1 코드를 따른다
+# (tops·outer·bottoms·dress·skirt·shoes·bags·accessories·suiting).
+ITEM_TO_CATEGORY = {
+    "후드": "tops", "집업": "tops", "맨투맨": "tops", "티셔츠": "tops", "셔츠": "tops", "니트": "tops",
+    "베스트": "tops", "탑": "tops", "롱슬리브": "tops", "가디건": "tops",
+    "재킷": "outer", "코트": "outer", "패딩": "outer", "바람막이": "outer", "블레이저": "outer",
+    "트렌치": "outer", "점퍼": "outer",
+    "데님": "bottoms", "팬츠": "bottoms", "숏팬츠": "bottoms", "쇼츠": "bottoms",
+    "스웨트팬츠": "bottoms", "카고팬츠": "bottoms",
+    "스커트": "skirt", "원피스": "dress", "점프수트": "dress", "파자마": "tops",
+    "저지": "tops", "반팔": "tops", "피케": "tops", "후드집업": "tops",
+    "버뮤다": "bottoms", "레깅스": "bottoms", "조거팬츠": "bottoms",
+    "언더웨어": "bottoms", "수영복": "tops", "수영복하의": "bottoms",
+    "바디수트": "tops",
+    "파카": "outer", "MA-1/봄버": "outer", "플리스": "outer",
+    # 2026-09-20 에 가른 품목들 — 갈래는 바뀌지 않는다
+    "라이더자켓": "outer", "트러커": "outer",
+    "무스탕": "outer", "레이서자켓": "outer", "블라우스": "tops", "하프셔츠": "tops",
+    "하프집업": "tops", "하프집업니트": "tops", "니트집업": "tops", "폴로니트": "tops", "니트베스트": "tops", "패딩베스트": "tops",
+    "슬리브리스": "tops", "캐미솔": "tops", "브라탑": "tops", "튜브탑": "tops",
+    "슬랙스": "bottoms", "로브코트": "outer",
+    "슬립원피스": "dress", "니트원피스": "dress", "셔츠원피스": "dress", "미니원피스": "dress", "미디원피스": "dress", "롱원피스": "dress",
+    "미니스커트": "skirt", "미디스커트": "skirt", "롱스커트": "skirt",
+    "워크자켓": "outer", "필드자켓": "outer", "해링턴": "outer", "바시티": "outer",
+    "코치자켓": "outer", "사파리자켓": "outer", "퀼팅자켓": "outer", "블루종": "outer",
+    "발마칸": "outer", "더플코트": "outer", "맥코트": "outer", "피코트": "outer",
+    "싱글코트": "outer", "더블코트": "outer",
+    "케이프/판초": "outer", "투피스": "dress", "수트셋업": "suiting",   # 2026-10-23. 수트셋업은 갈래가 suiting 이면 붙는다
+    "치노": "bottoms", "카펜터팬츠": "bottoms", "파티그팬츠": "bottoms",
+    "파라슈트팬츠": "bottoms", "트랙팬츠": "bottoms",
+    "케이블니트": "tops", "아가일니트": "tops", "링거티": "tops", "라글란": "tops",
+    "웨스턴셔츠": "tops",
+    "뷔스티에": "tops", "트랙재킷": "outer", "오버셔츠": "outer",
+    "스니커즈": "shoes", "부츠": "shoes", "샌들": "shoes", "구두": "shoes",
+}
+
+# 상품명·카테고리로도 못 정할 때 — 상세 설명의 치수 항목이 옷 종류를 말한다.
+# 「Chest / Shoulder」가 있으면 상의 계열, 「Waist / Inseam / Thigh」면 하의.
+SPEC_RULES = [
+    ("bottoms", ["inseam", "밑위", "허벅지", "thigh", "waist", "허리", "밑단", "hem width", "leg opening"]),
+    ("tops", ["chest", "가슴", "shoulder", "어깨", "sleeve", "소매", "총장", "armhole"]),
+]
+
+# 카테고리 이름(매장마다 제멋대로) → 대분류. 상품명으로 못 정했을 때의 폴백.
+CATEGORY_NAME_RULES = [
+    ("outer", ["outer", "아우터", "jacket", "자켓", "재킷", "coat", "코트", "jumper", "점퍼", "padding", "패딩", "blouson", "블루종"]),
+    ("dress", ["dress", "원피스", "드레스", "one-piece", "onepiece"]),
+    ("skirt", ["skirt", "스커트"]),
+    ("bottoms", ["bottom", "하의", "pants", "팬츠", "denim", "데님", "jeans", "shorts", "쇼츠", "반바지", "trouser", "slacks", "슬랙스"]),
+    ("tops", ["top", "상의", "tee", "t-shirt", "shirt", "셔츠", "knit", "니트", "sweat", "hood", "후드", "맨투맨", "blouse", "블라우스", "cardigan", "가디건", "vest", "베스트"]),
+    # 신발 어휘가 좁아서 실제보다 적게 잡혔다(2026-09-05: 태깅 340 vs 이름으로 센 것 ~500).
+    # 트레이너·메리제인·펌프스·더비·첼시·뮬·발레·클로그가 통째로 빠져 있었다.
+    ("shoes", ["shoes", "신발", "sneaker", "스니커", "boots", "부츠", "sandal", "샌들",
+               "slipper", "슬리퍼", "footwear", "trainer", "트레이너", "maryjane", "mary jane",
+               "메리제인", "pumps", "펌프스", "derby", "더비", "chelsea", "첼시", "loafer",
+               "로퍼", "mule", "뮬", "ballet", "발레", "clog", "클로그", "flat", "플랫",
+               "moccasin", "모카신", "runner", "러너"]),
+    # 「SLG」(small leather goods) — numbering 이 지갑·카드지갑을 이 칸에 둔다(2026-10-01, 창고에서 이 칸 이름은 그 매장뿐)
+    ("bags", ["bag", "가방", "tote", "backpack", "wallet", "지갑", "pouch", "파우치", "slg"]),
+    ("headwear", ["cap", "ballcap", "ball cap", "hat", "모자", "beanie", "비니", "버킷햇", "bucket hat", "베레", "beret"]),
+    # 「Pendant(s)」 칸 — numbering 「#8001」~「#8008」(펜던트)이 이름이 번호뿐이라 기타(=옷)로 셌다 · kruchi(2026-10-01)
+    ("jewelry", ["jewelry", "jewellery", "주얼리", "necklace", "목걸이", "bracelet", "팔찌", "earring", "귀걸이", "pendant"]),
+    ("accessories", ["acc", "액세서리", "악세사리", "belt", "벨트", "socks", "양말", "ring", "scarf", "머플러", "muffler", "underwear", "언더웨어", "eyewear", "sunglass", "sunglasses", "keyring", "glove", "장갑", "bag charm", "charm", "키링"]),
+    ("suiting", ["suit", "수트", "정장", "setup", "셋업"]),
+    # 살림살이 칸 — 목록에서 뺀다(kids·pet 과 같이). years-ago 「라이프」 칸의 목각·돌 조각 16벌,
+    # 「향수」 2벌이 설명글의 sleeve 한 낱말로 상의가 됐다(2026-09-26).
+    # 띄어 쓴 「Life style」(horlisun 책 칸) · 「Beauty」·「R&R BEAUTY」(loeuvre 매니큐어 · rest-recreation 립오일 ·
+    # 스팟패치)도 같은 칸이다 — 이름에 옷·잡화 낱말이 없어 기타(=옷)로 셌다(2026-10-01). 창고에서 이 두 칸 이름을 쓰는
+    # 매장은 셋뿐이고, 그 칸의 옷은 이름의 옷 낱말이 먼저 잡는다.
+    ("lifestyle", ["라이프", "lifestyle", "리빙", "living", "향수", "fragrance", "perfume", "오브제", "objet",
+                   "life style", "beauty", "뷰티"]),
+]
+
+# 성별 — 카테고리 이름에서. 없으면 브랜드 기본값.
+# 「girls」도 여성 칸이다 — 창고의 칸 이름을 전수로 훑어 고른 낱말이다(2026-09-19).
+# 833벌 중 830벌이 한 매장의 「GIRLS」 칸이고, 나머지 셋은 협업 이름(「GIRLS DON'T CRY X …」)이다.
+# 「W」·「M」 한 글자는 안 넣는다 — 「MMLG W」 84벌을 얻자고 넣기엔 딴 데 걸릴 자리가 너무 많다.
+# 「girl」단수는 **안 받는다.** hatching-room 의 「G i r L」칸(판매중 41벌)을 얻으려고
+# 넣어 봤는데, 사람이 「브랜드 이름이거나 상품명에 붙을 수도 있다」고 짚었고 실측이 맞았다:
+# 창고에서 girl 단수가 든 칸 이름은 **0가지**고, 상품 이름은 164벌인데 전부 그래픽 티
+# 문구다(「Lonely Girl Short Sleeve T-Shirt」·「BABY FACE CAT HUG GIRL …」·pushbutton 74벌).
+# 지금은 GENDER_RULES 가 칸 이름에만 쓰여 사고가 안 나지만, 누가 상품 이름에도 쓰는 날
+# 저 164벌이 통째로 여성이 된다. 그 매장은 아래 띄어쓰기 펴기만으로 잡는다.
+GENDER_RULES = [
+    ("WOMENSWEAR", ["women", "woman", "여성", "우먼", "womens", "ladies", "girls"]),
+    ("MENSWEAR", ["men", "man", "남성", "mens"]),
+    # 「젠더리스」는 매장이 제 입으로 한 유니섹스 선언이다. umarmung 이 GENDERLESS 185 ·
+    # WOMEN 101 로 탭을 나눠 뒀는데 우리가 그 말을 못 알아들어, 젠더리스 칸 113벌이
+    # 브랜드값(여성)으로 통째로 들어가 있었다(사람이 매장을 열어 보고 짚었다).
+    # 전수로 이 말을 쓰는 매장은 그 한 곳뿐이라 넓혀도 닿는 데가 없다.
+    ("UNISEX", ["unisex", "유니섹스", "genderless", "젠더리스", "agender"]),
+]
+# 칸 이름을 글자마다 띄어 놓는 매장이 있다(「G i r L」·「M E N」). 한 글자씩 떨어진
+# 토막만 붙인다 — 「MEN WOMEN」처럼 제대로 띄운 것은 안 건드린다.
+_SPACED = re.compile(r"(?:(?<=^)|(?<=\s))((?:[A-Za-z]\s){2,}[A-Za-z])(?=\s|$)")
+
+
+def unspace_cate(name: str) -> str:
+    if not name:
+        return name
+    return _SPACED.sub(lambda m: m.group(1).replace(" ", ""), name)
+
+
+# 「girl」단수는 **칸 이름이 그 낱말 하나일 때만** 받는다. 낱말표에 넣으면 그래픽 티
+# 제목까지 걸리는데(「Lonely Girl Short Sleeve T-Shirt」…164벌), 칸 이름이 통째로
+# 「girl」인 경우는 매장이 갈래로 쓴 것이다 — 실측으로 hatching-room 하나뿐이다.
+SOLO_WOMEN = re.compile(r"^(?:girl|걸)$", re.I)
+
+
+def cate_says_women_solo(name: str) -> bool:
+    return bool(SOLO_WOMEN.match(unspace_cate(name or "").strip()))
+BRAND_GENDER = {"Womenswear": "WOMENSWEAR", "Menswear": "MENSWEAR", "Unisex": "UNISEX"}
+# 매장이 성별 칸을 안 쓰는 상품에서, 품목만으로 여성이라 말할 수 있는 것.
+# 잣대는 「매장이 제 손으로 성별 칸에 넣어 둔 것 가운데 남성 칸이 0벌」이다. 기준선이
+# 여성 56% · 남성 44% 라 「여성이 많다」만으로는 아무 말도 아니다(2026-09-19 전수):
+#
+#     원피스    여성 341 · 남성   0        레그웨어  여성  36 · 남성 0
+#     스커트    여성 1,038 · 남성 1        수영복    여성  27 · 남성 0
+#     탑       여성 1,768 · 남성 138  ← 7.2%. 남성 탱크탑이 실제로 있다. 안 받는다
+#     플랫      여성   94 · 남성   4  ← 4.1%. 안 받는다
+WOMEN_ONLY_ITEM = {"스커트", "원피스", "레그웨어", "수영복",
+                   # 2026-10-05 에 스커트 · 원피스를 기장별로 가른 뒤 그 이름이 여기 없어 「H-LINE LONG SKIRT」(품목 롱스커트)가 성별 층을
+                   # 그냥 지나 브랜드 기본값 유니섹스가 됐다(dunst 스커트 14 · 원피스 2벌, 사진 대조 2026-10-27). 다시 잰 매장 성별 칸:
+                   # 칸에 든 기장별 스커트 1,331벌 중 남성 칸 1(miseki-seoul 랩 스커트) · 기장별 원피스 479벌 중 0. 점프수트 · 투피스는 안 넣는다.
+                   "미니스커트", "미디스커트", "롱스커트",
+                   "미니원피스", "미디원피스", "롱원피스", "슬립원피스", "셔츠원피스", "니트원피스"}
+# 품목이 「탑」이어도 **이름이 브라탑 꼴이면** 여성이다. 사람이 짚어 준 자리 —
+# 「탑」 통째로는 남성이 7.2% 지만, 이 이름들만 추리면 남성 칸이 0벌이다(전수 189벌).
+NAME_WOMEN_ONLY = re.compile(
+    r"브라\s?탑|브라렛|bralette|bra\s?top|뷔스티에|bustier|튜브\s?탑|tube\s?top|홀터|halter",
+    re.I)
+# 상의·아우터는 **총장**이 가른다. 정답지는 매장이 제 손으로 한쪽 성별 칸에만 넣어 둔
+# 판매중 상의·아우터인데, 여기서 **이름이 한 마디라도 하는 상품은 빼야 한다** —
+# 「UNISEX FISHERMAN KNIT CARDIGAN」처럼 이름이 유니섹스라 말하는 옷은 ①에서 이미
+# 갈라지므로 이 층에 오지 않는다. 그것을 안 뺐다가 규칙이 95%로 보인 적이 있다(재측정 실수).
+#
+# 씻은 정답지 8,911벌(상의 6,482 · 아우터 2,429)로 재면:
+#
+#     상의 총장 중앙  여성 2,861벌 중앙 54cm · 남성 2,919벌 중앙 68cm · **남성 최솟값 57.25**
+#         <54  100.000%  1,349벌      <57  100.000%  1,769벌   ← 여기까지 잘못 0
+#         <58   99.946%  1,856벌      <60   99.000%  2,069벌
+#     아우터 총장 중앙
+#         <57  100.000%    222벌      <58   98.760%    242벌
+#
+# 옛 문턱 50 은 너무 짰다 — 57 로 올리면 거둠이 상의 620 → 1,769벌(2.85배)인데 잘못은
+# 그대로 0이다. 아우터는 어깨(<44, 99.2% · 128벌)보다 총장이 낫다(100% · 222벌).
+#
+# 어깨는 **총장이 없을 때만** 쓴다. 총장이 있는데 어깨로 덮으면 98.0%로 떨어진다
+# (총장<57 또는 어깨<41 을 상의 전체에 걸면 잘못이 0 → 46벌이 된다).
+# 총장 없는 상의 400벌만 놓고 보면 어깨<40 이 233벌 100.00%, 41부터 잘못이 생긴다.
+#
+# **남성 쪽은 세울 수 없다.** 같은 정답지로 훑으면 가장 좋은 것이 상의 총장≥76 의 91.1%,
+# 어깨≥54 의 83.1%, 아우터 어깨≥58 의 67.7% 다. 여성 오버핏이 남성 치수를 통째로 덮는다.
+# 하의(허리)는 되는데 상의는 안 된다 — 억지로 넣지 않는다.
+TOP_ITEMS = {"티셔츠", "맨투맨", "셔츠", "블라우스", "하프셔츠", "하프집업", "하프집업니트", "니트집업", "폴로니트", "니트베스트", "패딩베스트", "슬리브리스", "캐미솔", "브라탑", "튜브탑", "니트", "후드", "롱슬리브", "반팔", "탑",
+             "가디건", "집업", "베스트", "피케", "저지",
+             # 2026-09-20 에 가른 것 — 여기 안 넣으면 총장 성별 규칙이 그 옷에서 꺼진다
+             "케이블니트", "아가일니트", "링거티", "라글란", "웨스턴셔츠", "뷔스티에"}
+OUTER_ITEMS = {"재킷", "코트", "점퍼", "블레이저", "패딩", "파카", "바람막이",
+               "MA-1/봄버", "트렌치",
+               "라이더자켓", "무스탕", "레이서자켓", "로브코트", "트러커", "워크자켓", "필드자켓",
+               "해링턴", "바시티", "코치자켓", "사파리자켓", "퀼팅자켓", "블루종",
+               "발마칸", "더플코트", "맥코트", "피코트", "싱글코트", "더블코트", "트랙재킷", "오버셔츠"}
+TOP_SHORT_CM = 57.0          # 총장 중앙이 이보다 짧으면 여성
+SHOULDER_NARROW_CM = 40.0    # 총장을 모를 때만 본다
+_LEN_KEYS = ("총장", "총길이", "기장", "length", "총기장")
+_SHOULDER_KEYS = ("어깨", "어깨단면", "어깨너비", "shoulder")
+
+
+def _med_of(size_table, keys, lo, hi) -> float | None:
+    if not isinstance(size_table, dict):
+        return None
+    for k in keys:
+        v = size_table.get(k)
+        if not isinstance(v, list):
+            continue
+        nums = [float(x) for x in v if isinstance(x, (int, float)) and lo <= x <= hi]
+        if nums:
+            return statistics.median(nums)
+    return None
+
+
+# ─── 하의 허리로 성별 가리기 ───────────────────────────────────────────────
+#
+# 사람이 짚어 준 잣대다: 「남성 허리단면은 36 밑으로 잘 안 내려간다 · 여성은 큰 것도
+# 입는다 · S 34 · L 42 처럼 폭이 걸치면 유니섹스다 · **밴딩엔 안 통한다**」.
+# 매장이 제 손으로 성별 칸에 넣어 둔 판매중 하의 2,898벌을 정답지로 놓고 전수로 쟀다.
+#
+# 세 가지가 다 있어야 쓸 만해진다 — 하나라도 빼면 맞힘이 무너진다:
+#
+#   ① 둘레로 적힌 값을 접는다   한 칸에 단면(35)과 둘레(70)가 섞여 있다.
+#                              여성 90분위가 59.0cm 였다 — 그건 단면이 아니다.
+#   ② 밴딩·조거·쇼츠를 뺀다     그것만 따로 재면 양쪽 다 74~91%로 무너진다.
+#                              허리를 늘어난 상태가 아니라 눌린 상태로 적어서다.
+#   ③ 치수 폭을 요구한다        치수가 하나뿐인 383벌에 **값이 깨진 것이 몰려 있다**
+#                              (「WASHED JEANS 허리 24cm」= 둘레 48cm, 아동복 치수).
+#                              이 조건 하나로 여성 쪽 잘못이 26벌 → 5벌이 된다.
+#
+# 셋을 다 건 1,839벌에서:
+#     최대 허리 < 38  → 여성   맞힘 98.3%  거둠 292  잘못 5
+#     최소 허리 ≥ 40  → 남성   맞힘 99.6%  거둠 443  잘못 2
+# 여성 쪽 잘못 5벌은 더 못 줄인다 — 허리 32~36 짜리 진짜 남성 바지다
+# (uniform-bridge 치노 · goodlifeworks 투턱 와이드).
+# 문턱 사이는 **안 정한다** — 거기가 진짜로 겹치는 자리다.
+#
+# 「XS 가 있으면 여성」은 **안 받는다.** XS 가 있어도 359벌이 남성 칸이다
+# (andersson-bell 「UNISEX PUPPY T-SHIRT」가 XS~XL). 가르는 것은 낱말이 아니라 폭이다.
+_WAIST_KEYS = ("waist", "허리", "허리단면")
+WAIST_WOMEN_MAX = 38.0
+WAIST_MEN_MIN = 40.0
+WAIST_FOLD_OVER = 50.0      # 이보다 크면 둘레로 보고 반으로 접는다
+# 허리를 믿을 수 없는 옷 — 고무줄이 눌린 채로 적힌다
+WAIST_UNRELIABLE = re.compile(
+    r"밴딩|밴드|banding|elastic|스트링|string|조거|jogger|플리스|fleece|"
+    r"스웨트|스웻|sweat\s?pants|트랙\s?팬츠|track\s?pants|이지\s?팬츠|easy\s?pants|"
+    r"파자마|pajama|잠옷|"
+    # 반바지는 허리를 크게 잡고 기장만 줄인 꼴이라 여성복도 허리가 크다. 띄어 쓴
+    # 「SHORT PANTS」·「Half Pants」를 메우니 남성 쪽 맞힘이 98.91% → 99.55% 가 됐다
+    # (잘못 5 → 2, 거둠은 12벌만 잃는다).
+    r"쇼츠|shorts|short\s?pants|숏\s?팬츠|반바지|하프\s?팬츠|half\s?pants|버뮤다|bermuda", re.I)
+
+# 품목으로도 같은 것을 거른다 — 어휘표가 든 동의어(「트레이닝 팬츠」·「숏츠」)를 이름
+# 정규식은 못 잡는다. 반대로 띄어 쓴 「SHORT PANTS」는 품목이 못 잡는다. 둘 다 건다.
+WAIST_UNRELIABLE_ITEM = {"숏팬츠", "쇼츠", "버뮤다", "버뮤다팬츠", "트레이닝팬츠", "스웨트팬츠", "레깅스", "조거팬츠",
+                         # 허리가 밴딩·스트링이라 실측이 작게 나온다 — 성별을 못 가린다
+                         "트랙팬츠", "파라슈트팬츠",
+                         # 속옷 · 수영복 하의도 고무줄 허리다 — 남성 박서브리프(heritagefloss-4524 · 허리 30대)가 허리 규칙으로 여성이 됐다
+                         # (허리로 성별을 정한 속옷 16 · 수영복 하의 21벌, 2026-10-27)
+                         "언더웨어", "수영복하의"}
+
+
+def waist_span(size_table) -> tuple[float, float] | None:
+    """허리의 가장 작은 치수와 가장 큰 치수. 폭이 없으면(치수 한 벌) None."""
+    if not isinstance(size_table, dict):
+        return None
+    for k in _WAIST_KEYS:
+        v = size_table.get(k)
+        if not isinstance(v, list):
+            continue
+        nums = [float(x) / 2 if float(x) > WAIST_FOLD_OVER else float(x)
+                for x in v if isinstance(x, (int, float)) and 15 <= x <= 140]
+        if len(nums) >= 2 and max(nums) - min(nums) >= 1.0:
+            return min(nums), max(nums)
+        return None
+    return None
+
+
+def top_length(size_table) -> float | None:
+    """실측표에서 총장 중앙값. 값이 없거나 옷 치수로 볼 수 없는 수면 None."""
+    return _med_of(size_table, _LEN_KEYS, 20, 120)
+
+
+def shoulder_width(size_table) -> float | None:
+    """실측표에서 어깨 중앙값."""
+    return _med_of(size_table, _SHOULDER_KEYS, 20, 90)
+
+# 상품이 아닌 페이지의 이름 — 개인결제·스태프 결제·룩북·테스트. 가격이 있어도 상품이 아니다.
+# ^@ — glowny 가 고객 착용샷을 「@인스타아이디」 상품(2,500,000원)으로 830건 올려 둠. ^[¥*]+ — insilence 비공개 자리표시자 159건 (사람 결정 2026-09-02)
+# 쇼핑백·기프트백·더스트백은 상품이 아니라 포장이다 — 다만 이름만으로는 못 가른다.
+# the-museum-visitor 「PAINTING ART PRINTED DUST BAG」 세 벌은 145,000원짜리 진짜 가방이고,
+# vunque 「쇼핑백」 1,500원·glowny 「GIFT BAG」 3,000원은 포장이다. 값이 가른다(2026-09-06).
+PACKAGING = re.compile(r"쇼핑백|shopping\s*bag|기프트\s*백|gift\s*(?:bag|box)|더스트\s*백|dust\s*bag|포장\s*백", re.I)
+PACKAGING_MAX = 10000
+
+# 「적립금 반영」「적립금 전환 전용」 — 적립금을 넣어 주려고 만든 결제 항목이다(고낙 「wool angora mods parka 적립금 반영」 ·
+# siyazu 「[캠핑 페스티벌 보증금] 적립금 전환 전용」, 2026-09-23 창고 전수 2벌).
+JUNK_NAME = re.compile(r"^@|^[¥*\s]+$|실장님|이사님|원장님|디자이너\s*님|\s님\s*$|개인\s*결제|테스트|샘플|배송비|추가\s*금|적립금\s*(?:반영|전환|지급)|lookbook|룩북|campaign|캠페인|\d{4}\s*(spring|summer|fall|autumn|winter)", re.I)
+
+# 상품이 아니라 룩북·에디토리얼·팝업·시즌 캠페인 페이지 — cafe24 매장이 이런 것도 /product/
+# 에 올려 둔다(amomento 34 · rough-side 25 · haleine 11). JUNK_NAME 과 달리 이름만으로는
+# 못 가른다. 「EXHIBITION GRAPHIC T-SHIRT」는 전시가 아니라 티셔츠라서, 품목이 옷·잡화로
+# 잡히면 상품으로 둔다. 그래서 판정은 build_csv 에서 카테고리를 정한 뒤에 한다(2026-09-05).
+# 룩북·이벤트 페이지는 값을 매길 수 없어 매장이 자리표시 값을 넣는다 — glowny 9,999,999원
+# 41건(팝업·화보), low-classic 10,000,000원 15건(전부 [journal]). xlim 의 560만원 시어링
+# 재킷은 진짜 상품이라 문턱을 그 위에 둔다(2026-09-05 사람 지적으로 찾았다).
+PLACEHOLDER_PRICE = 9_999_999
+
+# 매장이 룩북을 넣어 두는 칸. 「STORE」·「COLLECTION」은 진짜 상품 칸이라 넣지 않는다
+# (perenn 의 ONLINE STORE 138벌, anotheryouth 의 COLLECTION 373벌이 전부 상품이다).
+EDITORIAL_CAT = re.compile(r"^(?:projects?|journal|campaign|lookbook|look ?book|editorial|"
+                           r"magazine|press|moments|룩북|화보|캠페인|매거진|"
+                           r"brand ?news|archive ?note|notice|blog|library|저널|브랜드 ?뉴스)$", re.I)
+# 이름이 시즌 표기와 번호뿐인 것 — 「2022fw 38」·「25fw」. 룩북 장면이지 상품이 아니다(cayl
+# 「Collection」 칸 106벌이 설명글 치수 낱말 하나로 상의가 돼 결손으로 서 있었다, 2026-09-26).
+SEASON_ONLY_NAME = re.compile(r"^\s*(?:19|20)?\d{2}\s*(?:ss|fw|s/s|f/w|aw|hs)\s*(?:\d{1,3})?\s*$", re.I)
+POST_TITLE = re.compile(r"^[^|ㅣ│]{1,60}\s[|ㅣ│]\s?\S|^[^|ㅣ│]{1,60}\S[|ㅣ│]\s")
+# 이름에 용량(「SOYO (17L)」)을 적는 것은 가방이다.
+BAG_CAPACITY = re.compile(r"\(\s*\d{1,2}(?:\.\d)?\s?L\s*\)")
+# 「Archive」 칸은 혼자서는 진짜 상품 칸이다(지난 시즌 상품을 모아 둔 매장이 많다). 룩북 칸과
+# **같이** 붙어 있을 때만 룩북 쪽으로 센다 — years-ago 「Archive · Journal」·「Archive · Archive Note」
+# 는 글이었다(「Moleskin 코튼과 Serge 코튼은 어떠한 점에서 다른가」, 2026-09-26 사람 지시로 정리).
+EDITORIAL_WEAK = re.compile(r"^(?:archive|아카이브)$", re.I)
+
+LOOKBOOK_NAME = re.compile(
+    r"\beditorial\b|\bshowcase\b|\bpop-?up\b|\bpresentation\b|\bexhibition\b|\blookbook\b|룩북|"
+    r"\bcuration\s*(?:project|book)\b|\binterview\b|\bcampaign\b|캠페인|화보|전시|"
+    r"^\s*(?:winter|summer|spring|autumn|fall|ss|fw|s/s|f/w)\s*'?\d{2}\s*$|"
+    r"^\s*\d{2}\s*(?:ss|fw|s/s|f/w|spring|summer|autumn|winter|fall)\b.*\b(?:collection|editorial)\b",
+    re.I)
+
+
+
+# ─── 가격 없는 페이지 가르기 ───
+#
+# 매장이 품절 상품의 값을 내려 버리는 일이 흔하다. 그래서 「가격 없음 = 상품 아님」으로 두면
+# 진짜 옷이 대량으로 사라진다 — sinoon 은 실패 1,169건을 표본 89벌 전수 확인했더니 한 벌도
+# 빠짐없이 품절된 진짜 상품이었다(2026-09-06).
+#
+#   Rose Flower Pullover Knit (Charcoal)   품절 · 사진 2장
+#   Eyelet Punching Midi Skirt (Navy)      품절 · 사진 2장
+#
+# 그러니 이제는 이름으로 가른다. 상품이 아닌 것만 버리고 나머지는 값 없이 품절로 담는다.
+JUNK_HEAD = re.compile(r"^\s*(?:\[[^\]]*\]|【[^】]*】)\s*")
+
+# 시즌 표시 — 「23' A/W COLLECTION」은 룩북이고 「컬렉션 와이드 스트라이프 데님」은 옷이다.
+# 시즌이 붙어 있을 때만 컬렉션을 룩북으로 본다(kirsh 의 컬렉션 라인 71벌이 이 단서로 살았다).
+SEASONISH = re.compile(
+    r"20\d\d|'\s?\d\d|\b\d\d\s*'?\s*(?:s/s|f/w|a/w|ss|fw|aw)\b|\b(?:s/s|f/w|a/w)\s*\d\d\b|"
+    r"\bresort\b|\bholiday\b|\bpre-?\s?(?:spring|fall)\b|\b(?:spring|summer|fall|autumn|winter)\b",
+    re.I)
+
+# 매장이 상품이 아닌 페이지를 모아 두는 칸. 값이 없는 페이지에만 물어본다.
+# 「EPISODE.N」(xlim 상품 898벌) · 「SPECIAL PROJECTS」 · 「GLOWNY MOMENTS」는 진짜 상품 칸이라
+# 재 보고 뺐다. 지금 어휘에 걸리는 정상 상품은 96벌뿐이고, 그것도 값이 있으니 손대지 않는다.
+CONTENT_CAT = re.compile(
+    r"연예인|인플루언서|셀럽|화보|룩북|매거진|캠페인|프레스|"
+    r"\bceleb\w*|\blook\s?-?books?\b|\bmood\s?-?books?\b|\bmagazine\b|\bpress\b|\bcampaign\b|\beditorials?\b|"
+    r"\bjournal\b|\bstockists?\b|\brunway\b|\bguides?\s*$|"
+    r"^\s*with\s+\S+\s*$|^\s*20\d\d\s*(?:ss|fw|aw|s/s|f/w)\s*$|^\s*vwd\s*$", re.I)
+# 위 어휘에 복수형 · 무드북 · 가이드를 더했다(2026-10-27 값 없는 상품 282벌 전수) — 「Lookbooks」(outstanding 6벌)는
+# \blook-book\b 이 「s」 앞에서 끊겨 못 잡았고, begin202 「MOODBOOK」 3벌 · facade-pattern 「The Denim Guide」 2벌
+# (「데님을 오래 입는 방법」)도 값 없는 글이 상품으로 서 있었다.
+
+# 값 없는 페이지의 이름 앞머리가 「연예인 이름 - 」인 것 — noirer 「NCT 도영 - 레이어드 가디건 풀오버 니트 (블랙)」 ·
+# 「배우 송강 - 나일론 매거진ㅣ울 실크 브이넥 트위드 자켓」 16벌은 착용 글이다(값 · 옵션 없음, 2026-10-27).
+# 앞머리에 옷 낱말이 없을 때만 본다 — 「울 코트 - 블랙」은 옷이다. 값 · 옵션이 있는 상품에는 묻지 않는다.
+CELEB_HEAD = re.compile(r"^\s*(?:배우\s+)?(?:[A-Z]{2,6}\s+)?[가-힣]{2,4}(?:\s+[가-힣]{2,4})?\s+-\s+(?=\S)")
+# 값 없는 페이지의 이름 끝 연재 번호 — low-classic 「Day Out In Seoul_1」~「_10」 화보 장면. 옷 낱말이 없을 때만.
+SERIES_NO = re.compile(r"[_#]\s*\d{1,2}\s*$")
+# 매장마다 상품 칸에 섞어 둔 글의 이름 머리 — 이 매장 틀에서만 뜻이 있다.
+#   mmlg 「EWM_26SS_LIGHT V NECK KNIT (POWDER PINK)_1」 88벌 — 「EVERYDAY WITH Mmlg」 착용 연재다. 칸 이름 「View more」,
+#   값 0원 · 품절이고, 같은 옷은 「[Mmlg] LIGHT V NECK KNIT (POWDER PINK)」(99,000원)로 따로 판다(2026-10-27 페이지 확인).
+POST_NAME_HEAD = {"mmlg": re.compile(r"^EWM_")}
+
+# 아래 낱말은 전부 「정가가 붙은 상품 38,341벌 가운데 0벌」을 확인하고 넣었다(2026-09-06).
+# 재 보고 뺀 것 둘: 「에피소드」는 xlim 상품 898벌이 EP.4 02 T-SHIRT 꼴이라 못 쓰고,
+# 「착용」·「celeb」은 앞머리 대괄호를 뗀 뒤에만 본다 —
+#   [Celeb SEULGI] Flower Halter Neck Knit Vest  ← sinoon 의 진짜 옷
+#   [With GROVE] Celeb 문가영                     ← grove 의 화보
+#   [차정원 착용] FEED KNIT PANTS                 ← grove 의 진짜 옷
+# 앞머리를 떼면 남는 쪽에 celeb·착용이 있는지로 둘이 갈린다.
+NOT_PRODUCT = [
+    # data/_uncollectable.jsonl 에 사람이 손으로 모아 둔 243건을 다시 태워 보고 채웠다
+    # (2026-09-06). 지금 규칙이 179건을 잡고, 아래 넷을 더하면 190건이 된다.
+    # 나머지 53건은 insilence 「스탭스냅」인데 그건 바로 아래 줄에서 잡는다.
+    ("개인결제창", re.compile(r"개인\s*결제|임직원|결제\s*창|실장님|원장님|이사님|대표님", re.I), False),
+    ("스탭스냅", re.compile(r"스탭\s?스냅|스태프\s?스냅|staff\s?snap", re.I), False),
+    ("샘플·테스트", re.compile(r"(?<![가-힣])샘플(?![가-힣])|테스트|test\s*product", re.I), False),
+    ("배송비·차액", re.compile(r"배송비|추가\s*금|차액\s*결제|차액\s*지불", re.I), False),
+    ("룩북", re.compile(r"look\s?-?book|룩북", re.I), False),
+    ("캠페인", re.compile(r"\bcampaign\b|캠페인", re.I), False),
+    ("에디토리얼", re.compile(r"\beditorial\b|에디토리얼|화보", re.I), False),
+    ("런웨이", re.compile(r"\brunway\b|런웨이", re.I), False),
+    ("저널", re.compile(r"\bjournals?\b|\bstockists?\b", re.I), False),
+    ("매거진", re.compile(r"^\s*\[[^\]]*magazine[^\]]*\]", re.I), False),
+    ("발매안내", re.compile(r"딜리버리"), False),
+    ("팝업·프리뷰", re.compile(r"\bpop-?up\b|팝업|\bpreview\b", re.I), False),
+    ("이름이번호뿐", re.compile(r"^\s*(?:no\.?|№)\s*\d+\s*$", re.I), False),
+    ("연예인화보", re.compile(r"\bceleb\b|착용", re.I), True),   # 앞머리를 뗀 뒤에 본다
+    # noirer 는 칸 이름을 알아 올 수 없다(목록 페이지가 우리에게 안 열린다). 그래서 이름으로
+    # 잡는다 — 「2021 F/W Ready to wear "Preserved 天日花" Part.2」·「With 넬」·「With 나인」.
+    # 둘 다 정가 붙은 상품 38,341벌 가운데 0벌이다.
+    ("컬렉션발표", re.compile(r"ready\s*-?\s?to\s*-?\s?wear", re.I), False),
+    ("협업·출연", re.compile(r"^\s*with\s+\S+", re.I), True),
+    # 이름 자리에 점 하나만 있는 페이지 — koominseong 36건이 전부 「.」이다.
+    ("글자없는이름", re.compile(r"^[^0-9A-Za-z가-힣ㄱ-ㅎ]+$"), False),
+    # 시즌 표지 — 「EPISODE.4」·「EPISODE.1 - THEM MAGAZINE」. xlim 의 진짜 상품은
+    # 「EP.4 02 LEATHER JACKET」 꼴이라 이 무늬에 안 걸린다(정상 상품 0벌).
+    ("에피소드표지", re.compile(r"^\s*episode[\s.\-]*\d", re.I), False),
+    # 「Look 11」 — 이름이 룩 번호뿐인 화보 장면(low-classic 16벌, 값 없음 · 2026-10-27). 정가 붙은 상품에는 이런 이름이 없다.
+    ("룩번호", re.compile(r"^\s*look\s*(?:no\.?\s*)?#?\s*\d{1,3}\s*$", re.I), False),
+    # 「Horn Button [curation]」 — 브랜드 소개 글(low-classic 「Our Classic」 4벌).
+    ("큐레이션", re.compile(r"\[\s*curation\s*\]", re.I), False),
+]
+
+# 연도가 붙은 시즌 표기 — 「2023 S/S」 · 「25 S/S」 · 「2022S/S」. 「S/S」는 반팔 낱말이기도 해서(「S/S TEE」) 이것이
+# 품목으로 읽히면 「2023 S/S 1ST COLLECTION」(massnoun) · 「Mmlg 2020 S/S part 1」 같은 시즌 표지가 반팔 옷으로
+# 살아남았다(값 없는 상품 282벌 중 40여 벌, 2026-10-27). 품목 낱말을 볼 때만 연도와 붙은 시즌 표기를 지운다.
+SEASON_YEAR_TOKEN = re.compile(r"\b(?:19|20)?\d{2}\s*'?\s*(?:s/s|f/w|a/w)(?![a-z])|\b(?:s/s|f/w|a/w)\s*'?\s*(?:19|20)?\d{2}\b", re.I)
+
+# 이름이 시즌 표지뿐인 페이지 — 「SUMMER CAPSULE 23」·「FALL WINTER 25」·「2022 PRE-SPRING」.
+# 시즌 낱말 + 연도 + 품목 낱말 없음. 정가 붙은 상품 38,341벌에 대고 재면 세 벌이 걸리는데
+# divein 의 「25 SUMMER」·「25 FALL」·「25 FALL 2ND」로, 셋 다 값이 「2025」인 룩북 페이지다
+# (연도를 값으로 읽었다). 잘못 걸린 게 아니라 이미 섞여 있던 쓰레기를 찾아낸 것이다.
+SEASON_WORD = re.compile(
+    r"\b(?:spring|summer|fall|autumn|winter|resort|holiday|capsule|ss|fw|aw|s/s|f/w|a/w|"
+    r"pre-?\s?spring|pre-?\s?fall)\b|봄|여름|가을|겨울|간절기", re.I)
+YEARISH = re.compile(r"\b(?:19|20)\d\d\b|(?<![0-9])\d\d(?![0-9])")
+
+# 매체·매장 안내 — 「OSOI HONG KONG STORE」·「2023 MSCHF ONLY | PORTRAIT VIDEO」.
+# 품목 낱말이 없을 때만 본다(가게 이름이 든 진짜 상품을 지키려고). 정상 상품 0벌.
+MEDIA_PAGE = re.compile(r"\bvideo\b|\bfilm\b|\bshowroom\b|\bstore\b|\bpop-?up\b|스토어|쇼룸", re.I)
+# 오프라인 지점 안내 — 제너럴아이디어가 「신세계백화점, 광주점」 같은 지점 페이지 17쪽을 값 없이 /product/ 에
+# 올려 품절 상품으로 들어왔다(코덱스 검증 004, 2026-09-28). 품목 낱말 관문보다 **먼저** 본다 — 「백화점」의
+# 「백」이 가방으로 읽혀 관문을 통과했다. 전 매장 이름에 대 보니 그 17쪽만 걸렸다.
+STORE_BRANCH = re.compile(r"(?:백화점|아울렛|아웃렛|면세점|스타필드|아이파크몰|\bLF\s*스퀘어|SF\s*빌리지|더현대|타임스퀘어|몰)"
+                          r"\s*,?\s*[가-힣A-Za-z ]{1,12}점\s*$", re.I)
+
+
+
+def price_pair(d: dict) -> tuple[int, int, int | None]:
+    """(정가, 지금 파는 값, 할인가 또는 None) — 플랫폼마다 값 칸의 뜻이 달라 여기서 한 번에 맞춘다.
+
+    - 카페24: price = 판매가, price_listed = 소비자가(판매가보다 클 때만), price_sale = 할인판매가(판매가보다 작을 때만)
+    - Shopify · 식스샵 · 매장별 해석기: price = 지금 파는 값, price_listed = 할인 전 값(compare_at 등)
+    정가는 그중 가장 큰 값(페이지가 줄 그어 보여 주는 값), 할인가는 가장 작은 값이 정가보다 작을 때만.
+    """
+    def _i(x):
+        try:
+            return int(x or 0)
+        except (TypeError, ValueError):
+            return 0
+    price, listed, sale = _i(d.get("price")), _i(d.get("price_listed")), _i(d.get("price_sale"))
+    if not price:
+        return 0, 0, None
+    lst = max(price, listed)
+    pay = min(price, sale) if sale else price
+    return lst, pay, (pay if pay < lst else None)
+
+
+def carry_over(prev: dict, d: dict, when: str) -> None:
+    """옛 줄에서 잃으면 안 되는 것을 새 줄로 옮기고, 값·재고가 바뀐 자국을 남긴다.
+
+    창고는 이름과 달리 쌓이지 않는다 — Actions 의 합치기 단계가 상품 번호로 접어 한 상품
+    한 줄로 다시 쓴다(40,880줄 = 40,880상품, 실측 2026-09-06). 그래서 매장이 품절 상품의
+    값을 내리는 순간 우리 값도 같이 사라졌다. 옛 줄에 값이 있으면 그 값을 이어 쓰고,
+    언제 본 값인지 적는다(사람 지시 2026-09-06: 「이젠 가격 안 잃어버리게 박아두자」).
+
+    자국(price_log·stock_log)은 바뀔 때만 한 줄씩 쌓는다. 접혀 다시 쓰여도 줄 **안**에
+    있으니 살아남는다 — 나중에 재입고·할인 알림을 붙일 때 쓸 바탕이다(사람 2026-09-06:
+    「api까지 생기면 실시간 재입고나 할인율 변동 등 알람도 보내줄 수 있겠네」).
+
+    세 곳(첫 수집·주간 점검·상세 보정)이 같은 판단을 하므로 여기 한 곳에 둔다.
+    """
+    if not d.get("price") and prev.get("price"):
+        d["price"] = prev["price"]
+        d["price_kept"] = True
+        d["price_seen_at"] = prev.get("price_seen_at") or prev.get("crawled_at")
+    elif d.get("price"):
+        # 값이 돌아왔으면 「물려받은 값」 딱지를 뗀다 — 상세 보정은 옛 줄을 고쳐 쓰므로
+        # 떼 주지 않으면 딱지가 남아 오래된 값처럼 읽힌다.
+        d.pop("price_kept", None)
+        d.pop("price_missing", None)
+        d["price_seen_at"] = when
+    # 정가는 매장이 할인을 걷으면 페이지에서 사라진다 — 한 번 본 정가는 이어 쓴다.
+    if not d.get("price_listed") and prev.get("price_listed"):
+        d["price_listed"] = prev["price_listed"]
+    # 지금 파는 값이 정가 이상이면 할인이 끝난 것이다 — 옛 정가를 뗀다.
+    if d.get("price") and d.get("price_listed") and d["price"] >= d["price_listed"]:
+        d.pop("price_listed", None)
+    plog = list(prev.get("price_log") or [])
+    if d.get("price") and (not plog or plog[-1][1] != d["price"]):
+        plog.append([when[:10], d["price"]])
+    d["price_log"] = plog[-20:]
+    # 할인가 자국(사람 2026-10-02 「할인가는 시기별로 수집해서 기록해두자」). 값을 못 읽어 옛 값을 물려받은 판은
+    # 할인가도 물려받는다 — 페이지를 못 본 날을 「할인 끝」으로 적으면 안 된다.
+    if d.get("price_kept") and prev.get("price_sale") and "price_sale" not in d:
+        d["price_sale"] = prev["price_sale"]
+    lst, pay, sale = price_pair(d)
+    if lst:
+        sl = list(prev.get("sale_log") or [])
+        now_sale = sale or 0                     # 0 = 할인 없음(정가에 판다)
+        if (sl and sl[-1][1] != now_sale) or (not sl and now_sale):
+            sl.append([when[:10], now_sale])
+        if sl:
+            d["sale_log"] = sl[-40:]
+    slog = list(prev.get("stock_log") or [])
+    now_stock = "품절" if is_soldout(d) else "판매중"
+    if not slog or slog[-1][1] != now_stock:
+        slog.append([when[:10], now_stock])
+    d["stock_log"] = slog[-20:]
+    # 이번 판이 표를 **일부러 버렸으면**(size_reject — 남의 표 · 매장 틀) 지난 판 표를 되살리지 않는다. 되살리면 버린 표가 돌아온다.
+    if prev.get("size_table") and not d.get("size_table") and not d.get("size_reject"):
+        d["size_table"] = prev["size_table"]
+        d["size_table_kept"] = True
+    for k in ("detail_text", "description"):
+        if len(d.get(k) or "") < len(prev.get(k) or "") // 2:
+            d[k] = prev.get(k)
+
+# 매장이 품절 딱지를 붙여 놨는데 **우리 손의 기록엔 살아 있는 치수가 있는** 상품이 있다.
+# 전수로 가르니 자리가 넷이다(2026-09-20 · 163,461줄 중 품절 딱지 50,762):
+#
+#     옵션이 아예 없다              9,276   매장 말을 따른다 — 견줄 것이 없다
+#     모든 옵션에 품절 표시         8,211   매장 말을 따른다 — 실제로 다 팔렸다
+#     일부 옵션만 품절 표시         5,364   → 판다. 「M 품절」이면 S 는 살 수 있다
+#     품절 표시된 옵션이 하나도 없다 27,911  → 판다 (사람 결정 2026-09-20 「판매중으로 돌려」)
+#
+# 확인한 보기: kijun 2481 은 options=['S','M'] · soldout_options=['M'] 인데 soldout=True 다.
+# S 는 살 수 있다. parse_detail 은 soldout_icon·품절 아이콘·JSON-LD 만 보고 **옵션을 안 본다**.
+#
+# 뒤의 27,911 은 근거가 약하다 — 매장이 딱지만 붙이고 옵션엔 표시를 안 한 것일 수도 있고,
+# 그 옵션이 치수가 아니라 색일 수도 있다. 되돌릴 수 있게 잣대를 따로 둔다.
+TRUST_SOLDOUT_WITHOUT_MARKS = False   # True 면 「표시 없는」 27,911 벌을 품절로 둔다
+# 매장 딱지가 맞다고 확인한 매장 — 옵션에 품절 표시가 없어도 딱지를 따른다. 두 곳 다 상세 페이지의
+# JSON-LD 가 OutOfStock 이고 재고 0 인데 우리 앱엔 판매중으로 섰다(pushbutton 448 중 376 · o-oi 384 중 305,
+# 조사 2026-09-29). 사람 지시 2026-09-30 「품절 표시해」. 창고 전체 잣대(위)는 그대로 둔다.
+# 2026-10-22 브랜드별 확인(판매중인데 딱지 붙은 3,828벌 · 브랜드마다 8벌 실물): 아래는 표본 전부가 구매 불가
+# (전체 품절 표시 · 주문 버튼 숨김). far-from-what · cayl 은 섞여서(일부 옵션만 품절 · 판매중) 넣지 않는다.
+TRUST_SOLDOUT_BRANDS = {"pushbutton", "o-oi",
+                        "till-i-die", "known-better", "lecyto", "vocavaca", "nuosmiq", "miseki-seoul", "badblood",
+                        "curetty", "yuse", "not4nerd", "siyazu", "le", "suare", "vegan-tiger", "noice", "kruchi",
+                        "rolarola", "wkndrs", "xlim", "anotheroffice", "plac", "lartisan", "areuban", "wapwork",
+                        "nick-nicole", "kirsh", "years-ago"}
+
+
+def _all_options_soldout(d: dict) -> bool:
+    """안내 줄을 뺀 실제 옵션이 모두 품절로 표시됐나."""
+    opts, dead = [], set(d.get("soldout_options") or [])
+    for o in d.get("options") or []:
+        lab, marked = split_option(o)
+        if lab and not OPTION_PROMPT.match(lab) and not OPTION_HEADER.match(lab):
+            opts.append(lab)
+            if marked:
+                dead.add(lab)
+    return bool(opts) and all(o in dead for o in opts)
+
+
+def is_soldout(d: dict) -> bool:
+    """이 상품을 지금 살 수 있나 — 매장의 딱지와 우리가 받아 둔 옵션을 같이 본다."""
+    # 딱지가 F 여도 전 옵션 재고 0·전 옵션 품절이면 못 산다(roaringrad 534).
+    if d.get("stock") == "all0" or _all_options_soldout(d):
+        return True
+    if d.get("availability") == "OutOfStock" and d.get("stock") != "some":
+        return True
+    if not d.get("soldout"):
+        return False
+    # 딱지를 믿기로 확인한 매장은 옵션 일부에 품절 표시가 남아 있어도 딱지를 따른다 — o-oi 205벌이
+    # 「일부 옵션 품절」 갈래에 걸려 판매중으로 남았다(페이지는 전체 품절 · 주문 버튼 숨김, 2026-10-22).
+    if d.get("brand_slug") in TRUST_SOLDOUT_BRANDS:
+        return True
+    # 값을 내려놓은 상품은 살 수 없다 — parse 단계가 「값만 내려놓은 진짜 품절」로 판정해 단 딱지다.
+    # 아래의 「옵션에 품절 표시가 없으면 판다」가 이것까지 판매중으로 돌려, 프레클 203벌을 포함해
+    # 295벌이 값 없는 판매중으로 나갔다(2026-09-28 코덱스 검증 004 — 페이지는 SOLD OUT · 0원).
+    if d.get("price_missing"):
+        return True
+    # 예전에 받아 둔 옵션은 값 꼬리·딱지가 붙은 채다 — 여기서 다시 갈라 읽는다(split_option).
+    opts, dead = [], set(d.get("soldout_options") or [])
+    for o in d.get("options") or []:
+        lab, marked = split_option(o)
+        if lab:
+            opts.append(lab)
+            if marked:
+                dead.add(lab)
+    if not opts:
+        return True
+    live = [o for o in opts if o not in dead]
+    if not live:
+        return True
+    if not dead and (TRUST_SOLDOUT_WITHOUT_MARKS or d.get("brand_slug") in TRUST_SOLDOUT_BRANDS):
+        return True
+    return False
+
+
+# ── 갤러리에서 「길쭉한 상세페이지 조각」을 뺀다 ────────────────────────────────
+# 사람 지시(2026-09-20): 「그냥 상품 사진만 여러장 있는건 괜찮은데, 길쭉한 상세 페이지를
+# 크롭해서 개별로 넣은건 다 빼야돼.」 앱 시드 갤러리에서 Diafvine 의 1296×6710 이 나왔다 —
+# 넘겨도 같은 페이지의 다른 부분이 나오니 사진이 아니라 문서를 넘기는 셈이다.
+#
+# **주소로는 못 가린다.** 갤러리는 /web/product/extra|medium|small 에서만 오는데 매장이
+# 거기에 상세 조각을 올린다. 크기를 재는 수밖에 없다 — JPEG·PNG 는 크기가 머리말에 있어
+# 앞 8KB 면 된다.
+#
+# 문턱 2.5배는 실측으로 골랐다: 정상 갤러리의 제일 긴 비율이 2000×3000(1.5배)이고
+# 사고 난 것이 5.2배다. 둘 사이가 넓어 여유가 있다.
+#
+# 값이 싸야 하므로 **매장 단위로 맛보고 걸리는 매장만 전부 잰다.** 그림마다 재면 요청이
+# 여섯 배가 되어 3,000벌짜리 매장이 50분에서 다섯 시간이 된다. 209곳을 훑어 보니
+# 1,793장 중 0장이라, 대부분의 매장에서는 맛보기 몇십 번으로 끝난다.
+#
+# **대표컷(image_url)은 안 건드린다.** 사진이 한 장뿐인데 그게 세로로 길면 빗장이 그걸
+# 먹어 사진 0장인 상품이 생긴다 — 격자에 빈 칸이 뜨는 게 조각 한 장 섞이는 것보다 나쁘다.
+TALL_RATIO = 2.5
+_TALL_TASTE = 8         # 매장마다 맛볼 상품 수
+# 맛보기는 **꼬리부터** 본다. 상세 조각은 상품컷 **다음에** 붙으므로 앞쪽만 보면 못 만난다 —
+# 처음엔 앞 4장만 봤다가 Diafvine 의 1296×6710(12장 중 12번째)을 놓쳤다(2026-09-20).
+_TALL_TASTE_IMG = 5
+
+
+def _img_size(http, url: str):
+    """그림 크기 — 머리말만 받는다. 못 재면 None."""
+    try:
+        r = http.get(url, retries=0, headers={"Range": "bytes=0-8191"})
+        if r is None or r.status_code not in (200, 206):
+            return None
+        from PIL import Image
+        import io as _io
+        return Image.open(_io.BytesIO(r.content)).size
+    except Exception:
+        return None
+
+
+def drop_tall_gallery(http, slug: str, rows: list[dict], log=print) -> int:
+    """갤러리에서 세로로 긴 그림을 뺀다. 뺀 장수를 돌려준다(0 이면 아무것도 안 했다)."""
+    have = [d for d in rows if (d.get("gallery") or [])]
+    if not have:
+        return 0
+    seen: dict[str, tuple] = {}
+    hit = False
+    for d in have[:_TALL_TASTE]:
+        g = d.get("gallery") or []
+        for u in (g[-_TALL_TASTE_IMG:] + g[:1]):
+            if u in seen:
+                continue
+            seen[u] = _img_size(http, u)
+            sz = seen[u]
+            if sz and sz[1] >= sz[0] * TALL_RATIO:
+                hit = True
+    if not hit:
+        return 0
+    # 걸렸다 — 이 매장은 전부 잰다
+    dropped = 0
+    for d in have:
+        keep = []
+        for u in (d.get("gallery") or []):
+            if u not in seen:
+                seen[u] = _img_size(http, u)
+            sz = seen[u]
+            if sz and sz[1] >= sz[0] * TALL_RATIO:
+                dropped += 1
+                continue
+            keep.append(u)
+        if len(keep) != len(d.get("gallery") or []):
+            d["gallery"] = keep
+            d["_gal_cut"] = True
+    if dropped:
+        # 조용히 버리면 걸러지고 있다는 사실 자체를 잊는다 — 매장 이름과 장수를 남긴다.
+        # 이 수가 올라가면 그 매장 수집 방식을 다시 볼 신호다(사람 지시 2026-09-20).
+        hurt = sum(1 for d in have if d.get("_gal_cut"))
+        for d in have:
+            d.pop("_gal_cut", None)
+        log(f"[{slug}] 갤러리에서 길쭉한 상세 조각 {dropped}장을 뺐다 (상품 {hurt}벌) "
+            f"— 이 매장이 상세 조각을 갤러리에 올린다. 수집 방식을 다시 볼 것")
+    return dropped
+
+
+def is_category_page(html_text: str) -> bool:
+    """상품 페이지인 줄 알고 열었는데 칸(카테고리) 페이지인 것을 가려낸다.
+
+    pog-service 의 목록(list2.html)은 상품을 /product/detail2.html?product_no=N 으로 건다.
+    그런데 그 detail2 는 죽은 판이라 어느 번호로 열어도 그 상품이 걸린 **칸**을 그린다 —
+    og:type 이 product.group 이고 og:url 이 /category/jewerly/25/ 다. 이름 자리가 비어
+    <title>(「jewerly - jewerly - POG service」)까지 내려가고, 값도 글도 없다.
+    그렇게 이름이 전부 칸 이름이고 값이 하나도 없는 상품 137벌이 들어왔다(2026-09-12).
+
+    같은 번호를 /product/detail.html?product_no=322 로 열면 153KB 짜리 진짜 상품
+    페이지다 — 「SYSTEM FRAG necklace (ver.6)」 688,000원. 매장이 제 링크를 잘못 걸어 둔 것이라
+    우리가 주소를 바로잡아 한 번 더 열면 된다.
+    """
+    head = html_text[:20000]
+    if re.search(r'og:type"\s+content="product\.group"', head):
+        return True
+    for rx in (r'<link[^>]+rel="canonical"[^>]+href="([^"]+)"', r'og:url"\s+content="([^"]+)"'):
+        m = re.search(rx, head)
+        if m and re.search(r"/category/|/product/list", m.group(1)):
+            return True
+    return False
+
+
+def not_a_product(name: str, shop_titles: set[str] = frozenset()) -> str | None:
+    """상품이 아닌 페이지면 그 까닭을, 상품 같으면 None 을 준다."""
+    n = (name or "").strip()
+    if not n:
+        return "이름없음"
+    if n.casefold() in shop_titles:
+        # 이름 자리에 매장 이름만 있는 페이지 — parse_detail 이 <title> 까지 내려가 주운 것이다.
+        # dnsr 438건이 전부 이 꼴이고(detail2.html 안내 페이지) 사진도 한 장 없다.
+        return "매장이름뿐"
+    tail = JUNK_HEAD.sub("", n)
+    for why, rx, after_head in NOT_PRODUCT:
+        if rx.search(tail if after_head else n):
+            return why
+    if STORE_BRANCH.search(n):
+        return "매장안내"
+    # 아래 셋은 품목 낱말이 없을 때만 본다 — 그게 있으면 옷이다. the-museum-visitor 의
+    # 「THE MUSEUM VISTIOR COLLECTION 2023-2024 CORDUROY ECO BAG」은 진짜 가방이다.
+    bare = SEASON_YEAR_TOKEN.sub(" ", n)
+    if match_head(bare, ITEM_TYPE_VOCAB) or match_acc(bare):
+        return None
+    if re.search(r"\bcollections?\b|(?<![가-힣])컬렉션", n, re.I) and SEASONISH.search(n):
+        return "시즌컬렉션"
+    if SEASON_WORD.search(tail) and YEARISH.search(tail):
+        return "시즌표지"
+    if MEDIA_PAGE.search(tail):
+        return "매체·매장안내"
+    return None
+
+
+def priceless_post(d: dict, item: str, slug: str) -> str | None:
+    """값이 한 번도 없었던 행이 상품이 아니라 글이면 그 까닭 — build_csv 가 값 없는 행에만 묻는다.
+
+    매장은 품절 상품의 값을 내리므로 값 없음만으로는 버리지 않는다(sinoon 89벌 전수 2026-09-06). 2026-10-27 값 없는
+    상품 282벌을 페이지로 대 보니 절반 남짓이 글이었다 — 매장 칸이 통째로 룩북 · 무드북 · 가이드(outstanding 「Lookbooks」 ·
+    begin202 「MOODBOOK」), 착용 연재(mmlg EWM_ 88벌), 연예인 착용 글(noirer), 화보 장면 번호(low-classic). 나머지
+    (aoiro · kindersalmon · trunk-project 「COMING SOON」 …)는 값만 내린 진짜 옷이라 그대로 둔다.
+    크롤 단계의 is_content_category 는 칸 이름을 매장에 물어 보는데, 그때 놓친 것(복수형 · 무드북)을 여기서 다시 본다."""
+    name = d.get("name") or ""
+    cats = [c.strip() for c in (d.get("category_names") or []) if c and c.strip()]
+    if cats and all(CONTENT_CAT.search(c) for c in cats):
+        return "룩북칸"
+    rx = POST_NAME_HEAD.get(slug)
+    if rx and rx.search(name):
+        return "매장 연재 글"
+    if d.get("options"):
+        return None
+    m = CELEB_HEAD.match(name)
+    if m and not match_head(m.group(0), ITEM_TYPE_VOCAB) and not match_acc(m.group(0)):
+        return "연예인 착용 글"
+    if not item and SERIES_NO.search(name):
+        return "화보 장면 번호"
+    return None
+
+
+# 판매·기획 카테고리 — 대분류 판정에서 뺀다(「SALE」이 tops 로 읽히면 안 된다). 소속은 기록한다.
+NOISE_CATEGORY = ["sale", "세일", "new", "신상", "best", "베스트", "all", "전체", "view", "collection", "컬렉션",
+                  "project", "week", "event", "이벤트", "off", "drop", "season", "must", "pick", "clearance", "time", "outlet"]
+
+
+# 순위 목록 칸 — 「TOP20」의 top 은 상의가 아니다. 넘버링(주얼리)의 목걸이·반지 20벌이 이 칸 이름 때문에
+# 상의가 됐다(샌드박스, 2026-09-23). 「tops」 칸과 부딪치지 않게 숫자가 붙은 것만 본다.
+RANK_CATEGORY = re.compile(r"^\s*top\s*\d+\s*$|^\s*(?:hot|weekly|monthly)?\s*(?:ranking|랭킹)\s*$", re.I)
+
+
+BAG_DIMS = re.compile(r"\d+(?:\.\d+)?\s*\(?\s*W\s*\)?\s*[xX×*]\s*\d+(?:\.\d+)?\s*\(?\s*H\s*\)?", re.I)
+BOOK_CATEGORY = re.compile(r"^\s*(?:books?|책|도서|magazines?|매거진)\s*$", re.I)
+
+
+# 이름 폴백용 어휘 — match_head 의 캐시는 dict 의 id 로 잡으므로 미리 한 번만 만들어 둔다
+CATEGORY_NAME_VOCAB = {code: keys for code, keys in CATEGORY_NAME_RULES}
+
+
+_VOCAB_RX: dict[int, list] = {}
+
+
+def _vocab_patterns(vocab: dict) -> list:
+    """어휘를 정규식으로 굽는다 — 영어 낱말은 앞뒤가 글자면 안 걸린다.
+
+    부분 문자열로 맞추면 「Laye(RED)」가 레드, 「(BUTTER)FLY」가 버터, 「(SAND)als」가 샌드,
+    「(OLIVE)R」이 올리브, 「is(CREAM)」이 크림이 된다 — 상품 289벌의 색이 그렇게 틀려 있었다
+    (2026-09-05 실측). 한글은 낱말을 띄어 쓰지 않으므로 그대로 둔다."""
+    key = id(vocab)
+    got = _VOCAB_RX.get(key)
+    if got is None:
+        got = []
+        for label, keys in vocab.items():
+            for k in keys:
+                alone = k.startswith(" ") and k.endswith(" ")
+                k = k.strip()
+                if re.fullmatch(r"[a-z0-9 '\-]+", k):
+                    rx = re.compile(rf"(?<![a-z]){re.escape(k)}(?![a-z])")
+                elif alone:
+                    rx = re.compile(rf"(?<![가-힣]){re.escape(k)}(?![가-힣])")
+                else:
+                    rx = re.compile(re.escape(k))
+                got.append((label, len(k), rx))
+        got.sort(key=lambda x: -x[1])
+        _VOCAB_RX[key] = got
+    return got
+
+
+def match_vocab(text: str, vocab: dict) -> str:
+    """가장 긴 키워드부터 — 'zip up' 이 'up' 보다, 'sweatshirt' 가 'shirt' 보다 먼저."""
+    low = text.lower()
+    for label, _n, rx in _vocab_patterns(vocab):
+        if rx.search(low):
+            return label
+    return ""
+
+
+# ─── 잡화 세분류 — 신발·가방·모자·주얼리·액세서리·리빙 ───
+# 왜 따로 두나: 잡화가 4,700건인데 「액세서리」 한 칸에 2,800이 몰려 있어 앱에서 훑을 수가
+# 없었다. categories_seed.csv 의 「세분화 예정」 자리를 이 어휘로 채운다(2026-09-05).
+# 머리 낱말은 뒤에 오므로 「가장 뒤에 걸린 것」이 이긴다 — 「니트 스카프」는 니트가 아니라
+# 스카프이고, 「스카프 톱」은 스카프가 아니라 탑이다. match_vocab 의 「가장 긴 것」과 다르다.
+ACC_TYPE_VOCAB = {
+    # 신발
+    "스니커즈": ["sneaker", "스니커", "trainer", "트레이너", "runner", "러너", "clog", "클로그", "slip-on", "slip on", "슬립온", "슬립 온"],
+    "부츠": ["boots", "boot", "부츠", "워커", "첼시"],
+    "더비": ["derby", "더비", "oxford", "옥스포드", "monk", "monkstrap", "몽크", "몽크스트랩", "brogue", "브로그"],
+    "로퍼": ["loafer", "로퍼"],
+    "메리제인": ["maryjane", "mary jane", "메리제인"],
+    # ── 2026-10-01: 「판매중인데 사이즈 없는 옷」으로 세던 것을 전 매장에서 훑어 고른 낱말들(아래 이 날짜 주석 전부) ──
+    # 힐은 펌프스와 한 칸이다 — eenk 「String Mesh Heels」 · kindersalmon 「Moire Kitten Heels」가 기타(=옷)로
+    # 셌다. 홑 「heel」은 안 넣는다 — 「(5CM HEEL)」처럼 굽 높이를 적는 말이다. 「flat」도 홑으로는
+    # 「FLAT CAP」·「Flat Peach Tee」라서 붙은꼴만 받는다(finoacinque 「Lao ribbon flatshoes」).
+    # 「ballerina」는 안 넣는다 — eastlogue 「SHAGGY DOG CREWNECK SWEATER / BALLERINA」(무늬 이름)가 신발이 된다.
+    "플랫": ["ballet flat", "발레플랫", "발레 플랫", "flats", "플랫슈즈", "펌프스", "pumps",
+            "heels", "kitten heel", "flatshoes", "flat shoes",
+            # kindersalmon 「Jean de Brienne Leather Flat Black」 등 5벌 — 「… Leather Flat <색>」은 플랫 슈즈다(설명글 「플랫 슈즈」)
+            "leather flat"],
+    # 하이픈 꼴 「FLIP-FLOP」(unaffected × OOFOS · youth 「Geta Flip-flop」 · arend · low-classic)이 안 걸렸다
+    "샌들": ["sandal", "샌들", "플립플랍", "flip flop", "flipflop", "쪼리", "flip-flop"],
+    # cayl 「down booties」 7벌 — 텐트 안에서 신는 다운 슬리퍼다. 「boot」 꼴로는 안 걸린다(booties 는 boot+ies).
+    "뮬": ["mule", "뮬 "],
+    # 슬리퍼는 뒤축 없는 신발 전반이고 뮬은 그 한 모양이다(코덱스 244). 「down booties」(cayl)도 실내용 슬리퍼다.
+    "슬리퍼": ["슬리퍼", "slipper", "슬라이드", "slide", "booties"],
+    # 가방
+    "숄더백": ["숄더백", "shoulder bag", "숄더 백", "shoulder", "숄더", "사첼", "satchel", "새들", "saddle"],
+    # 붙여 쓴 「totebag」 — doffjason 「Cowhide totebag」 · the-museum-visitor 「… PRINTED TOTEBAG」, 홑 「tote」 —
+    # khakis 「Tembea Book Tote」가 「book」(문구)에 먼저 걸렸다(2026-10-01). 창고에서 홑 tote 가 든 이름 190여 개는
+    # 「DETACHABLE TOTE WINDBREAKER」 하나 빼고 전부 가방이고, 그것은 뒤 낱말(windbreaker)이 이긴다.
+    "토트백": ["토트백", "tote bag", "토트 백", "shopper", "쇼퍼", "totebag", "tote"],
+    "크로스백": ["크로스백", "cross bag", "crossbag", "crossbody", "크로스 백", "크로스", "sling bag", "슬링백",
+              "sacoche", "사코슈"],
+    # 허리에 두르는 가방 — 크로스백과 다른 품목(코덱스 244: hipbelt 는 크로스백이 아니다)
+    # 「hipbelt」 홀로는 웨이스트백이 아니다 — cayl 「hipbelt (태백2, 백두2 힙벨트)」는 배낭의 허리 지지대다(코덱스 285). 「hip belt bag」만 받는다.
+    "웨이스트백": ["fanny pack", "hip pack", "waist pack", "wrap pack", "hip belt bag", "hipbelt bag", "힙색", "웨이스트백",
+              "웨이스트 백", "waist bag", "belt bag", "벨트백", "벨트 백", "힙백", "hip bag"],
+    # 「daypack」·「roll top」 — cayl 「mari roll top / xpac」·espionage 「Utility Daypack」이
+    # 가방 낱말이 없어 설명글의 치수 낱말 하나로 상의가 됐다(2026-09-26).
+    "백팩": ["백팩", "backpack", "knapsack", "냅색", "짐색", "gym sack",
+            "럭색", "럭샄", "rucksack", "ruck sack", "daypack", "day pack", "데이팩",
+            "roll top", "rolltop", "roll-top", "롤탑", "배낭",
+            # 띄어 쓴 「BACK PACK」 — mardi-mercredi 「[ACTIF] BACK PACK BLOOMMARDI」 · polyteru 「used back pack 2pk」 ·
+            # matin-kim · years-ago 13벌(2026-10-01). 붙은꼴만 있었다.
+            "back pack"],
+    "미니백": ["미니백", "mini bag", "미니 백", "minibag"],
+    "호보백": ["호보백", "hobo bag", "호보 백", "호보", "hobo"],
+    "보스턴백": ["보스턴", "boston", "더플", "duffle", "duffel", "weekender"],
+    "클러치": ["클러치", "clutch"],
+    # 「cosmetic(s)」 — rest-recreation 「RR X LS 3 ZIP COSMETIC」(화장품 파우치, 2026-10-01). 옷 이름에는 안 나온다.
+    "파우치": ["파우치", "pouch", "필통", "laptop sleeve", "cosmetic"],
+    "에코백": ["에코백", "ecobag", "eco bag", "canvas bag", "캔버스백"],
+    # 홑 「purse」 — youth 「Shell Purse」 · osoi 「LIP PURSE」(2026-10-01). pushbutton 「COIN PURSE POINTY PUMPS」처럼
+    # 뒤에 신발·옷 낱말이 오면 그쪽이 이긴다.
+    "지갑": ["지갑", "wallet", "월렛", "코인 포켓", "coin pocket", "coin purse", "동전지갑", "카드 포켓", "purse"],
+    "카드지갑": ["카드지갑", "card holder", "카드홀더", "카드 홀더", "card case", "명함"],
+    # 무슨 가방인지 안 적은 것 — 「bags-etc」로 받는다(안 받으면 대분류조차 못 정한다)
+    # 「handbag」·「drawbag」 — 「bag」은 낱말 경계를 지켜 붙은꼴이 안 걸린다(sinoon 「Heart Handbag」 ·
+    # the-museum-visitor 「PVC POCKET DRAWBAG」, 2026-10-01).
+    "가방": ["가방", "bag", "백 ", "handbag", "drawbag"],
+    # 모자
+    # 캠프캡은 5패널 모자로 볼캡과 다른 품목이다(코덱스 244)
+    "캠프캡": ["캠프캡", "캠프 캡", "camp cap", "5패널", "5 패널", "5 panel", "5-panel", "five panel"],
+    "볼캡": ["볼캡", "ball cap", "baseball cap", "야구모자", "6패널", "snapback", "스냅백", "work cap", "워크캡", "뉴스보이", "newsboy", "헌팅캡", "hunting cap",
+            "cap", "캡", "ballcap",
+            # 「NM x NEW ERA 5950 NO RULES」 · 「… 940UNST …」 · 「… PILLBOX …」 — 뉴에라 협업은 이름에 모자 낱말 없이
+            # 모델 번호만 적는다(nomanual 6벌, 2026-10-01). 협업 옷은 뒤에 옷 낱말이 와서 그쪽이 이긴다.
+            "new era"],
+    # 붙여 쓴 「KNITCAP」 — mmlg 10벌이 기타(=옷)로 셌다(2026-10-01). 「KNIT CAPE」는 낱말 경계로 안 걸린다.
+    "비니": ["비니", "beanie", "watch cap", "beanie hat", "knitcap"],
+    "버킷햇": ["버킷햇", "bucket hat", "denim bucket", "버킷 햇", "boonie", "부니", "boonie hat", "jungle hat"],
+    "베레": ["베레", "beret", "페도라", "fedora", "헌팅캡", "hunting cap", "베이커보이", "fedora hat", "beret hat"],
+    # 「hood gear」는 옷이 아니라 머리에 쓰는 두건이다 — the-museum-visitor
+    # 「ART WORK PRINTED HOOD GEAR」가 후드티로 잡혀 사이즈를 찾고 있었다(2026-09-05 사람 확인).
+    # 맨 「트루퍼 · trooper」는 안 넣는다 — khakis 「Trooper Pant」 5벌이 모자가 되어 실측이 빠졌다(조사 2026-09-29).
+    # 모자 트루퍼는 이름에 「hat · 햇 · cap」이 붙는다(전 상품 60벌 확인).
+    "트루퍼햇": ["트루퍼햇", "트루퍼 햇", "ear flap", "이어플랩", "우샨카", "ushanka",
+                "trooper hat", "ear flap hat", "earflap hat", "flap hat", "ushanka hat", "trapper hat",
+                "발라클라바", "balaclava", "baraclava", "귀마개", "ear muff", "earmuff", "이어머프",
+                "hood gear", "후드 기어", "후드기어", "hoodgear",
+                # 한글 표기 「바라클라바」가 없어 66벌이 니트·패딩(옷)으로 섰다 — badblood 「BS 리버시블 나일론 패딩
+                # 바라클라바」가 아우터, wednesday-oasis · noirer · bmuette 「니트 바라클라바」가 니트(2026-10-01).
+                # 「귀도리」(귀마개, generalidea) · 「트래퍼 햇」(afterpray · badblood)도 같은 칸이다.
+                "바라클라바", "귀도리", "트래퍼 햇", "트래퍼햇"],
+    "선바이저": ["선바이저", "sun visor", "바이저"],
+    # 그냥 「hat」·「모자」 — 버킷햇·페도라처럼 이름이 붙지 않은 모자. 없어서 「knit hat」이
+    # 니트(상의)로 섰다(till-i-die, 2026-09-26).
+    # 한글 「모자」는 안 넣는다 — 「스타 로고 볼 캡 모자」처럼 갈래 이름 뒤에 덧붙이는 말이라 볼캡을 덮는다.
+    # 「trooper hat」·「boonie hat」은 각 갈래에 「… hat」 꼴을 넣어 긴 쪽이 이기게 했다.
+    # 한글 「햇」은 홀로 선 것만 받는다(앞뒤가 한글이 아니어야) — beyond-closet 「내츄럴 라피아 햇 민트」 ·
+    # bmuette 「퍼 리버시블 보넷 햇」이 기타(=옷)로 셌다(2026-10-01, 창고 28벌 전부 모자). 붙은 「버킷햇」은 제 칸이 이긴다.
+    # 「bonnet · 보닛 · 보넷」 — margarin-fingers 「LACE LABEL BONNET」가 상의, generalidea 「크로셰 니트 보닛」이 니트였다.
+    # 「보네뜨 · 보네트」는 안 넣는다 — lememe 「쁘띠 보네뜨」는 매장 글에 「니트 스카프 아이템」이라 적혀 있다.
+    # 「swimhat · swim cap」 — mardi-mercredi 수영모 4벌.
+    "모자": ["hat", " 햇 ", "bonnet", "보닛", "보넷", "swimhat", "swim hat", "swim cap"],
+    # 주얼리
+    "목걸이": ["목걸이", "necklace", "네클레이스", "네크리스", "넥클리스", "네클레스", "네클리스",
+             "펜던트", "pendant", " 체인 "],
+    "팔찌": ["팔찌", "브레이슬렛", "브레이슬릿", "bracelet", "뱅글", "bangle", "앵클릿", "anklet"],
+    "반지": ["반지", "ring", " 링 "],
+    # 붙여 쓴 「earcuff(s)」 — pog-service 「SYSTEM FRAG earcuff」 · insane-garage 「FLAME EARCUFFS」(2026-10-01)
+    "귀걸이": ["귀걸이", "earring", "이어커프", "ear cuff", "이어링", "earcuff"],
+    "브로치": ["브로치", "brooch", "pin badge", "뱃지", "badge", "pin"],
+    # 액세서리
+    "벨트": ["벨트", "belt"],
+    "양말": ["양말", "socks", "삭스", "sock"],
+    # 「stole」 — brown-yard 「Cashmere Jersey Stole」이 「jersey」 때문에 상의였다 · years-ago 「Cape Stole」(2026-10-01)
+    "스카프": ["스카프", "scarf", "머플러", "muffler", "shawl", "숄", "stole"],
+    # 넥워머는 스카프가 아니라 목도리다(사람 지시 2026-09-05). 띄어 쓴 「넥 워머」도 받는다 —
+    # rough-side 「23FW 패커블 다운 넥 워머」가 「다운」 때문에 패딩으로 잡혀 있었다.
+    # 붙여 쓴 「NECKGAITER」 — unaffected 「THERMAL FLEECE NECKGAITER」가 「fleece」 때문에 아우터였다(2026-10-01)
+    "목도리": ["넥워머", "넥 워머", "neck warmer", "넥게이터", "neck gaiter", "목도리", "neckgaiter"],
+    "장갑": ["장갑", "glove", "글로브", "글러브", "gloves", "미튼", "mitten", "암워머", "arm warmer",
+            "핸드워머", "핸드 워머", "hand warmer", "handwarmer",
+            # 「FINGERLESS」만 적은 장갑 — unaffected 「FINGERLESS GUNTE」 4벌이 설명글 「총장」 하나로 하의였다(2026-10-01)
+            "fingerless"],
+    "헤어": ["헤어핀", "hairpin", "바레트", "barrette",
+            "커치프", "kerchief", "헤드랩", "headwrap", "두건", "반다나", "bandana",
+            "머리끈", "집게핀", "헤어 클립", "hair clip",
+            # 스크런치의 다른 표기 — 「SCRUNCH」(grove · misu-a-barbe · sinoon · ostkaka 32벌) · 「scrunchy」(till-i-die) ·
+            # 「스크런처」(tibaeg). 「SCRUNCHED BIKINI」는 낱말 경계로 안 걸린다. 집게 — arto 「Claw Clip」 ·
+            # margarin-fingers 「HAIR CLAW」(상의로 섰다) · lememe 「벨 헤어 집게」(2026-10-01).
+            "claw clip", "hair claw", "헤어 집게", "헤어집게", "hair comb"],
+    # 헤어에서 세운 세부 품목(코덱스 244 · 사람 2026-10-03)
+    "스크런치": ["스크런치", "scrunchie", "scrunch", "scrunchy", "스크런처", "곱창밴드", "곱창 밴드"],
+    "헤어밴드": ["헤어밴드", "hair band", "headband", "head band", "hairband", "헤어 밴드"],
+    "아이웨어": ["선글라스", "sunglass", "안경", "eyewear", "glasses"],
+    "우산": ["우산", "umbrella", "양산", "parasol"],
+    # 한글 「타이」는 홀로 선 것만(「타이다이」·「타이츠」 안 걸림) — drawfit 「슬림 모던 타이」 · lmood 「실크 타이」 ·
+    # alyss · asp · dnsr · belier · concepts1one 타이가 기타(=옷)로 셌다(2026-10-01). 「자수 타이 블라우스」·「리본 타이
+    # 셔링 드레스」처럼 옷 낱말이 뒤에 오면 그쪽이 이긴다.
+    "넥타이": ["넥타이", "necktie", "tie", "보타이", "bow tie", " 니트 타이 ", " 타이 "],
+    "키링": ["키링", "keyring", "key ring", "키홀더", "key holder", "charm", "카라비너", "karabiner",
+            "키체인", "keychain", "key chain", "팬츠 홀더",
+            # 「carabiner」 철자(karabiner 만 있었다) — heritagefloss 「HELINOX CARABINER SET」 · not4nerd · fennec ·
+            # 「KEY LOOP」·「KEY TAG」(insane-garage · nomanual) · 「LUGGAGE TAG」(glowny) · 홀로 선 한글 「참」
+            # (lememe 「펜 테슬 참」 · carlyn 「니트 플라워 참」이 니트였다), 2026-10-01.
+            "carabiner", "key loop", "key tag", "keytag", "luggage tag", " 참 "],
+    "가방끈": ["스트랩", "strap", "체인 스트랩"],
+    # 손으로 드는 손잡이는 어깨에 메는 끈과 다르다(코덱스 244)
+    "가방손잡이": ["핸들", "handle", "가방 손잡이", "bag handle"],
+    # 영문 「griptok · grip tok · finger tok」(ader-error · loeuvre · 99-is · margarin-fingers), 「cable holder」(2026-10-01)
+    "폰액세서리": ["그립톡", "grip ring", "그립링", "폰케이스", "phone case", "iphone case", "airpod", "에어팟", "case", "케이스",
+              "griptok", "grip tok", "finger tok", "cable holder", "케이블 홀더"],
+    "레그웨어": ["타이츠", "tights", "레그워머", "leg warmer", "레그 워머", "스타킹", "stocking"],
+    # 리빙·굿즈
+    "러그": ["러그", "rug", "lug", "매트", "mat", "터프팅", "tufting"],
+    # 「coaster · 코스터」 — mmlg 「KIOSK COASTER」 · nomanual 「LOGO COASTER」(2026-10-01)
+    "테이블웨어": ["머그", "mug", "텀블러", "tumbler", "glass", "잔 ", "컵 ", "접시", "plate", "saucer", "coaster", "코스터"],
+    # 「크림」·「스프레이」를 홑낱말로 두면 안 된다 — 크림색 옷이 전부 잡화가 된다.
+    # badblood 후드·팬츠·스커트 200여 벌이 「lifestyle / 캔들」이었다(2026-09-05).
+    # 화장품은 늘 앞말이 붙는다(핸드크림·바디크림·섬유탈취 스프레이).
+    "캔들": ["캔들", "candle", "인센스", "incense", "디퓨저", "diffuser", "방향제",
+            "에센스", "essence", "클리너", "크리너", "cleaner", "reiniger", "balsam", "왁스", "보호제",
+            "케어 브러쉬", "care brush",
+            "핸드크림", "hand cream", "바디크림", "body cream", "풋크림", "foot cream",
+            "탈취 스프레이", "섬유 스프레이", "fabric spray",
+            "퍼퓸", "parfum", "perfume", "향수", "코롱", "cologne",
+            "프레그런스", "fragrance", "사쉐", "sachet", "룸스프레이", "room spray",
+            # 띄어 쓴 「룸 스프레이 · 패브릭 스프레이」(steady-everywear), 「EAU DE PARTUM」 오타(nick-nicole), 「AIR FRESHENER」
+            # (eastlogue) — 2026-10-01. 홑 「스프레이」는 여전히 안 넣는다(위 주석).
+            "룸 스프레이", "패브릭 스프레이", "eau de parfum", "eau de partum", "eau de toilette", "air freshener"],
+    # 「book · magazine · mouse pad」 — horlisun 「ACNE PAPER BOOK」 · insane-garage 「TRAVEL BOOK」 · polyteru 「MAGAZINE」 ·
+    # ader-error · was 마우스패드(2026-10-01). 「BOOK BAG」·「MAGAZINE POCKET TEE」는 뒤 낱말이 이긴다. 홑 「note」는 안
+    # 넣는다 — ronron 「HEART MUSIC NOTE SLIM FIT QUARTER SLEEVE」(quarter sleeve 는 옷 어휘에 없다)가 문구가 된다.
+    "문구": ["포스터", "poster", "스티커", "sticker", "엽서", "postcard", "노트", "notebook", "카드 ",
+           "book", "magazine", "mouse pad", "마우스패드", "마우스 패드"],
+    "블랭킷": ["블랭킷", "blanket", "담요", "타월", "towel"],
+}
+
+ACC_TO_CATEGORY = {
+    "스니커즈": "shoes", "부츠": "shoes", "더비": "shoes", "로퍼": "shoes", "메리제인": "shoes",
+    "플랫": "shoes", "샌들": "shoes", "뮬": "shoes", "슬리퍼": "shoes", "웨이스트백": "bags", "캠프캡": "headwear",
+    "스크런치": "accessories", "헤어밴드": "accessories", "가방손잡이": "accessories",
+    "숄더백": "bags", "토트백": "bags", "크로스백": "bags", "백팩": "bags", "미니백": "bags",
+    "호보백": "bags", "보스턴백": "bags", "클러치": "bags", "파우치": "bags", "에코백": "bags",
+    "지갑": "bags", "카드지갑": "bags", "가방": "bags",
+    "볼캡": "headwear", "비니": "headwear", "버킷햇": "headwear", "베레": "headwear", "모자": "headwear",
+    "트루퍼햇": "headwear", "선바이저": "headwear",
+    "목걸이": "jewelry", "팔찌": "jewelry", "반지": "jewelry", "귀걸이": "jewelry", "브로치": "jewelry",
+    "벨트": "accessories", "양말": "accessories", "스카프": "accessories", "목도리": "accessories",
+    "장갑": "accessories",
+    "헤어": "accessories", "아이웨어": "accessories", "넥타이": "accessories", "키링": "accessories",
+    "폰액세서리": "accessories", "레그웨어": "accessories", "가방끈": "accessories", "우산": "accessories",
+    "러그": "lifestyle", "테이블웨어": "lifestyle", "캔들": "lifestyle", "문구": "lifestyle",
+    "블랭킷": "lifestyle",
+}
+# 사진 대조 QA(2026-10-27) — 잡화 어휘 빈칸 · 다른 낱말에 진 것.
+#   월렛 체인은 지갑이 아니라 바지 고리에 거는 체인이다(not4nerd 「Barbed Wire Acrylic Wallet Chain」 5벌이 지갑) — 「팬츠 홀더」처럼 키링 칸.
+#   「풀리오 브리프 케이스」(facade-pattern)는 서류가방인데 케이스(폰액세서리)가 이겼다 — 붙은꼴은 가방.
+#   「DUAL YARN KNIT CAP」(moif 6벌)은 비니인데 홑 cap 이 볼캡으로 갔다 — 붙여 쓴 knitcap 만 있었다.
+#   「MONK STRAP SHOES」(heritagefloss)는 구두인데 strap(가방끈)이 이겼다. 「Cashmere Bandeau Snood」(amomento)는 넥워머인데 튜브탑이었다.
+#   「Lumbar Pack」(cayl)은 허리에 두르는 가방이다. 「트라페즈 원 핸들 토트 스몰」(vunque)은 한글 번역 괄호의 핸들이 이겼다 — 홑 「토트」.
+#   「DOUBLE STRAP MESH FLAT」(atelier-de-lumen)는 플랫 슈즈다.
+for _lab, _ks in {"키링": ["wallet chain", "월렛 체인", "월렛체인", "지갑 체인", "지갑체인"],
+                  "가방": ["briefcase", "brief case", "브리프케이스", "브리프 케이스", "서류가방"],
+                  "비니": ["knit cap", "니트 캡", "니트캡"],
+                  "더비": ["monk strap", "몽크 스트랩"],
+                  "목도리": ["snood", "스누드"],
+                  "웨이스트백": ["lumbar pack", "lumbar bag"],
+                  "토트백": [" 토트 "],
+                  "플랫": ["mesh flat"],
+                  # 띄어 쓴 「Signature hair pin - 2set」(dnsr)이 홑 pin(브로치)으로 갔다
+                  "헤어": ["hair pin", "헤어 핀"],
+                  # 「UNISEX 보스턴백」 · 「보스턴 더플백」은 홑 「백」(가방)이 뒤에서 끝나 가방으로만 섰다 — 붙은꼴
+                  "보스턴백": ["보스턴백", "보스턴 백", "boston bag", "더플백", "더플 백", "duffle bag", "duffel bag"]}.items():
+    ACC_TYPE_VOCAB[_lab] += [k for k in _ks if k not in ACC_TYPE_VOCAB[_lab]]
+# lememe 는 가방 이름을 「삭 ○○」(Sac)으로만 적는다 — 「삭 리오레」 · 「삭 리네」가 상의로 섰다(사진 대조 2026-10-27).
+# 홀로 선 「삭」은 창고 전체에서 그 매장 가방 이름에만 나온다(125벌, 2026-10-27). 삭스(양말) · 삭제는 붙은꼴이라 안 걸린다.
+ACC_TYPE_VOCAB["가방"].append(" 삭 ")
+
+# 세분류 → categories_seed.csv 의 depth-2 코드
+ACC_SUB_CODE = {
+    "스니커즈": "sneakers", "부츠": "boots", "더비": "derby-oxford", "로퍼": "loafer",
+    "메리제인": "mary-jane", "플랫": "flats", "샌들": "sandals", "뮬": "mules-slippers",
+    "숄더백": "shoulder-bag", "토트백": "tote-bag", "크로스백": "cross-bag", "백팩": "backpack",
+    "미니백": "mini-bag", "호보백": "hobo-bag", "보스턴백": "boston-duffle", "클러치": "clutch",
+    "파우치": "pouch", "에코백": "eco-bag", "지갑": "wallet", "카드지갑": "card-holder", "가방": "bags-etc",
+    "볼캡": "ball-cap", "비니": "beanie", "버킷햇": "bucket-hat", "베레": "beret", "모자": "hat",
+    "트루퍼햇": "trooper-hat", "선바이저": "sun-visor",
+    "목걸이": "necklace", "팔찌": "bracelet", "반지": "ring", "귀걸이": "earring", "브로치": "brooch",
+    "벨트": "belt", "양말": "socks", "스카프": "scarf-muffler", "목도리": "scarf-muffler",
+    "장갑": "gloves", "헤어": "hair-acc", "스크런치": "hair-acc", "헤어밴드": "hair-acc",
+    "슬리퍼": "mules-slippers", "웨이스트백": "cross-bag", "캠프캡": "ball-cap",
+    "아이웨어": "eyewear", "넥타이": "tie", "키링": "keyring-charm", "폰액세서리": "phone-acc",
+    "레그웨어": "legwear",
+    "러그": "rug-mat", "테이블웨어": "tableware", "캔들": "candle-incense", "문구": "stationery",
+    "블랭킷": "blanket-towel",
+}
+
+
+_HEAD_RX: dict[int, dict[str, list]] = {}
+
+
+def _head_patterns(vocab: dict) -> dict[str, list]:
+    """어휘를 「낱말 경계를 지키는」 정규식으로 바꿔 둔다.
+
+    그냥 부분 일치로 재면 SHIRRING·keyring 이 ring 으로, MATIN·rugby 가 mat·rug 로,
+    showcase 가 case 로 잡힌다(2026-09-05 표본 검사에서 195건 중 넷 중 셋이 오분류였다).
+    영문 낱말은 앞뒤에 영문자가 붙지 못하게 하고, 한글은 그대로 둔다(붙여 쓰는 말이 많다)."""
+    key = id(vocab)
+    if key not in _HEAD_RX:
+        out = {}
+        for label, keys in vocab.items():
+            pats = []
+            for k in keys:
+                # 「양쪽」에 빈칸을 붙여 적은 열쇠(" 진 ")는 홀로 선 한글 낱말이라는 뜻이다.
+                # 그냥 「진」으로 두면 진주가, 「브라」로 두면 브라운이 걸린다(2026-09-05).
+                # 한쪽만 빈칸인 열쇠("백 ")는 예전부터 있던 것이라 뜻을 바꾸지 않는다 —
+                # 홀로 선 낱말로 오해했더니 핸드백·써클백 33벌이 가방에서 빠졌다.
+                alone = k.startswith(" ") and k.endswith(" ")
+                k = k.strip()
+                if not k:
+                    continue
+                body = re.escape(k)
+                if alone and not re.fullmatch(r"[a-z0-9 /\-]+", k, re.I):
+                    body = r"(?<![가-힣])" + body + r"(?![가-힣])"
+                elif re.fullmatch(r"[a-z0-9 /\-]+", k, re.I):
+                    # 복수형은 같은 낱말이다 — 「HALF SHIRTS」·「T-Shirts」·「LOAFERS」가
+                    # 뒤에 s 가 붙었다는 이유로 통째로 빠졌다(2026-09-05).
+                    # 한 글자 열쇠(「t」)는 숫자 옆에서도 막는다 — 품번 「RMBLG4TS11」의 ts 가 티셔츠로 잡혀
+                    # 블라우스 68벌이 티셔츠가 됐다(2026-10-05 매장 분류 대조).
+                    # 점 옆의 홀로 선 글자는 약어다 — 「T.N.T.」 · 「/ T.Blue」(티셔츠가 아니다)
+                    edge = r"[a-z0-9]" if len(k) == 1 else r"[a-z]"
+                    body = f"(?<!{edge})" + body + ((r"(?:es)?" if k.endswith("s") else r"(?:es|s)?") + f"(?!{edge})")
+                    if len(k) == 1:
+                        # 「T/BLUE」 · 「T/BL」(rolarola · nilby-p 색 약어)의 T 도 티셔츠가 아니다 — 「BASIC CARDIGAN T/BLUE」가 롱슬리브였다(2026-10-27)
+                        body = r"(?<![a-z]\.)(?<!/)" + body + r"(?!\.[a-z])(?!/)"
+                pats.append(re.compile(body, re.I))
+            out[label] = pats
+        _HEAD_RX[key] = out
+    return _HEAD_RX[key]
+
+
+def match_head(text: str, vocab: dict) -> str:
+    """가장 「뒤에서 끝나는」 낱말이 이긴다 — 상품명은 꾸밈말이 앞, 무엇인지가 뒤다.
+    끝나는 자리가 같으면 긴 쪽이 이긴다(「sweatshirt」가 「shirt」를, 「zip up」이 「up」을).
+
+    시작 자리로 재면 안 된다 — sweatshirt 안의 shirt 가 더 뒤에서 시작해 셔츠가 이긴다.
+    길이로만 재면(match_vocab) 「슬리브리스 드레스」가 슬리브리스라서 상의가 된다."""
+    low = " " + (text or "").lower() + " "
+    best, best_end, best_len = "", -1, 0
+    for label, pats in _head_patterns(vocab).items():
+        for rx in pats:
+            m = None
+            for m in rx.finditer(low):
+                pass
+            if m is None:
+                continue
+            if m.end() > best_end or (m.end() == best_end and len(m.group(0)) > best_len):
+                best, best_end, best_len = label, m.end(), len(m.group(0))
+    return best
+
+
+# 겉옷은 **소재가 품목 이름이 되는** 갈래가 있다(레더/라이더·스웨이드·트위드).
+# 소재는 품목을 바꾸지 않는다 — 「레더 블루종」은 블루종, 「스웨이드 트러커 재킷」은 트러커, 「트위드 자켓」은 재킷이고 소재는
+# 태그(material)에 남는다(사람 2026-10-05, 「모양이 품목, 소재는 태그」). 2026-09-20 의 「스웨이드가 우선」 판단을 뒤집은 것이다.
+# 무스탕만 예외다. 소재이면서 생김새가 따로 있고 사람들이 품목처럼 찾는다. match_head 는 뒤에서 끝나는 낱말을 고르므로
+# 「무스탕 블루종」은 블루종이 이긴다 — 여기서 되돌린다. 모양 낱말은 상품 이름에 그대로 남아 검색으로 잡힌다.
+# 트러커는 뺀다 — 소재가 다양해서 모양으로 따로 둔 품목이다(「레더 트러커」는 트러커, 사람 2026-10-05).
+OUTER_SHAPE_ITEMS = {"재킷", "워크자켓", "필드자켓", "코치자켓", "사파리자켓",
+                     "퀼팅자켓", "블루종", "바시티", "해링턴", "라이더자켓",
+                     # 2026-10-03 세운 모양 품목 — 「시어링 셔츠 자켓」은 무스탕이다.
+                     "오버셔츠", "트랙재킷",
+                     "무스탕"}
+MATERIAL_OUTER = (
+    # shearling · 시어링은 모양 품목(재킷 · 블루종 …)에 붙었을 때만 여기 온다 — 집업 · 셔츠 · 파카는 OUTER_SHAPE_ITEMS 밖이다.
+    # 「shearling collar denim jacket」의 시어링은 카라 장식이라 재킷 그대로.
+    # 「스웨이드 라인 무스탕 자켓」「Reversible Suede Half Mustang」은 무스탕이다(2026-10-05).
+    (re.compile(r"무스탕|mustang|mouton|무톤|shearling(?!\s*collar)|시어링(?!\s*카라)", re.I), "무스탕"),
+)
+
+
+# 매장은 pants · shorts 를 단수로도 쓴다 — 「Nylon Rigger Pant」「Flight Short」「Chino Pant」. 복수만 어휘에 있어서 판매중
+# 빈 품목 1,441벌 중 pant 141 · short 81벌이 비어 있었다(2026-10-06). 복수 별칭마다 단수를 자동으로 만들고, 홀로 선 단수는
+# 팬츠 · 쇼츠로. 복수가 어디로 가든 단수도 같은 곳으로 간다(「Denim Painter Pants」가 팬츠이듯 「… Pant」도 팬츠).
+for _lab, _keys in list(ITEM_TYPE_VOCAB.items()):
+    ITEM_TYPE_VOCAB[_lab] = _keys + [k[:-1] for k in _keys if k.endswith(("pants", "shorts")) and k[:-1] not in _keys]
+ITEM_TYPE_VOCAB["팬츠"].append("pant")
+ITEM_TYPE_VOCAB["쇼츠"].append("short")
+# 어휘 빈칸(판매중 품목 빈칸, 2026-10-18)
+for _lab, _ks in {"티셔츠": ["크롭티", "크롭 티", "퍼프티", "퍼프 티"], "피케": ["카라티", "카라 티", "카라티셔츠"],
+                  "스커트": ["스코트", "skort"], "숏팬츠": ["sweatshort", "sweatshorts"],
+                  "캐미솔": ["케미솔"], "재킷": ["jacoat", "coket", "n-1"], "바람막이": ["breaker"]}.items():
+    ITEM_TYPE_VOCAB[_lab] += [k for k in _ks if k not in ITEM_TYPE_VOCAB[_lab]]
+# 사진 대조 QA(2026-10-27) — 이름 낱말이 엉뚱한 품목을 이긴 꼴. 붙은꼴을 넣어 끝자리가 같을 때 긴 쪽이 이기게 한다.
+#   「컷앤소 원피스 스윔웨어」(kirsh) · 「원피스 스윔수트」(generalidea)는 수영복인데 원피스 · 탑이 이겼다.
+#   「LACE V-NECK KNIT CARDIGAN TOP」(nick-nicole) · 「wrap cardigan top」은 가디건인데 뒤의 top 이 이겨 탑이었다.
+for _lab, _ks in {"수영복": ["스윔웨어", "스윔수트", "스윔 수트", "swim suit"],
+                  "가디건": ["cardigan top", "가디건 탑", "카디건 탑"]}.items():
+    ITEM_TYPE_VOCAB[_lab] += [k for k in _ks if k not in ITEM_TYPE_VOCAB[_lab]]
+
+# 이름 끝(또는 끝 괄호 앞)에만 쓰는 대문자 약어 — ava-molli 「WOOL BLENDED WIDE PT (BLACK)」 · 「BELTED A-LINE MIDI SK (NAVY)」 ·
+# 「TWEED MINI OP (IVORY CHECK)」(판매중 빈 품목 중 PT 42 · SK 22 · OP 26벌, 2026-10-06). 어휘에 넣지 않는 까닭: 소문자 「op」 ·
+# 「sk」는 낱말 조각이고 「GY+SK」의 SK 는 색(스카이)이다. 아무 품목도 안 걸렸을 때, 대문자일 때, 끝자리일 때만 받는다.
+_TAIL_ABBR = {"PT": "팬츠", "SK": "스커트", "OP": "원피스", "SH": "셔츠", "CT": "코트"}
+_TAIL_ABBR_RX = re.compile(r"\b(PT|SK|OP|SH|CT)(?=\s*(?:\(|\[|$))")
+
+
+_LONG_BOTTOM = {"팬츠", "데님", "슬랙스", "치노", "스웨트팬츠", "카고팬츠", "트랙팬츠", "조거팬츠", "카펜터팬츠", "파라슈트팬츠",
+                "파티그팬츠", "와이드팬츠", "트라우저"}
+# 「Half Banding Pants」 · 「하프 밴딩」은 허리 절반이 밴딩인 긴 바지다(anotheroffice · noirer 총장 105~109). 「bermuda layered」는
+# 긴 바지 위에 버뮤다를 겹친 옷(miseki-seoul 총장 104.5)이다 — 둘 다 거른다.
+_SHORT_BOTTOM_RX = re.compile(r"(?i)(?<![a-z])(?:shorts?|half(?!\s*-?\s*(?:zip|band))|bermuda(?!\s*layer)|jorts?)(?![a-z])|"
+                              r"(?:숏|쇼트)(?!\s*(?:슬리브|패딩|자켓|재킷|코트|기장))|쇼츠|하프(?!\s*(?:집|지퍼|넥|슬리브|코트|밴딩))|버뮤다(?!\s*레이어)|"
+                              r"반바지|(?<!\d)[35]부")
+# 「SHORT SLV」 · 「Short-sleeved」는 반팔이다(insane-garage · mood-inside 가 숏팬츠로 섰다, 2026-10-09).
+_SHORT_BOTTOM_NOT = re.compile(r"(?i)half\s*(?:&|and)\s*half|(?:숏|short)\s*\.?\s*ver|shorts?\s*layer"
+                               r"|short[\s_-]*(?:sleeve|slv|sl(?![a-z]))")
+
+
+_ASIDE_RX = re.compile(r"\((?![^)]*(?:\b(?:ver|short|zip)|숏|집업|지퍼))[^)]*\)|\[[^\]]*\]", re.I)
+
+
+def _aside_off(name: str) -> str:
+    """괄호 속 덧말을 뺀 이름. 영문 이름 뒤 한글 괄호는 번역이라 둔다."""
+    latin = not re.search(r"[가-힣]", _ASIDE_RX.sub("", name or ""))
+    return _ASIDE_RX.sub(lambda m: m.group(0) if latin and re.search(r"[가-힣]", m.group(0)) else " ", name or "")
+
+
+_CORD = re.compile(r"(?i)corduroy|코듀로이|골덴|(?<![a-z])cord(?![a-z])")
+_CAPE_WORD = re.compile(r"(?i)(?<![a-z])(?:capes?|ponchos?)(?![a-z])|케이프|판초")
+_CAPE_ACC = re.compile(r"(?i)muffler|stole|scarf|shawl|머플러|스톨|스카프|숄|목도리")
+
+
+def garment_head(name: str) -> str:
+    """ITEM_TYPE_VOCAB 의 match_head. 홀로 선 「라이더 · 바이커」는 어휘에 없으므로(라이더자켓 주석) 따로 거를 것이 없다.
+    아무것도 안 걸리면 이름 끝의 대문자 약어(PT · SK · OP)를 본다."""
+    # 「down jacket (non hoody)」 — 「non hoody」는 후드가 없다는 말이다. 지우고 고른다(cayl 3벌이 후드로 섰다, 2026-10-09).
+    name = re.sub(r"(?i)\bnon[\s\-]*hood(?:y|ie|ed)?\b|노\s*후드|후드\s*없는", " ", name or "")
+    # 「SHORT SLV」 · 「Short-sleeved」는 반팔이다 — 어휘의 short(쇼츠)가 먼저 걸려 숏팬츠로 섰다(insane-garage · mood-inside, 2026-10-09).
+    # 「반팔」로 바꿔 두면 모양 낱말이 따로 없을 때 반팔로 선다.
+    name = re.sub(r"(?i)short[\s_\-]*(?:sleeved?|slv|sl(?![a-z]))", " 반팔 ", name)
+    # 사진 대조 QA(2026-10-27) — 품목이 아닌 자리의 품목 낱말:
+    #   「NO FATIGUE」(birthdaysuit 스웨트팬츠 9벌)는 「피곤 없음」이지 퍼티그가 아니다 — 부정 · anti 가 붙은 fatigue 는 지운다.
+    #   「ORIGINAL N-1.ZIP」(birthdaysuit 스웨트 집업 13벌)은 N-1 덱재킷이 아니라 그 매장 집업 이름이다 — N-1 바로 뒤에 zip 이 붙으면 집업.
+    #   「Cardigan Set-Up Top」(j-koo)의 top 은 셋업의 윗도리라는 말이다 — 앞의 품목 낱말이 머리다.
+    name = re.sub(r"(?i)(?<![a-z])(?:no|anti)[\s_-]*fatigue(?![a-z])", " ", name)
+    name = re.sub(r"(?i)(?<![a-z0-9])n-1[\s.]*zip(?![a-z])", " zip-up ", name)
+    name = re.sub(r"(?i)(?<=[a-z가-힣])\s+set[\s-]*up\s+top(?![a-z])", " ", name)
+    # 괄호 속 · w/ 뒤는 덧말
+    core = re.sub(r"(?i)\s+(?:w/|with)\s+.*$", " ", _aside_off(name))
+    if core != name and match_head(core, ITEM_TYPE_VOCAB):
+        name = core
+    head = match_head(name, ITEM_TYPE_VOCAB)
+    # 케이프 · 판초가 머리 낱말이어도 목도리류(「Cape Stole」 · 「muffler poncho」)와 세트(「Knit Skirt & Cape」)는 아니다 — 지우고 다시 고른다.
+    if head == "케이프/판초" and (_CAPE_ACC.search(name) or _SET_NAME.search(name) or "&" in name):
+        head = match_head(_CAPE_WORD.sub(" ", name), ITEM_TYPE_VOCAB)
+    # 「Mods Parka_Short」는 짧은 파카지 반바지가 아니다 — 겉옷 낱말 바로 뒤에 붙은 short 는 기장이다(3벌, 2026-10-06).
+    if head in ("쇼츠", "숏팬츠") and re.search(r"(parka|jacket|coat|blouson|jumper)[ _\-(]*short\b", name or "", re.I):
+        head = match_head(re.sub(r"short\b", " ", name, flags=re.I), ITEM_TYPE_VOCAB)
+    # 이름 끝의 소재 · 색 낱말이 모양을 이긴 꼴 — 「…MK3 JACKET INDIGO DENIM」 · 「Over Shirt Denim Blue」(데님),
+    # 「Basque Tee, Bermuda/Pink」 · 「B.D.U Jacket, Bermuda」(색 이름 버뮤다). 그 낱말을 지워도 상의 · 아우터 모양 낱말이
+    # 남으면 그것이 품목이다(소재는 태그 — 앱 세션 · 사람 결정 2026-10-09). 데님 반바지 · 버뮤다 팬츠는 하의 낱말이 남아 그대로.
+    if head in ("데님", "버뮤다"):
+        # jeans · 진 · 청바지는 옷 낱말이라 남긴다(「Brushed Fleece … Jeans」는 청바지). 대괄호 속 색 약어(「[T/BL]」)도 지운다.
+        alt = match_head(re.sub(r"(?i)denim|데님|chambray|샴브레이|selvedge|셀비지|bermuda|버뮤다|\[[^\]]*\]",
+                                " ", name or ""), ITEM_TYPE_VOCAB)
+        if alt and ITEM_TO_CATEGORY.get(alt) in ("tops", "outer"):
+            head = alt
+    # 코듀로이 진은 골덴 5포켓 바지지 청바지가 아니다 — 「CORDUROY JEANS」(dunst 10 · 판매중 약 20벌)가 데님팬츠에 dw 컬러까지 붙었다
+    # (사진 대조 2026-10-27). 「Corduroy Repair … Denim Pants」처럼 데님 낱말이 따로 있으면 청바지라 그대로 둔다.
+    if head == "데님" and _CORD.search(name or "") and not re.search(r"(?i)denim|데님", name or ""):
+        head = "팬츠"
+    # 「ZIP-UP SWEATER」 · 「Zip-up Hoodie Knit」은 니트 집업이다 — 뒤에서 끝나는 knit · sweater 가 이겨 니트로 섰다(코덱스 category.name ·
+    # 판매중 니트 중 이름에 집업 약 190벌, 2026-10-27). 하프 · 쿼터 집업은 하프집업.
+    if head == "니트" and re.search(r"(?i)zip[\s-]*up|zipup|집업|full[\s-]*zip", name or "") and not _JK_FLEECE.search(name or ""):
+        head = "하프집업니트" if _HOOD_HALF.search(name or "") else "니트집업"
+    # 「Short Pants」 · 「Bermuda Jeans」 · 「Half Slacks」 · 「하프 치노 팬츠」는 반바지다 — 뒤 낱말(pants · jeans · slacks)이 이겨
+    # 판매중 하의 약 1,050벌이 팬츠 789 · 데님 141 · 스웨트팬츠 54 · 슬랙스 23 … 으로 서 있었다(앱 세션이 사이즈 범위로 찾음 —
+    # 그 옷들의 총장이 75 아래, 2026-10-09). 긴 바지 품목인데 이름에 반바지 낱말이 있으면 숏팬츠(버뮤다 낱말이면 버뮤다).
+    # 「7부」 · 「카프리」는 반바지가 아니다. 「하프 집 · 하프 지퍼」는 상의 말이라 거른다.
+    # 「숏ver」(짧은 기장판 긴 바지 · roem 총장 97) · 「HALF & HALF」(반반 배색 · nomanual) · 「SHORTS LAYERED」(겹친 긴 바지)는 거른다.
+    if head in _LONG_BOTTOM and _SHORT_BOTTOM_RX.search(name or "") and not _SHORT_BOTTOM_NOT.search(name or ""):
+        head = "버뮤다" if re.search(r"(?i)bermuda|버뮤다", name or "") else "숏팬츠"
+    # 바시티 묶기(사람 결정 2026-10-09, 앱 세션 전달): 「스타디움 점퍼 · STADIUM JUMPER」, 이름에 VARSITY · 바시티가 있는 점퍼 ·
+    # 재킷 · 블루종은 바시티다(표본 46벌 중 21벌만 바시티였다). 바시티 니트 · 가디건 · 후드 · 맨투맨 · 티셔츠는 무늬 이름이라 그대로.
+    if head in ("점퍼", "재킷", "블루종") and re.search(r"(?i)varsity|바시티|stadium|스타디움", name or ""):
+        head = "바시티"
+    # 스카잔(수베니어 재킷)도 이 묶음이다(사람 결정 2026-10-10 「바시티/스타디움으로 하고 여기 넣는 게 맞을 듯」). 점퍼 · 재킷 · 블루종,
+    # 또는 품목 낱말이 없는 이름(「워시드 크롭 스카쟌」이 매장 칸 따라 데님팬츠로 섰다)만 — 스카잔 패딩 · 수베니어 티 · 니트 · 캡 · 바지는 그대로.
+    _SUKA = r"(?i)스카잔|스카쟌|sukajan"
+    if (head in ("점퍼", "재킷", "블루종") and re.search(_SUKA + r"|souvenir|수베니어", name or "")) or \
+            (head in (None, "", "데님") and re.search(_SUKA, name or "")
+             and not re.search(r"(?i)pants?|팬츠|jeans?|(?<![가-힣])진(?![가-힣])|데님\s*팬츠", name or "")):
+        head = "바시티"
+    # 지퍼 달린 저지는 트랙 집업이다 — 아우터 트랙자켓(앱 세션 · 사람 2026-10-11 「저지는 보통 아디다스 저지 같은 트랙집업이라
+    # 아우터에 가깝다」). 「SOFT UNIFORM ZIP-UP JERSEY」 · 「Track Jersey」. 지퍼 없는 축구 · 야구 · 풋볼 유니폼 저지는 상의로 둔다.
+    if head == "저지" and re.search(r"(?i)zip|집업|지퍼|track|트랙", name or ""):
+        head = "트랙재킷"
+    # 「후드 티셔츠」 · 「hooded tee」는 후드다 — 뒤에서 끝나는 티셔츠가 이겨 롱슬리브 124 · 맨투맨 37벌이 후드를 잃고 있었다
+    # (5차 평가 16번, 사람 「기준 사진 후드티야, 롱슬리브가 아니라」 2026-10-06). 니트 · 재킷 · 파카에 달린 후드는 그대로 둔다(모양 품목이 따로 있다).
+    # 낱말 속의 후드는 아니다 — 「보이후드」 · 「차일드후드」(브랜드 · 그래픽 이름) · 「후디진호」 · neighborhood.
+    if head in ("티셔츠", "롱슬리브", "반팔", "맨투맨") and \
+            re.search(r"(?<![가-힣a-z])(?:후드|후디)|(?<![a-z])hood(?:ed|ie|y|tee)?(?![a-z])", name or "", re.I):
+        head = "후드"
+    # 「TC TG SWEAT PT」 — 끝 약어 PT(팬츠)가 있는데 앞의 sweat 이 맨투맨으로 잡았다(앱 세션 2026-10-09). 상의 낱말보다 끝 약어가 맞다.
+    if head and ITEM_TO_CATEGORY.get(head) == "tops":
+        mt = _TAIL_ABBR_RX.search(name or "")
+        if mt and mt.group(1) == "PT":
+            head = "스웨트팬츠" if re.search(r"(?i)sweat|스웻|스웨트", name or "") else "팬츠"
+    if head:
+        return head
+    m = _TAIL_ABBR_RX.search(name or "")
+    head = _TAIL_ABBR[m.group(1)] if m else ""
+    if not head and re.search(r"(?i)\bsleeves?\s*$", name or ""):
+        head = "롱슬리브"
+    # 끝 약어로 고른 팬츠에도 반바지 규칙을 건다(ava-molli 「TURN-UP HALF PT」)
+    if head in _LONG_BOTTOM and _SHORT_BOTTOM_RX.search(name or "") and not _SHORT_BOTTOM_NOT.search(name or ""):
+        head = "숏팬츠"
+    return head
+
+
+def material_outer(head_name: str, item: str) -> str:
+    """겉옷 이름에 무스탕이 적혀 있으면 그쪽이 품목이다(다른 소재는 태그로만)."""
+    if item not in OUTER_SHAPE_ITEMS:
+        return item
+    for rx, lab in MATERIAL_OUTER:
+        if rx.search(head_name or ""):
+            return lab
+    return item
+
+
+def head_end(text: str, vocab: dict, label: str) -> int:
+    """label 의 낱말이 마지막으로 끝나는 자리(없으면 -1)."""
+    low = " " + (text or "").lower() + " "
+    end = -1
+    for rx in _head_patterns(vocab).get(label, []):
+        for m in rx.finditer(low):
+            end = max(end, m.end())
+    return end
+
+
+# 신발 낱말이지만 옷인 것 — 부츠컷은 바지, 카고부츠는 없다. match_vocab 은 부분 일치라
+# 어휘로는 못 막고 여기서 먼저 걸러야 한다(2026-09-05: 「레이스업 부츠컷 데님」이 신발이 됐다).
+# 「Boots Cut」·「Boots-Cut」은 안 걸렸다 — boot 와 cut 사이에 s 가 끼면 못 읽었다.
+# 그래서 facade-pattern 「Boots Cut Fit」과 ava-molli 「Inside Slit Semi Boots-Cut PT」가
+# 신발 칸에 서 있었다(앱 쪽 지적 2026-09-20). 한글 「부츠컷」만 걸리고 있었다.
+SHOE_FALSE = re.compile(r"부츠\s*[-–]?\s*컷|boots?\s*[-–]?\s*cut|bootcut", re.I)
+
+# 옥스포드는 구두 이름이면서 셔츠 원단이다. 이름에 옷 낱말이 같이 있으면 원단 쪽이다.
+# moif 는 「WIDE UTILITY SHIRT / BLACK OXFORD」처럼 뒤에 색·원단을 적어서, 「뒤에 걸린 쪽이
+# 머리 낱말」 규칙에 걸려 셔츠 열한 벌이 신발이 됐다(hatching-room 「Volume Pants Oxford
+# Washed」까지 열두 벌, 2026-09-06). 사이즈 표까지 같이 버려지고 있었다.
+# 옷 낱말이 없는 것은 그대로 둔다 — open-yy 「OXFORD FLATS」·frizmworks 「Leather oxford」는
+# 진짜 구두다.
+FABRIC_NOT_SHOE = re.compile(r"oxford|옥스포드|옥스퍼드", re.I)
+GARMENT_WORD = re.compile(
+    r"shirts?|셔츠|팬츠|pants|trousers|자켓|재킷|jackets?|코트|coats?|니트|knit|"
+    r"t-?shirts?|tees?|티셔츠|후디|hood(?:ie|ed)?|맨투맨|sweat|스커트|skirts?|원피스|dress|"
+    r"블라우스|blouse|점퍼|블루종|베스트|vest|가디건|cardigan|shorts|쇼츠|슬랙스|slacks", re.I)
+
+# 한글은 낱말 경계가 없어 안에 잡화 낱말이 든 옷이 걸린다 — 「슈러그」의 러그, 「캡소매」의 캡.
+ACC_FALSE = re.compile(r"슈러그|shrug|캡\s*소매|cap\s*sleeve|숄칼라|shawl\s*collar", re.I)
+
+# 잡화 낱말이 실은 옷의 생김새를 말하는 자리. ACC_FALSE 는 이름 전체를 포기하는데 여기서는
+# 그 말만 지운다 — 매장이 가방 이름을 그냥 「Bessette Shoulder」로 적는 일이 흔해서
+# 「shoulder」 자체는 살려 두어야 하기 때문이다(loeuvre·osoi·vunque·margesherwood 130여 벌).
+#   오프숄더 = 목선   mardi-mercredi 티셔츠 21벌이 숄더백이 되어 있었다
+#   핀 체크·핀 스트라이프 = 무늬   hatching-room 셔츠 3벌이 브로치가 되어 있었다
+#   새들 브라운 = 색   lmood 니트 한 벌이 숄더백이 되어 있었다 (2026-09-07)
+ACC_MASK = re.compile(
+    r"off[\s_-]*shoulder|오프[\s_-]*숄더|one[\s_-]*shoulder|원[\s_-]*숄더|"
+    r"drop[\s_-]*shoulder|드롭[\s_-]*숄더|"
+    r"\bpin[\s_-]*(?:check|stripe|striped)\b|핀[\s_-]*(?:체크|스트라이프)|"
+    r"saddle\s*brown|새들\s*브라운|"
+    # 색 이름 — 「백메란지」(흰 멜란지)의 백은 가방이 아니다(easy-no-easy 롱슬리브가 가방), 「보스턴카키」는 보스턴백이 아니다
+    # (suare 반팔티 · 니트 4벌이 보스턴백, 사진 대조 2026-10-27)
+    r"백\s*(?:메란지|멜란지|멜란)|boston\s*khaki|보스턴\s*카키|"
+    r"브라\s*캡|bra\s*cap|"
+    r"레이어링|layering", re.I)
+
+
+# 소재 낱말이 머리 낱말을 이기던 것 — 「FLEECED BERET」이 플리스라서 아우터로, 「WS DENIM CAP」이
+# 데님이라서 하의로 갔다(wkndrs 19벌, 2026-09-05). 무엇으로 만들었는지보다 무엇인지가 먼저다.
+HEAD_ACC = re.compile(
+    r"베레|beret|넥워머|neck\s*warmer|\bcap\b(?!\s*sleeve)|볼캡|비니|beanie|버킷햇|bucket\s*hat|"
+    r"헤어밴드|헤어핀|hairpin|barrette|바레트|앵클릿|anklet|브로치|brooch|스크런치|scrunchie|"
+    r"키링|keyring|키홀더|목걸이|necklace|귀걸이|earring|팔찌|bracelet", re.I)
+# 옷도 잡화도 아닌 굿즈 — 러그·소주잔·물총이 「other」가 아니라 옷으로 세어지고 있었다.
+HEAD_MISC = re.compile(
+    r"\brug\b|\bmat\b|\bglass\b|\btoy\b|머그|\bmug\b|텀블러|tumbler|포스터|poster|"
+    r"스티커|sticker|엽서|postcard|캔들|candle|인센스|incense|방향제|디퓨저|diffuser", re.I)
+# 입지 않는 물건 — 폰 · 노트북 · 이어폰 케이스, 그립톡, 키링 · 키체인, 자석 · 달력 · 라이터 · 컵받침 · 인형 · 쿠션 · 수건 …
+# 매장 칸 이름이 ACC 라서 잡화(accessories)로 섰다(946벌, 2026-10-05 사람 「패션이랑 관련 없는 아이템은 아예 지워」).
+# 옷 낱말이 같이 있으면 옷이다 — 「Toy Puff T-Shirt」 「Sticker Hoodie」 「Postcard Tee」. 갈래는 lifestyle(앱에 안 나감).
+NONFASHION = re.compile(
+    r"(?<![a-z])(phone\s*cases?|iphone|galaxy|z[\s-]?flip|macbook|laptop|ipad|airpods?|buds|earphones?|keyrings?|key\s*rings?|"
+    r"keychains?|key\s*chains?|key\s*holders?|magnets?|calendars?|lighters?|coasters?|plates?|bowls?|notebooks?|puzzles?|"
+    r"dolls?|figures?|cushions?|blankets?|towels?|mouse\s*pads?|shoe\s*horns?|ornaments?|grip\s*toks?|smart\s*toks?|"
+    r"card\s*holders?\s*keyrings?|air\s*tags?|chargers?)(?![a-z])|"
+    r"폰\s*케이스|핸드폰|휴대폰|아이폰|갤럭시|맥북|노트북|아이패드|에어팟|버즈|이어폰|키링|키체인|키홀더|마그넷|자석|달력|캘린더|라이터|"
+    r"코스터|컵받침|접시|그릇|노트북|퍼즐|인형|쿠션|담요|블랭킷|타올|수건|마우스패드|구둣주걱|오너먼트|그립톡|스마트톡|에어태그|충전기", re.I)   # cable · 케이블은 니트 무늬라 넣지 않는다(CREST CABLE HALF-SLEEVE)
+
+
+
+# 이름 뒤쪽(끝에서 세 낱말 안)의 bucket/버킷/버켓 — 가방 낱말이 없고 앞 단계(잡화 어휘 · 단정문 · 칸 이름)가
+# 아무 말도 안 했을 때만 모자로 본다. 「Leno Bucket Tan」(ostkaka 가방)은 앞 단계에서 이미 가방이 된다.
+BUCKET_TAIL = re.compile(r"(?:(?<![a-z])bucket|버킷|버켓)(?:\s+[^\s]+){0,2}\s*$", re.I)
+BUCKET_BAG = re.compile(r"(?<![a-z])(?:bags?|backpack|shoulder|tote|cross|basket|brocle)(?![a-z])|백|가방|숄더|토트", re.I)
+
+DECLARED_MISC = re.compile(
+    r"(버킷\s?햇|스트로우?\s?햇|스트로우|햇|모자|보닛|비니|베레모?|바라클라바|발라클라바|헤드\s?워머|버킷|버켓"
+    r"|스크런치|헤어\s?밴드|머리띠|핸드\s?워머|레그\s?워머|워머|오브제)"
+    r"(?:으로|이며|이고)?\s*(?:입니다|예요|이에요)")
+DECLARED_MISC_CODE = {"스크런치": "accessories", "헤어밴드": "accessories", "머리띠": "accessories", "핸드워머": "accessories",
+                      "레그워머": "accessories", "워머": "accessories", "오브제": "lifestyle"}
+# 잡화를 못박는 단정문 — 위 DECLARED_MISC 와 같은 자리(이름에 옷 낱말이 없을 때)에서만 본다.
+# lememe 「폭트 발루」는 「…2단 지갑입니다」, 「라 끌레」는 「…키링입니다」, 「쁘띠 까레 드 수아」는 「…실크 스카프입니다」
+# 인데 이름이 불어 음차라 단서가 없어 기타(=옷)로 셌다(2026-10-01). 「벨트」는 안 넣는다 — 옷 설명이 「탈부착
+# 가능한 벨트입니다」처럼 딸린 것을 못박는 일이 있다.
+DECLARED_ACC = re.compile(
+    r"(카드\s?지갑|지갑|월렛|키링|키\s?홀더|스카프|머플러|목걸이|팔찌|반지|귀걸이|브로치|선글라스|안경|넥타이|양말|장갑)"
+    r"(?:으로|이며|이고)?\s*(?:입니다|예요|이에요)")
+# 단정문의 낱말 → 잡화 세분류(ACC_TYPE_VOCAB 의 칸). 갈래는 ACC_TO_CATEGORY 로 정한다.
+DECLARED_ACC_LABEL = {"카드지갑": "카드지갑", "지갑": "지갑", "월렛": "지갑", "키링": "키링", "키홀더": "키링",
+                      "스카프": "스카프", "머플러": "스카프", "목걸이": "목걸이", "팔찌": "팔찌", "반지": "반지",
+                      "귀걸이": "귀걸이", "브로치": "브로치", "선글라스": "아이웨어", "안경": "아이웨어",
+                      "넥타이": "넥타이", "양말": "양말", "장갑": "장갑"}
+# 안경 · 선글라스를 설명글로 가린다 — 안경 매장은 이름에 모델 이름만 적는다. satur 「KYOKA - Gray」·「SG PAULINE」
+# 32벌(「…선글라스 프레임」·「…옵티컬 프레임」), eastlogue 「AR-ORIGINAL(44)」(「…협업 안경」), unaffected 「UNSEEN」
+# (「안경다리」·「렌즈」), heritagefloss 「CAFE RACER II」(「선글라스 전면부」·「Lens width」), brown-yard 「Frame 00201」
+# (「SIZE : 54ㅁ15-145」 — 렌즈ㅁ브리지-다리 꼴은 안경 치수뿐이다), polyteru 「OROR x Polyteru P.O」(「광학용 렌즈」)가
+# 기타(=옷)로 셌다(2026-10-01). 이름에 옷 낱말이 없을 때만 본다 — 옷 설명이 「선글라스와 매치」라고 해도 안 걸리게
+# 「프레임 · 렌즈 · 다리」가 붙은 꼴만 받는다.
+EYEWEAR_DESC = re.compile(
+    r"(?:선글라스|옵티컬|안경|광학용?)\s?(?:[가-힣]{1,3}\s)?(?:프레임|렌즈|다리|전면부)|협업\s?안경|안경점|"
+    # 「옵티컬 무테 프레임」·「옵티컬 하금테 프레임」(satur ALTEA · MORO), 「Nose Pad」(eastlogue · post-archive-faction ×
+    # District Vision) — 코받침은 안경에만 있다.
+    r"노즈\s?패드|nose\s?pads?|"
+    r"\b\d{2}\s?[ㅁ□]\s?\d{2}\s?-\s?1[2-5]\d\b|lens\s*width|bridge\s*(?:size|width)|"
+    r"(?:스포츠\s?)?선글라스\s?(?:입니다|이다)", re.I)
+
+
+def declared_acc(description: str) -> str:
+    """설명글이 못박은 잡화 세분류(없으면 빈 문자열). 이름에 옷 낱말이 없을 때만 쓴다 — classify_category 가
+    갈래를, build_csv 가 품목을 이것으로 정해 둘이 어긋나지 않는다."""
+    desc = description or ""
+    da = DECLARED_ACC.search(desc)
+    if da and not re.search(r"(?:과|와|랑|하고)\s*$", desc[:da.start()][-4:]):
+        return DECLARED_ACC_LABEL.get(re.sub(r"\s+", "", da.group(1)), "")
+    if EYEWEAR_DESC.search(desc):
+        return "아이웨어"
+    return ""
+
+
+# 「/ 데님블루」·「- 데님블루」처럼 데님 뒤에 색을 한 번 더 붙이는 꼴도 같은 꼬리다 — stand-oil 「Oblong bag · 오블롱백 /
+# 데님블루」 3벌 · badblood 「[w-bag23-006] … 미니 너트 백 - 데님블루」가 청바지(하의)로 서 있었다(2026-10-01).
+DENIM_TAIL = re.compile(r"\s(?:[-–/]\s*)?(?:(?:blue|black|light|dark|washed|워시드)\s+)?"
+                        r"[a-z가-힣.]*?(?:denim|데님)(?:\s?(?:blue|블루|black|블랙))?\s*$", re.I)
+
+
+def match_acc(name: str) -> str:
+    """잡화 세분류 — 옷 낱말이 잡화 낱말보다 뒤에 있으면 옷이다.
+    「Cotton scarf top」은 스카프가 아니라 탑, 「BELT LAYERED JEANS」는 벨트가 아니라 청바지.
+    「A with B」의 B 는 딸린 것이라 잘라 낸다(「드레스 with 스카프」는 원피스)."""
+    if SHOE_FALSE.search(name or "") or ACC_FALSE.search(name or ""):
+        return ""                      # 부츠컷은 신발이 아니고 슈러그는 러그가 아니다
+    if _CAPE_ACC.search(name or ""):
+        name = _CAPE_WORD.sub(" ", name)   # 「니트 숄 케이프」 · 「Cape Stole」은 목도리다 — 케이프가 뒤에 있어도 잡화 낱말이 머리다
+    # 이름 맨 앞의 「W/」는 「with」가 아니라 여성 라인 표시다 — wednesday-oasis 「W/투톤 하찌 니트 머플러」 ·
+    # 「W/울 헤어리 스트라이프 니트 비니」가 앞 토막(빈 문자열)만 남아 잡화 낱말을 못 보고 니트가 됐다(2026-10-01).
+    # 앞 토막이 비면 자르지 않는다.
+    is_set = bool(_SET_ANY.search(name or ""))      # 「[SET] …」은 괄호라 아래에서 지워진다 — 먼저 본다
+    n = re.split(r"\bwith\b|(?<![A-Za-z/])w/", name or "", maxsplit=1, flags=re.I)[0]
+    if not n.strip():
+        n = name or ""
+    # 괄호 속은 덧말 — 「SWEAT(BOXER …)」 · 「HOOD SWEAT(BOSTON)」
+    core = _aside_off(n)
+    if core != n and match_head(core, ITEM_TYPE_VOCAB):
+        n = core
+    # 꼬리의 색·소재는 머리 낱말이 아니다(「shoulder bag _ sashiko denim」)
+    n = re.sub(r"[_,]\s*(?:[\w가-힣#/&+.-]+\s*){1,3}$", " ", n)
+    # 잡화 낱말 **바로 뒤** 맨 끝의 데님은 소재·색이다(「TRAVEL CAP DENIM」·「볼캡 - 블루데님」).
+    # 사이에 딴 말이 끼면 안 뗀다 — 「RIBBON STRAP POCKET DENIM」·「Ring yarn washing denim」은 청바지다.
+    m = DENIM_TAIL.search(n)
+    if m:
+        cut = n[:m.start()].rstrip()
+        a = match_head(cut, ACC_TYPE_VOCAB)
+        if a and head_end(cut, ACC_TYPE_VOCAB, a) >= len(cut) + 1:
+            n = cut
+    n = ACC_MASK.sub(" ", n)           # 목선·무늬·색 이름은 잡화 낱말이 아니다
+    acc = match_head(n, ACC_TYPE_VOCAB)
+    if not acc:
+        return ""
+    at_acc = head_end(n, ACC_TYPE_VOCAB, acc)
+    # 잡화 낱말 뒤의 홀로 선 short · long · 숏 · 롱은 기장이다 — 「logo beanie short」 · 「RUBBER BOOTS SHORT」가 쇼츠 낱말로 읽혀
+    # 비니 · 장화가 숏팬츠로 섰다(판매중 8벌, 2026-10-10 점검).
+    # 「long sleeves」 · 「롱 슬리브」의 long 은 소매다 — 지우면 「Sheer layered scarf long sleeves」(miseki-seoul 롱슬리브)가 스카프가 됐다(2026-10-27).
+    n_cmp = re.sub(r"(?i)(?<![a-z])(?:short|long)(?![a-z])(?![\s_-]*(?:sleeve|slv))|(?<![가-힣])(?:숏|롱)(?![가-힣])(?!\s*슬리브)", " ", n)
+    for label in ITEM_TYPE_VOCAB:
+        if ITEM_TO_CATEGORY.get(label) in ("shoes", None):
+            continue        # 신발은 위 어휘가 이미 본다
+        if head_end(n_cmp, ITEM_TYPE_VOCAB, label) > at_acc:
+            return ""       # 옷 낱말이 더 뒤 = 그게 머리 낱말이다
+    # 이름 끝의 대문자 약어(PT · SK · OP)는 옷 낱말이다 — 「ONE TUCK STRAP WOOL PT」(ava-molli 울 바지 3벌)가 strap(가방끈)이 됐다(2026-10-27).
+    mt = _TAIL_ABBR_RX.search(n)
+    if mt and mt.start() >= at_acc - 1:
+        return ""
+    # 「옷 & 잡화 Set」 — 앞 토막의 머리 낱말이 옷이면 옷 세트다. bittercells 「Iris Shirt & Bonnet Set」가 새 낱말
+    # bonnet 때문에 모자가 될 뻔했다(2026-10-01). 앞 토막도 잡화가 머리면(「Knit Beanie & Muffler Set」) 그대로 잡화다.
+    # 2026-10-27(사진 대조): 「[SET] … Knit & Shawl」(bittercells 니트 세트) · 「NYLON HOOD VEST +GYM SACK SET」(rest-recreation 베스트)처럼
+    # 세트 표시가 앞에 오거나 「+」로 잇는 꼴, 「Draped string blouse scarf set」(arend)처럼 잇는 말 없이 옷 이름이 먼저 오는 세트도 옷 세트다 —
+    # 작은 덤(스카프 · 숄 · 짐색)으로 분류되어 있었다. 이음말이 없을 때는 분명한 옷 이름(블라우스 · 셔츠 · 베스트 …)만 본다(「Knit Beanie」의 knit 은 꾸밈말).
+    if is_set:
+        parts = re.split(r"\s*[&+]\s*", n, maxsplit=1)
+        if len(parts) == 2:
+            first = parts[0]
+            g = match_head(first, ITEM_TYPE_VOCAB)
+            a1 = match_head(first, ACC_TYPE_VOCAB)
+            if ITEM_TO_CATEGORY.get(g) not in ("shoes", None) and head_end(first, ITEM_TYPE_VOCAB, g) > (
+                    head_end(first, ACC_TYPE_VOCAB, a1) if a1 else -1):
+                return ""
+        elif _SET_GARMENT.search(n[:at_acc]):
+            return ""
+    return acc
+
+
+# 세트 표시 — 끝의 「set · 세트」, 앞의 「[SET]」. 「set-up」(셋업)은 아니다.
+_SET_ANY = re.compile(r"(?i)(?<![a-z])set(?![a-z\-])|세트")
+# 세트 이름에서 옷 세트라고 볼 분명한 옷 이름 — 니트 · 데님 · 플리스처럼 잡화 앞 꾸밈말로도 쓰이는 낱말은 뺀다
+_SET_GARMENT = re.compile(r"(?i)(?<![a-z])(?:blouses?|shirts?|t-?shirts?|tees?|cardigans?|vests?|dress|skirts?|pants|trousers|jackets?|coats?|"
+                          r"tops?|hoodies?|sweaters?|sweatshirts?)(?![a-z])|블라우스|셔츠|티셔츠|가디건|베스트|원피스|스커트|팬츠|자켓|재킷|코트|후드|스웨터")
+
+
+SET_TAIL = re.compile(r"(?:\bset|세트)\s*$", re.I)
+
+# 반려동물 옷 — 사람 옷이 아니다. 이름만으로는 못 가른다: 「SHAGGY DOG SWEATER」(dunst)·
+# 「CAT RINGER T-SHIRT」(wkndrs)·「PUPPY T-SHIRT」는 동물 그림이 그려진 사람 옷이고,
+# mardi-mercredi 의 「PET TSHIRT」만 진짜 개 옷이다(권장 몸무게 ~3kg, 견갑골에서 꼬리까지).
+# 매장이 스스로 PET 칸에 넣어 둔 것만 뺀다 — 넓게 걸면 사람 옷 59벌이 잘린다(2026-09-05).
+PET_CATEGORY = re.compile(r"^\s*(pet|펫|반려|강아지|고양이|dog|cat)\s*$", re.I)
+
+# 아동복 — 사람 지시로 목록에서 아예 뺀다(2026-09-05). 이것도 이름만으로는 못 가른다:
+#   「BABY BLUE」는 색, 「BABY ALPACA」는 실, 「Baby Tee」는 성인 티셔츠 스타일,
+#   「GIRL'S HEART MESSAGE SWEATER」·「Triple Henley Neck Tee (Girl)」는 여성복,
+#   「BOY HOOD T-SHIRT」는 그래픽 이름이다. 넓게 걸면 153벌이 잘못 잘린다.
+# 그래서 (1) 매장이 스스로 KIDS 칸에 넣은 것, (2) 이름 맨 앞의 KIDS/키즈,
+# (3) 한국어 낱말(키즈·아동·유아·주니어)만 본다.
+# 칸 이름이 아동 낱말 **하나**일 때만 받다가 「KID SHOES」를 놓쳤다(salondeju 9벌,
+# 사람이 짚었다 2026-09-20). 아동 낱말로 **시작하고 짧은** 칸까지 받는다 — 「KIDS BEST」·
+# 「키즈 아우터」 꼴이다. 길면 기획전 제목일 수 있어 안 받는다.
+KIDS_CATEGORY = re.compile(
+    r"^\s*(kids?|키즈|아동|주니어|junior|유아|baby|베이비)\s*$"
+    r"|^\s*(kids?|키즈|아동|주니어)\s+\S{1,12}\s*$", re.I)
+KIDS_NAME = re.compile(r"^\s*[\[\(]?\s*(kids?|키즈|아동|주니어)\b|키즈|아동복|유아복|주니어", re.I)
+# 「KID MOHAIR」는 새끼염소 털(실 이름)이지 아동복이 아니다 — 성인 니트 넉 벌이 잘렸다
+KIDS_FALSE = re.compile(r"kid[\s-]*mohair|키드[\s-]*모헤어|kid[\s-]*silk", re.I)
+# 이름에 아동 낱말이 없어도 매장이 아동 라인을 같은 목록에 섞어 파는 데가 있다. 확실한 표식
+# 둘만 더 본다(2026-09-18 창고 전수로 재고 고른 것) —
+#   ① 이름 맨 앞의 「(K)」: 138벌, 한 매장뿐이고 다른 데서는 한 번도 안 쓴다.
+#      그 상품들의 사이즈가 110·120·130·140·150(아동 키)이라 아동복이 맞다.
+#   ② 사이즈가 「4y 6y 8y 10y 12y」 꼴: 143벌, 역시 한 매장뿐. 해 나이라 헷갈릴 데가 없다.
+# 「children」이라는 낱말은 안 쓴다 — 넣으면 성인 티셔츠가 잘린다(사이즈가 S·M 인데 이름이
+# 「CHILDREN PRINTED T-SHIRTS」인 그래픽 상품 7벌).
+KIDS_NAME_MARK = re.compile(r"^\s*[\[\(]\s*k\s*[\]\)]\s*", re.I)
+KIDS_SIZE_YEAR = re.compile(r"^\s*\d{1,2}\s*y\s*$", re.I)
+
+
+def kids_by_size(options) -> bool:
+    """사이즈 선택지가 해 나이(4y·6y…)면 아동복이다. 둘 이상일 때만 본다."""
+    n = sum(1 for o in (options or []) if KIDS_SIZE_YEAR.match(str(o)))
+    return n >= 2
+
+
+# 이름 끝의 괄호 안이 색이나 소재면 그건 꾸밈말이다(「… CAP (DENIM)」).
+_TRAIL_PAREN = re.compile(
+    r"\s*[\(\[]\s*(?:[^\)\]]{0,24})\s*[\)\]]\s*$")
+
+
+# 괄호 없이 「- DENIM」·「_ light denim」·「/ BLACK DENIM」처럼 색만 붙이는 매장도 있다.
+# 머리 낱말은 뒤에 온다는 규칙 때문에 그 색이 품목을 이겼다 — 데님은 색이면서 품목이라
+# 카디건·셔츠·집업·머플러·짐색·재킷 열세 벌이 청바지 칸에 들어가 있었다(2026-09-07).
+#   frizmworks  Heavy wool round cardigan _ denim
+#   rssc        STRIPE MIXED DENIM TRUCKER JACKET - DENIM
+#   moif        [AW22]UNIFORM SHIRT / BLACK DENIM
+# 꼬리가 전부 색 낱말일 때만, 그리고 떼고도 품목 낱말이 남을 때만 뗀다.
+_SHADE_WORDS = {
+    "denim", "데님", "light", "라이트", "dark", "다크", "deep", "딥", "pale",
+    "washed", "워시드", "워싱", "vintage", "빈티지", "melange", "멜란지", "mixed",
+    "faded", "dusty", "더스티", "aged", "soft", "solid", "basic", "color", "colors",
+}
+
+
+def _color_tail_words() -> set:
+    ws = set(_SHADE_WORDS)
+    for key, aliases in COLOR_VOCAB.items():
+        ws.add(key.lower())
+        for a in aliases:
+            ws.update(a.lower().split())
+    return ws
+
+
+_TRAIL_SEP = re.compile(r"[-–_/|]")
+
+
+def strip_trailing_color(name: str) -> str:
+    """이름 끝에 붙은 색 이름을 뗀다. 떼고도 품목 낱말이 남을 때만 뗀다."""
+    words = _color_tail_words()
+    s = (name or "").strip()
+    for _ in range(4):
+        hits = list(_TRAIL_SEP.finditer(s))
+        if not hits:
+            break
+        head, tail = s[:hits[-1].start()].strip(), s[hits[-1].end():].strip()
+        toks = [t for t in re.split(r"[\s/]+", tail.lower()) if t]
+        if not head or not toks or len(toks) > 3 or not all(t in words for t in toks):
+            break
+        if not (match_head(head, ITEM_TYPE_VOCAB) or match_head(head, ACC_TYPE_VOCAB)):
+            break          # 떼면 무슨 물건인지 알 수 없게 된다 — 그냥 둔다
+        s = head
+    return s
+
+
+# 「40 (250)」처럼 유럽 치수를 앞에, mm 를 괄호에 적는 매장도 있다(years-ago 의 Petrosolaum 구두
+# 33벌이 이 꼴이라 상의로 섰다, 2026-09-26).
+SHOE_SIZE_OPT = re.compile(r"^\s*(?:(2[2-9][0-9]|3[0-2][0-9])\s*(?:\(|mm|$)|(?:3[5-9]|4[0-7])(?:\.5)?\s*\(\s*(?:2[2-9][0-9]|3[0-2][0-9])\s*(?:mm)?\s*\))")
+DECLARED_BAG = {"백팩", "가방", "토트백", "숄더백", "크로스백", "파우치", "클러치", "에코백", "배낭", "사코슈",
+                "닥터백", "호보백", "버킷백", "미니백", "쇼퍼백", "메신저백", "보스턴백", "핸드백", "체인백"}
+# 매장이 제품 종류를 못박는 문장 — 「…크로스백입니다」. 이름·카테고리가 쓸모없을 때의 마지막 단서다.
+DECLARED_KIND = re.compile(
+    r"(백팩|가방|토트백|숄더백|크로스백|파우치|클러치|에코백|배낭|사코슈|닥터백|호보백|버킷백|미니백|쇼퍼백|메신저백|"
+    r"보스턴백|핸드백|체인백|슈즈|스니커즈|운동화|로퍼|부츠|샌들|슬리퍼|구두)"
+    r"(?:으로|이며|이고)?\s*(?:입니다|예요|이에요)")
+
+
+def clean_name_for_kind(name: str) -> str:
+    """갈래를 정하기 전에 상품명에서 꾸밈을 뗀다 — 이 손질을 거친 이름으로만 판단한다.
+
+    · 맨 뒤 괄호는 색·소재를 적는 자리다. 「NEWSBOY CAP (DENIM)」이 데님이 뒤에 있다는
+      이유로 하의가 됐다(2026-09-05).
+    · 옷 낱말이 있으면 oxford 를 지운다 — 옥스포드 셔츠는 구두가 아니다.
+
+    따로 떼어 둔 까닭: 검사 쪽(verify_data)이 이 손질 없이 raw 이름에 match_acc 를 걸어,
+    「WIDE UTILITY SHIRT / BLUE STRIPE OXFORD」를 구두라고 39번 외쳤다(2026-09-15).
+    잣대가 둘이면 반드시 어긋난다.
+    """
+    name = strip_trailing_color(_TRAIL_PAREN.sub("", name or ""))
+    if GARMENT_WORD.search(name):
+        name = FABRIC_NOT_SHOE.sub(" ", name)
+    return name
+
+
+def acc_of(name: str) -> str:
+    """손질한 이름으로 본 잡화 종류(없으면 빈 문자열)."""
+    return match_acc(clean_name_for_kind(name))
+
+
+def category_code_of(category_names: list[str]) -> str | None:
+    """매장 칸 이름으로 정한 갈래(못 정하면 None) — classify_category 의 칸 이름 차례를 따로 뗀 것."""
+    for cat in category_names:
+        low = cat.lower()
+        if any(n in low for n in NOISE_CATEGORY) or RANK_CATEGORY.match(low):
+            continue
+        # 칸 이름이 「Book」 하나인 것 — horlisun 「KINFOLK TRAVEL」·「Supreme」 같은 책 8벌(2026-10-01).
+        # 부분 일치로 넣으면 「LOOKBOOK」 칸이 걸려서 통째로만 받는다.
+        if BOOK_CATEGORY.match(low):
+            return "lifestyle"
+        for code, keys in CATEGORY_NAME_RULES:
+            if any(k in low for k in keys):
+                return code
+    return None
+
+
+# 매장 칸 이름에 「<핏> 핏 <품목>」으로 상품 설명을 적는 매장 — ader-error 는 이름이 「Product. 66」뿐이고 칸 이름이 「커브드 핏 진」 ·
+# 「세미 오버사이즈 핏 후디」다(판매중 품목 빈칸 86벌이 이 꼴, 2026-10-27). 이름에 품목 낱말이 없을 때만 그 칸의 품목을 쓴다.
+_FIT_ITEM = re.compile(r"(?:세미\s*)?(?:오버사이즈|레귤러|와이드|슬림|테이퍼드|커브드|스트레이트|릴렉스드|루즈|크롭|박시)\s*핏\s+(.+)$")
+
+
+def cate_item(category_names: list[str]) -> str:
+    """칸 이름의 「○○ 핏 <품목>」에서 고른 품목(없으면 빈 문자열)."""
+    for c in category_names or []:
+        m = _FIT_ITEM.search((c or "").strip())
+        if m:
+            h = garment_head(m.group(1))
+            if h in ITEM_TO_CATEGORY:
+                return h
+    return ""
+
+
+_SINGLE_SHORT = re.compile(r"(?<![a-z])short(?![a-z])", re.I)
+_PLURAL_SHORTS = re.compile(r"shorts|쇼츠|숏팬츠|숏\s?팬츠|반바지|short\s?pants|jort", re.I)
+
+
+def classify_category(name: str, category_names: list[str], description: str = "",
+                      options: list | None = None) -> str:
+    if any(PET_CATEGORY.match(c or "") for c in category_names):
+        return "pet"
+    if not KIDS_FALSE.search(name) and (
+            any(KIDS_CATEGORY.match(c or "") for c in category_names) or KIDS_NAME.search(name)
+            or KIDS_NAME_MARK.match(name) or kids_by_size(options)):
+        return "kids"
+    if SHOE_FALSE.search(name):
+        return "bottoms"
+    name = clean_name_for_kind(name)
+    if NONFASHION.search(name) and not match_head(name, ITEM_TYPE_VOCAB):
+        return "lifestyle"
+    # 잡화 세분류가 먼저다 — 옷 어휘와 겹치는 낱말(니트 스카프·플리스 베레·데님 캡)이 있고,
+    # 상품명은 「무엇인지」를 뒤에 적으므로 뒤에 걸린 쪽이 머리 낱말이다.
+    acc = match_acc(name)
+    # 홀로 선 단수 「short」는 반바지(Flight Short)일 수도 기장(짧은 비니 · 숏 부츠)일 수도 있다. 잡화 낱말 뒤에 붙으면
+    # 기장이다 — cayl 「logo beanie short」 7 · 「RAIN BOOTS SHORT」 5 · 「LEATHER BELT WH SHORT」가 단수 short(2026-10-06 추가)에
+    # 먼저 걸려 숏팬츠로 섰다(Claude 실측 판독에서 드러남, 2026-10-08). 반바지 복수형 · 「denim short」 같은 옷 낱말은 그대로 둔다.
+    if not acc and _SINGLE_SHORT.search(name) and not _PLURAL_SHORTS.search(name):
+        acc = match_acc(_SINGLE_SHORT.sub(" ", name))
+    if acc:
+        return ACC_TO_CATEGORY[acc]
+    # 매장이 설명글에서 **제품 종류를 못박은 문장**은 이름 추측보다 낫다.
+    # 「코트 데일리 캔버스」는 코트가 아니라 court 스니커즈인데 이름의 「코트」가 먼저 걸려
+    # 아우터로 섰고, 설명글은 「가벼운 스니커즈입니다」라고 적혀 있었다(covernat).
+    # 「삭 보 블랙」(Sac Beau)은 한글 이름에 단서가 없고 카테고리도 「Shop」 하나뿐인데
+    # 「스몰 사이즈 백팩입니다」라고 적혀 있었다(lememe). 둘 다 사람이 짚어 줬다(2026-09-15).
+    # 「유니크한 쉐입이 특징인 스몰 사이즈 백팩입니다」 — 이름이 「삭 보 블랙」(Sac Beau)이라
+    # 한글로는 단서가 없고 카테고리도 「Shop」 하나뿐이라, 가방이 상의로 섰다(lememe,
+    # 사람 지적 2026-09-15). cayl 「commute pack」 24벌도 같은 꼴로 상의였다.
+    # 「~입니다」로 끝나는 단정문만 본다 — 「가방과 함께 연출하면」 같은 문장은 안 걸린다.
+    declared = DECLARED_KIND.search(description or "")
+    # 「자켓과 에코백입니다」처럼 덤으로 딸린 세트는 그 물건이 주인공이 아니다 — 앞에
+    # 이음씨가 붙으면 안 본다.
+    if declared and not re.search(r"(?:과|와|랑|하고)\s*$", (description or "")[:declared.start()][-4:]):
+        return "bags" if declared.group(1) in DECLARED_BAG else "shoes"
+    if BAG_CAPACITY.search(name):
+        return "bags"
+    item = garment_head(name)
+    # 무스탕은 소재이면서 품목이라(MATERIAL_OUTER) 홑 「shearling」만 적힌 가방 · 신발도 겉옷이 된다 — margesherwood 「SOFT BOWLING
+    # MINI_beige shearling+chestnut nubuck」(시어링 볼링백, 매장 칸 BAGS)이 아우터/무스탕이었다(사진 대조 2026-10-27). 매장 칸이 잡화를
+    # 말하면 그 칸을 따른다.
+    if item == "무스탕":
+        by_cat = category_code_of(category_names)
+        if by_cat in ("bags", "shoes", "headwear", "jewelry", "accessories"):
+            return by_cat
+    if item in ITEM_TO_CATEGORY:
+        return ITEM_TO_CATEGORY[item]
+    ci = cate_item(category_names)
+    if ci:
+        return ITEM_TO_CATEGORY[ci]
+    # 이름에 옷 낱말이 없고 설명글이 「…버킷 햇입니다」 · 「…스크런치입니다」라고 못박으면 그 물건이다(misu-a-barbe 「AMULET STRAW」 ·
+    # 「BIG EARS BLUE」). 옷 낱말 뒤에 둔다 — 티셔츠 설명의 「…신체일부와 같은 모자입니다」(horlisun)가 모자가 되지 않게.
+    dm = DECLARED_MISC.search(description or "")
+    if dm and not re.search(r"(?:과|와|랑|하고)\s*$", (description or "")[:dm.start()][-4:]):
+        return DECLARED_MISC_CODE.get(re.sub(r"\s+", "", dm.group(1)), "headwear")
+    da = declared_acc(description)
+    if da:
+        return ACC_TO_CATEGORY[da]
+    # 옵션이 신발 치수면 신발이다 — 「260(41) 270(42) 280(43)」. 옷 옵션에는 220~320 이
+    # 줄줄이 서지 않는다(atelier-de-lumen 「MEN'S WOVEN FLIP」이 하의로 섰다, 사람 지적
+    # 2026-09-15). 카테고리 이름이 매장 이름 하나뿐인 곳에서 이름만으로는 못 가린다.
+    shoe_opt = [o for o in (options or []) if isinstance(o, str) and SHOE_SIZE_OPT.match(o)]
+    if len(shoe_opt) >= 2 and len(shoe_opt) >= len(options or []) * 0.6:
+        return "shoes"
+    # 굿즈 낱말은 옷 낱말 뒤에 본다 — 「Toy Puff T-Shirt」는 장난감이 아니라 티셔츠다.
+    if HEAD_MISC.search(name):
+        return "lifestyle"   # 굿즈는 옷(other)이 아니라 생활용품 — 2026-10-05
+    by_cat = category_code_of(category_names)
+    if by_cat:
+        return by_cat
+    # 설명글의 「22.5(W) X 12.5(H)」 — 가로×세로로 재는 것은 가방·지갑이다. ostkaka 「Kadel Mini Baguette」·「Numer Mesh」,
+    # lememe 「삭 마티네」 15벌이 이름에 가방 낱말이 없어 기타(=옷)로 셌다(2026-10-01). 창고 전수로 이 꼴이 든 설명
+    # 334벌 가운데 옷은 0벌이다. 칸 이름이 이미 정한 것은 건드리지 않게 칸 이름 다음에 본다.
+    if BAG_DIMS.search(description or ""):
+        return "bags"
+    # 카테고리로도 못 정하면 상품명에서 한 번 더(신발·가방·액세서리 낱말).
+    # 낱말 경계를 지켜야 한다 — 그냥 부분 일치로 재던 시절 RACCOON 이 acc 로, BAGGY 가 bag 으로,
+    # spring 이 ring 으로, capsule 이 cap 으로 잡혀 옷이 잡화가 됐다(2026-09-05 표본 검사).
+    for code, keys in CATEGORY_NAME_RULES:
+        if code in ("shoes", "bags", "accessories", "headwear", "jewelry") and match_head(name, CATEGORY_NAME_VOCAB) == code:
+            return code
+    # 마지막으로 설명문의 치수 항목. 하의 낱말을 먼저 본다 — 상의에도 「총장」은 있지만
+    # 하의에 「chest」는 없다.
+    # 낱말 하나로도 정한다. 두 개로 조여 봤더니(2026-09-26) 구두·조각·가방은 빠졌지만 진짜 옷
+    # 약 200벌(캐시미어 V넥 · 미디 SK · 윈드셸 …)도 함께 「기타」로 떨어졌다 — 설명에 치수 낱말이
+    # 하나뿐인 옷이 많다. 이 폴백에 걸리는 잡화는 칸 이름·신발 치수·단정문 규칙으로 먼저 거르고,
+    # 그래도 남는 것은 manual_items.csv 에 적는다.
+    if BUCKET_TAIL.search(name) and not BUCKET_BAG.search(name):
+        return "headwear"
+    low = (description or "").lower()
+    for code, keys in SPEC_RULES:
+        if any(k in low for k in keys):
+            return code
+    return "other"
+
+
+# 요약정보 칸에 색이 아니라 소재·안내를 적는 매장도 있다 — 그때 색을 뽑으면 엉뚱한 값이 된다
+# (noirer 「[FABRIC] BODY - COTTON 67%…」에서 블랙이 나왔다). 짧고 소재 낱말이 없을 때만 믿는다.
+_NOT_COLOR = re.compile(r"cotton|polyester|nylon|wool|linen|모달|면\s*\d|혼용|fabric|소재|\d\s*%|"
+                        r"배송|교환|반품|주문|제작|made in", re.I)
+
+
+# 색이 아닌데 색 낱말을 품은 말. 「블루종」은 겉옷 이름이지 파랑이 아니다.
+# 색 낱말을 품었지만 색이 아닌 말. 「스탠다드」가 탠으로 잡혔다(2026-09-05).
+# 2026-10-27 사진 QA · 전수 훑기에서 더한 것 — 한글 별칭이 남의 낱말 속에 든 꼴: 「스틸 스터드 벨트」→ 틸(검정 벨트) ·
+# 「그레이팅 엠블럼 … 팬츠 블랙」→ 그레이 · 「네클레이스」→ 클레이(12벌) · 「유틸리티」→ 틸 · 「브레드 백」→ 레드 ·
+# 「그레이스 턱 팬츠 브라운」→ 그레이 · 「컨버터블」→ 버터 · 「페브릭」→ 브릭 · 「페플럼」→ 퍼플 · 「카멜리아」→ 카멜 ·
+# 「스탠 카라」→ 탠 · 「블루밍」 · 「블랙홀」 · 「멀티플」. 색 낱말 뒤 구분 없이 붙은 진짜 색(「블랙폴아웃」 · 「베이지우드」)은 그대로다.
+_KO_TRAP = re.compile(r"블루종|블라우종|스탠다드|스탠딩|머드가드|브릭\s*로퍼|brick\s*loafer|stone\s*beads|스톤\s*비즈|원석"
+                      r"|스틸|그레이팅|그레이스(?!트라이프)|그레이니|네클레이스|유틸리티|브레드|컨버터블|버터플라이|[페패]브릭|페플럼|카멜리아"
+                      r"|스탠(?=\s*카라)|블루밍|블랙홀|멀티플", re.I)
+_COLOR_RX: list = []
+# 무늬 · 제품 이름으로도 쓰는 색 낱말(match_color 의 과일 · 꽃 규칙)
+_MOTIF_COLOR = re.compile(r"rose|로즈|strawberry|스트로베리|cherry|체리|lemon|레몬|banana|바나나|avocado|아보카도"
+                          r"|caramel|카라멜|choco|초코|cocoa|코코아|butter|버터|peach|피치|plum|플럼|onyx|오닉스")
+
+
+def _color_patterns() -> list:
+    if not _COLOR_RX:
+        for label, keys in COLOR_VOCAB.items():
+            for k in keys:
+                if re.fullmatch(r"[a-z0-9 '\-]+", k):
+                    rx = re.compile(rf"(?<![a-z]){re.escape(k)}(?![a-z])")
+                else:
+                    rx = re.compile(re.escape(k))
+                _COLOR_RX.append((label, len(k), rx))
+    return _COLOR_RX
+
+
+def match_color(text: str, *, compound: bool = True, context: str = "") -> str:
+    """조직·가공·장식을 가린 뒤 긴 색 어휘와 확인된 배색 규칙을 적용한다.
+
+    한글에 뒤 경계를 뒀더니 「블랙폴아웃」·「베이지우드」·「더스티그린카모」처럼 매장이
+    붙여 쓴 진짜 색 117벌이 빠졌다(2026-09-05). 경계 대신 함정 낱말만 가린다 —
+    실제로 걸린 것은 「블루종」(겉옷)뿐이고, 「그레이프」는 어휘에 넣어 길이로 이긴다.
+
+    「먼저 나온 색이 옷 색」으로 바꿔 봤다가 되돌렸다(2026-09-05). 한글 이름은 색을
+    뒤에 붙이는데(「내추럴 러브 심볼 티셔츠 네이비」) 앞의 제품 라인 이름이 색으로
+    잡혀 1,464벌이 틀어졌다. 영문 「_WHITE PALEPINK」 15벌을 얻자고 치를 값이 아니다.
+
+    뒤 경계는 남긴다 — 없으면 「블루종」이 블루, 「그레이프」가 그레이가 된다.
+    """
+    low = _KO_TRAP.sub(" ", (text or "").lower())
+    # STONE GRAY는 색이지만 STONE WASHED는 가공법이다.
+    low = re.sub(r"(?<![a-z])stone[\s_-]+wash(?:ed|ing)?(?![a-z])", " ", low)
+    # MINT CHOCO는 제품 라인일 수도 있다. 뒤에 별도 Ice Mint가 있을 때만 가린다.
+    low = re.sub(r"(?<![a-z])(mint\s+)choco(?=.*\bmint(?![a-z]))", r"\1 ", low)
+    hits = []
+    for label, n, rx in _color_patterns():
+        # 「멀티」는 여러 색이라는 말이지 색 이름이 아니다. 매장이 딴 색을 함께 적었으면
+        # 그게 그 옷 색이다 — 「Multi Zip Hoodie Blue」는 파랑, 「MULTI WAY TOP IN NAVY」는
+        # 남색이다(2026-09-05: 이 규칙이 없으면 139벌 중 서른 남짓이 멀티로 덮였다).
+        if label == "멀티":
+            continue
+        for m in rx.finditer(low):
+            hits.append((label, n, m.start(), m.end()))
+    # 과일 · 꽃 · 음식 이름 색은 무늬 · 제품 라인 이름이기도 하다. 뒤에 다른 색이 또 나오면 그쪽이 옷 색이다(「CHOCO/MINT」처럼
+    # 색을 나열한 것은 빼고) —
+    # 「스트로베리 플라워 머플러 블랙」(검정 머플러가 핑크) · 「Caramel Box Shoulder Bag_Beige」 · 「VELVET BAG ROSE_RED」.
+    # 로즈는 홀로 있어도 대개 장미 무늬다(freckle 「rose lace french pants」 · 「TAILORED ROSE JACKET」) — 이름 끝
+    # 색 자리(뒤에 한 낱말 이하)에 있을 때만 색으로 받는다(「…_Rose Dust」). 2026-10-27 사진 QA.
+    hits = [h for h in hits if not (
+        _MOTIF_COLOR.fullmatch(low[h[2]:h[3]]) and (
+            any(x[2] >= h[3] and x[0] != h[0] and not re.fullmatch(r"\s*[/&+,]\s*", low[h[3]:x[2]]) for x in hits)
+            or (low[h[2]:h[3]] in ("rose", "로즈") and len(re.findall(r"[a-z가-힣]+", low[h[3]:])) >= 2)))]
+    # GOLDEN CAMEL의 golden은 꾸밈말. 단독 GOLDEN과 GOLD/GOLDEN 장신구는 유지한다.
+    hits = [h for h in hits if not (
+        h[0] == "골드" and low[h[2]:h[3]] == "golden" and any(
+            x[0] != "골드" and x[2] > h[3] and low[h[3]:x[2]].isspace()
+            for x in hits))]
+    # NATURAL이 앞의 촉감/라인 수식어일 때만 낮춘다. 끝의 실제 내추럴색은 유지한다.
+    hits = [h for h in hits if not (
+        h[0] == "내추럴" and any(x[0] != "내추럴" and x[2] >= h[3] for x in hits))]
+    # WHITE MELANGE는 실제 회색 원단이다. 유색 MELANGE/HEATHER는 조직어이며,
+    # BLACK / MELANGE나 MELANGE&PINK처럼 별개 색을 나열한 것은 그대로 둔다.
+    texture = [h for h in hits if h[0] == "그레이"
+               and re.search(r"melange|heather", low[h[2]:h[3]])
+               and not re.search(r"gr[ae]y", low[h[2]:h[3]])]
+    removed = []
+    fabric_hits = []
+    for h in texture:
+        # _HEATHER GREEN은 회색 몸판 + 초록 프린트이기도 하다. 로고/프린트
+        # 상품의 색 접미부가 HEATHER로 시작하면 그 바탕색을 보존한다.
+        if ("heather" in low[h[2]:h[3]] and re.search(r"_\s*$", low[:h[2]])
+                and re.search(r"logo|emblem|flower|ddanji|script|needlework|로고|자수|프린트",
+                              (context or text or "").lower())):
+            continue
+        # BLACK MELANGE도 검정/흰 실의 회색 혼색일 수 있다. 유색 멜란지와 구별한다.
+        if any(x[0] == "블랙" and (
+                (x[3] <= h[2] and re.fullmatch(r"[\s-]+", low[x[3]:h[2]]))
+                or (x[2] >= h[3] and re.fullmatch(r"[\s-]+", low[h[3]:x[2]])))
+               for x in hits):
+            continue
+        # WHITE MELANGE 바탕 뒤에 로고색이 붙어도 회색 원단을 보존한다.
+        whites = [x for x in hits if x[0] == "화이트" and x[3] <= h[2]
+                  and low[x[3]:h[2]].isspace()]
+        if whites:
+            fabric_hits.extend(("그레이", h[3] - x[2], x[2], h[3]) for x in whites)
+            continue
+        for x in hits:
+            if x[0] in {"그레이", "화이트", "아이보리", "크림"}:
+                continue
+            if x[3] <= h[2]:
+                gap = low[x[3]:h[2]]
+                # ROSE ... TOP_MELANGE처럼 앞의 제품 라인명은 색 근거가 아니다.
+                if not re.fullmatch(r"[\s-]+", gap):
+                    continue
+            elif x[2] >= h[3]:
+                gap = low[h[3]:x[2]]
+            else:
+                continue
+            if not re.fullmatch(r"\s*[/&+,|]\s*", gap):
+                removed.append(h)
+                # OLIVE MELANGE라는 색 구절이 앞의 CLOUD 제품명보다 구체적이다.
+                if re.fullmatch(r"[\s-]+", gap):
+                    start, end = min(h[2], x[2]), max(h[3], x[3])
+                    fabric_hits.append((x[0], end - start, start, end))
+    if removed:
+        hits = [h for h in hits if h not in removed]
+        chars = list(low)
+        for h in removed:
+            chars[h[2]:h[3]] = " " * (h[3] - h[2])
+        low = "".join(chars)
+    hits.extend(fabric_hits)
+    # 벨트의 버클, SILVER LOGO, 리본 상의의 금속색은 본체색보다 낮춘다.
+    # 괄호 안 SILVER BLACK을 읽을 때에도 전체 상품명의 용도를 함께 확인한다.
+    decor = (context or text or "").lower()
+    metal_decoration = (re.search(r"\bbelt\b|벨트|\b(?:silver|gold)\s+logo\b", decor)
+                        or (re.search(r"\bribbon\b", decor)
+                            and re.search(r"\b(?:shirt|hoodie)\b", decor)))
+    body_hits = [h for h in hits if h[0] not in {"실버", "골드"}
+                 and not re.search(r"anti[- ]?$", low[:h[2]])]
+    if metal_decoration and body_hits:
+        hits = [h for h in hits if h[0] not in {"실버", "골드"}]
+    if hits:
+        best, best_len, best_at, _ = max(hits, key=lambda h: h[1])
+        if compound:
+            # 상품명 끝의 연속된 색 구절만: CREAM INDIGO PINK / WHITE INDIPINK.
+            # 긴 복합 어휘(OFF WHITE, SKY BLUE)는 한 색으로 두고 겹친 짧은 어휘는 버린다.
+            spans = []
+            for h in sorted(hits, key=lambda h: (h[2], -h[1])):
+                if not spans or h[2] >= spans[-1][3]:
+                    spans.append(h)
+            # NAVY CREAM 뒤의 _UDSW6B129N2 같은 품번은 색 구절의 끝으로 본다.
+            tail = low[spans[-1][3]:].strip(" \t\r\n)]}") if spans else ""
+            code_tail = (len(spans) >= 2 and [h[0] for h in spans[-2:]] == ["네이비", "크림"]
+                         and re.fullmatch(r"_[a-z]+\d[a-z0-9]*", tail))
+            if spans and (not tail or code_tail):
+                run = [spans[-1]]
+                for h in reversed(spans[:-1]):
+                    if not low[h[3]:run[0][2]].isspace():
+                        break
+                    run.insert(0, h)
+                # BLUE GREEN·PEACH IVORY는 혼합 색명이고, WHITE MELANGE·HEATHER
+                # CHARCOAL은 조직/톤 표현이다. 확인한 밝은 바탕 + 프린트 배색만 받는다.
+                labels = [h[0] for h in run]
+                if (labels == ["네이비", "크림"]
+                        or (removed and labels == ["토프", "크림"])
+                        or labels == ["핑크", "인디고", "핑크"]):
+                    return labels[0]
+                if (run[0][0] in {"화이트", "크림", "아이보리"}
+                        and len({h[0] for h in run}) > 1
+                        and any(h[0] not in {"화이트", "아이보리", "크림", "옐로우", "베이지", "내추럴"} for h in run[1:])
+                        and not any(re.search(r"melange|heather|멜란지|헤더", low[h[2]:h[3]]) for h in run)
+                        and low[run[0][2]:run[0][3]] not in {"ice", "cloud", "아이스", "클라우드"}):
+                    return run[0][0]
+        # 「WHITE SOFT BLUE」·「GREY SOFT BLUE」처럼 두 색을 나란히 적은 이름에서는 앞의 색이
+        # 주색이다. 띄어 쓴 꾸밈말 꼴(soft blue = 9)을 어휘에 넣자 그것이 앞의 white(5)를
+        # 눌러 30벌 남짓이 뒤집혔다(dunst, 2026-09-05). 바로 앞에 다른 색이 붙어 있으면 그쪽을 쓴다.
+        if " " in low[best_at:best_at + best_len]:
+            prev = [h for h in hits if h[0] != best and 0 <= best_at - h[3] <= 2]
+            if prev:
+                return max(prev, key=lambda h: h[1])[0]
+        return best
+    # 「Light multi pocket jacket」 · 「멀티 포켓」의 멀티는 여러 색이 아니다(cayl-1270 등 약 20벌, 2026-10-27).
+    low = re.sub(r"(?<![a-z])multi(?=[\s-]*(?:pockets?|way|purpose|use|functional|function|layer(?:ed)?|zip|straps?|pouch|tool|pack)(?![a-z]))"
+                 r"|멀티(?=\s*(?:포켓|웨이|기능|스트랩|파우치|레이어|툴|팩))", " ", low)
+    for label, n, rx in _color_patterns():
+        if label == "멀티" and rx.search(low):
+            return label
+    return ""
+
+
+# 색 칸·옵션에만 쓰는 줄임말. 상품 이름에는 절대 대지 않는다 — 「DENIM PANTS」가 색이 되고
+# 「NV」가 낱말 속에 걸린다. 매장이 「색상: DENIM」이라고 적어 둔 자리에서만 쓴다(2026-09-05:
+# 색이 빈 1,367벌을 열어 보니 denim 48 · noir 35 · iv 33 · nv 30 · l.denim 21 · lbl 13 이었다).
+_FIELD_COLOR = {
+    "denim": "인디고", "l.denim": "블루", "lt.denim": "블루", "light denim": "블루",
+    "노아르": "블랙", "noir": "블랙", "blanc": "화이트", "블랑": "화이트", "azure": "스카이블루",
+    "iv": "아이보리", "nv": "네이비", "bk": "블랙", "wh": "화이트", "gy": "그레이",
+    "bl": "블루", "lbl": "스카이블루", "bg": "베이지", "kh": "카키", "brn": "브라운",
+}
+
+
+# 이름 끝에서만 받는 매장 색이름 — 어휘에 새 값을 만들지 않고 가장 가까운 기존 값으로 옮긴다(위 COLOR_VOCAB 주석).
+# 「sky」·「forest」는 이름 가운데서는 주제어(SKY HOODIE · FOREST GRAPHIC TEE)라 끝자리에서만 쓴다.
+_TAIL_COLOR = {"sky": "스카이블루", "sax": "스카이블루", "forest": "그린", "midnight": "네이비",
+               "concrete": "그레이", "pewter": "그레이", "jade": "그린", "sumi": "차콜",
+               # 2026-10-05: 색 빈 상품 이름 끝 낱말 집계 — coal 43 · slate 17(「slate blue」는 어휘 blue 가 먼저 이긴다)
+               "coal": "차콜", "slate": "그레이"}
+
+
+def field_color(text: str) -> str:
+    """색을 적어 둔 칸(spec 의 색상·옵션)에서만 쓰는 읽기. 먼저 정식 어휘로 보고,
+    안 걸리면 줄임말 표를 본다."""
+    # 전수 옵션에서 확인한 KHAKHI 오타. 상품 라인명에는 적용하지 않는다.
+    text = re.sub(r"(?<![a-z])khakhi(?![a-z])", "khaki", text or "", flags=re.I)
+    # 옵션이 STONE WASHED 하나면 매장의 별도 데님 판매색이다. 이를 지우면
+    # STONE WASHED / WASHED BLACK 중 검정 판매색만 남는다(blr 193).
+    if re.fullmatch(r"\s*stone[\s_-]+wash(?:ed|ing)?\s*", text, re.I):
+        return "스톤"
+    c = match_color(text)
+    if c:
+        return c
+    key = re.sub(r"\s+", " ", (text or "").strip().lower()).strip(" .-_")
+    return _FIELD_COLOR.get(key, "")
+
+
+# ── 시즌 ────────────────────────────────────────────────────────────────
+# 매장은 시즌을 상품 데이터에 안 적지만, 상세 그림을 시즌 폴더에 올린다
+# (kirsh 「/26SSIMG/MELLOW/…」, siyazu 「SIYAZU_23FALL_topimage.jpg」).
+# 40,779벌 가운데 8,025벌에서 시즌이 나온다 — 그림 주소 7,020 · 상품명 1,005.
+# 여러 장이 갈리는 상품은 139벌(1.9%)뿐이고 대개 25FW+26SS(다시 올린 옷)다.
+# 그럴 때는 가장 많이 나온 시즌을, 동점이면 최신을 쓴다(2026-09-06).
+# 연도 앞에 글자가 붙어 있으면 시즌이 아니다. 이 빗장이 없으면 두 가지가 걸린다
+# (2026-09-06 실측):
+#   · URL 의 %20(빈칸)이 20 으로 남는다 — 「a20summer20line20knit」이 20SS 가 됐다(175벌).
+#   · 해시 파일 이름 — 「f65d7c39318c27fa08be…」의 27fa 가 27FW 가 됐다(kirsh 362벌).
+# 두 글자 약어 fa·su·sp·wi 도 뺀다. 매장은 SS·FW·AW 로 쓰고, 저 넷은 해시에 흔한 조각이다.
+# 매장은 「25FW」만 쓰는 게 아니라 **슬래시를 넣어** 「25 F/W」·「26 A/W」·「26 S/S」로도
+# 쓴다(사람이 짚었다). 두 글자 사이에 슬래시가 끼면 앞의 갈래가 통째로 안 걸렸다 —
+# hatching-room 의 「26 F/W」칸 150벌이 그렇게 빈칸이었다. s/s·f/w·a/w 를 따로 받는다.
+# 간절기 시즌도 받는다(사람 결정: SS/FW 로 뭉갠다) — 매장이 쓰는 꼴을 전수로 긁어 골랐다:
+#     PF  Pre-Fall    927벌   le17septembre 「Womens > PF 2023」· pushbutton 「PF22 …」  → FW
+#     PS  Pre-Spring  801벌   amomento 「25PS Paris Presentation」· grove 「2026 PS」    → SS
+#     HS  High Summer        atelier-de-lumen 「24 HS COLLECTION」· coor 「22HS …」     → SS
+#         홀리데이로 읽었다가 사람이 「HS는 여름이다」라고 고쳐 줬고, 창고에 증거가 있다:
+#         brownbreath 의 그림 주소가 「detail/**26ss**/26hs_intro.jpg」로 SS 폴더 안이고,
+#         big-union 은 「24HS/**240404**/」— 4월에 올린 옷이다. 홀리데이일 수 없다.
+# 같은 훑기에서 나온 tee22·pts22·jkt22·hde22·knt22·20TH 따위는 품목 코드·주년이라 안 받는다.
+_SEASON_HALF_RX = (r"s\s?/\s?s|f\s?/\s?w|a\s?/\s?w|ss|fw|aw|pf|ps|hs"
+                   r"|spring|summer|fall|autumn|winter|pre-?fall|resort|cruise|holiday")
+_SEASON_RX = re.compile(
+    rf"(?<![0-9a-z])(?:20)?(\d{{2}})\s*[-_/]?\s*({_SEASON_HALF_RX})(?![a-z0-9]*\d)"
+    rf"|(?<![a-z0-9])({_SEASON_HALF_RX})\s*[-_/]?\s*(?:20)?(\d{{2}})(?![0-9])", re.I)
+_SEASON_HALF = {"ss": "SS", "spring": "SS", "summer": "SS",
+                "fw": "FW", "fall": "FW", "autumn": "FW", "aw": "FW", "winter": "FW",
+                "ps": "SS", "resort": "SS", "cruise": "SS", "hs": "SS",
+                "pf": "FW", "prefall": "FW", "holiday": "FW"}
+
+
+def season_in(text: str) -> str:
+    """「24FW」·「SS25」·「23FALL」 꼴을 「24FW」로. 못 찾으면 빈 문자열."""
+    m = _SEASON_RX.search(text or "")
+    if not m:
+        return ""
+    yr, half = (m.group(1), m.group(2)) if m.group(1) else (m.group(4), m.group(3))
+    # 「F / W」의 슬래시·빈칸을 떼고 표에서 찾는다
+    half = _SEASON_HALF.get(re.sub(r"[\s/]", "", (half or "").lower()), "")
+    if not half or not (yr or "").isdigit():
+        return ""
+    y = int(yr)
+    return f"{y:02d}{half}" if 18 <= y <= 27 else ""
+
+
+def season_of(name: str, detail_images: list | None,
+              category_names: list | None = None) -> str:
+    """상품명이 먼저다 — 매장이 직접 적은 것이므로. 없으면 **칸 이름**, 그다음 상세 그림 주소.
+
+    칸 이름을 보기로 한 까닭: 시즌을 상품명에 안 적고 칸으로만 나눠 둔 매장이 많다
+    (hatching-room 의 「26 F/W」·「26 Summer」, and-you 의 「26 FALL LIVE」). 판매중 의류의
+    시즌 빈칸 46,267 가운데 2,643벌이 이 길로 찬다 — 34.7% → 38.4%.
+
+    가짜가 섞이지 않는지 전수로 확인했다(2026-09-19): 시즌으로 읽히는 칸 이름 96가지가
+    전부 진짜 시즌이고, 「SEASON OFF」·「ALL SEASON」은 해가 없어 안 걸린다. 시즌 칸 둘에
+    든 상품은 82벌뿐이라 아래 「동점이면 최신」이 받아 준다.
+    """
+    got = season_in(name)
+    if got:
+        return got
+    found = [s for s in (season_in(x) for x in (category_names or [])) if s]
+    if not found:
+        found = [s for s in (season_in(u) for u in (detail_images or [])) if s]
+    if not found:
+        return ""
+    top = collections.Counter(found).most_common()
+    best = max(n for _, n in top)
+    # 동점이면 최신. 글자 크기로 고르면 안 된다 — 「26SS」가 「26FW」를 이긴다(S > F).
+    # 같은 해에서는 FW 가 나중이다.
+    return max((s for s, n in top if n == best),
+               key=lambda x: (int(x[:2]), x[2:] == "FW"))
+
+
+# 「_RED IVORY」 · 「_BLACK SILVER」 — 대문자 두 색을 나란히 적은 색 자리는 「몸판 + 로고 · 프린트 색」이다.
+# 더 긴 낱말이 이기는 규칙 탓에 뒤 색(로고색)이 대표색이 됐다: mardi-mercredi 약 210벌(사진 12/12 틀림) ·
+# nick-nicole 약 45벌(「_MELANGE BLACK」 회색 후디가 블랙). 앞 색을 쓴다. 뒤가 멜란지 · 헤더면 원단 이름이라
+# (WHITE MELANGE = 회색) match_color 에 맡긴다. 대소문자가 섞인 「Mocha gray」 · 「Stone Grey」는 꾸밈말 + 색이라 손대지 않는다.
+# 뒤 색이 무채 · 금속의 「배색 색」일 때만이다 — 「SAND BEIGE」 · 「OLIVE GREEN」 · 「BLUE GREY」 · 「CREAM YELLOW」 ·
+# 「PINK BEIGE」 · 「MELANGE CHARCOAL」은 한 색의 이름(꾸밈말 + 색)이라 예전대로 둔다(전수 대조에서 이 꼴 약 250벌이 뒤집힐 뻔했다).
+_ACCENT = {"아이보리", "화이트", "크림", "블랙", "실버", "골드"}
+_LIGHT = {"아이보리", "화이트", "크림", "내추럴", "오트밀"}
+
+
+def _two_tone_body(seg: str) -> str:
+    # 「WH/BK」·「블랙아이보리」도 색 자리의 두 색이다. 한글은 정식 색 이름 두 개가 딱 붙은 경우만 받는다.
+    ko = re.fullmatch(r"(블랙|화이트|아이보리|크림|핑크|네이비|레드|그린|브라운|버건디|그레이)(블랙|화이트|아이보리|크림|실버|골드|베이지)", seg.strip())
+    ws = list(ko.groups()) if ko else re.split(r"[\s/&+]+", (seg or "").strip())
+    if len(ws) != 2 or (not ko and not all(re.fullmatch(r"[A-Z]{2,}", w) for w in ws)):
+        return ""
+    # 꾸밈말 색(「STONE BLACK」 가방) · 원단 이름(「DENIM BLACK」은 검정 데님 — beslow · o-oi 20여 벌이 인디고가 될 뻔했다) ·
+    # 한 색 이름(「BLUE BLACK」 청바지는 검정에 가깝다). 2026-10-28 전수 대조.
+    if re.fullmatch(r"ICE|CLOUD|OFF|SNOW|STONE|ASH|DUST|DUSTY|SMOKE|SMOKY|DENIM|SAND", ws[0], re.I):
+        return ""
+    if ws[0].upper() == "BLUE" and ws[1].upper() == "BLACK" and not re.search(r"[/&+]", seg):
+        return ""
+    a, b = (field_color(w) for w in ws)
+    if not a or not b or a == b or "멀티" in (a, b):
+        return ""
+    # 앞이 금속색이면 버클 · 장식이다(「가죽 벨트 [SILVER BLACK]」) — match_color 의 장식 규칙에 맡긴다
+    if a in ("실버", "골드") or (a in _LIGHT and b in _LIGHT):
+        return ""
+    # 베이지는 「NAVY BEIGE」 · 「BROWN BEIGE」(mardi-mercredi 로고색)처럼 짙은 몸판 뒤에서만 배색 색이다
+    if b in _ACCENT or (b == "베이지" and a in ("네이비", "블랙", "브라운", "레드", "그린", "차콜")):
+        return a
+    return ""
+
+
+def pick_color(name: str, description: str, spec: dict | None = None,
+               options: list | None = None) -> str:
+    option_colors = list(dict.fromkeys(
+        c for o in (options or []) if "선택" not in str(o) for c in [field_color(o)] if c))
+    # 옵션 나열을 단일 배색명으로 읽지 않는다. 명시적인 2COLOR·Black/White는
+    # 기존 옵션 폴백처럼 판매색을 함께 보존한다.
+    counted = bool(re.search(r"\d+\s*(?:colou?rs?|컬러|색상)", name or "", re.I))
+    listed = []
+    parts = re.split(r"[/|,]", name or "")
+    if len(parts) > 1:
+        listed = [match_color(p) for p in parts]
+        listed = list(dict.fromkeys(c for c in listed if c))
+    # MULTI STRIPE는 여러 판매색과 별개인 실제 다색 무늬다(ronron 4704).
+    if counted and len(option_colors) > 1 and match_color(name) != "멀티":
+        return "·".join(option_colors)
+    if len(listed) > 1 and len(option_colors) > 1:
+        return "·".join(option_colors)
+    # 패널·리버서블은 앞 색이 작은 부위일 수 있다(alyss 228: 크림 소매/검정 몸판).
+    compound = (not counted and len(option_colors) < 2
+                and not re.search(r"panel|패널|mixed|믹스드|reversib|리버서블|muffler|머플러|scarf|스카프", name or "", re.I))
+    # 이름 끝 괄호에 색을 적어 두면 그게 매장이 말하는 그 옷 색이다 — 앞은 제품 라인 이름이다.
+    # 「CARBON BACKPACK aaa512u(BLACK)」이 carbon 이 더 길다는 이유로 차콜이 됐다(2026-09-05).
+    tail = re.search(r"[(\[]([^)\]]{1,30})[)\]]\s*$", name or "")
+    if tail:
+        c = (_two_tone_body(tail.group(1)) if compound else "") or match_color(tail.group(1), compound=compound, context=name)
+        if c:
+            return c
+    # 괄호가 아니라 「_」 · 「 - 」 뒤에 적은 색도 같다(「 / 」는 「IVORY / KHAKI」처럼 판매색 나열이라 안 본다) — 매장이 정한 색 자리다. 앞의 제품 라인 이름이 더 길다고
+    # 이기면 안 된다: 「Caramel Box Shoulder Bag_Beige」가 카라멜, 「블랙 오닉스 … 네크리스_실버」가 블랙이었다(2026-10-27).
+    tail = re.search(r"(?:_|\s[-–]\s*)([^_()\[\]/–-]{1,30}?)\s*$", name or "")
+    if tail and len(option_colors) < 2:
+        # 구분자째 넘긴다 — match_color 의 「_HEATHER GREEN」(로고 상품의 회색 바탕) 규칙이 앞의 「_」를 본다
+        c = (_two_tone_body(tail.group(1)) if compound else "") or match_color(name[tail.start():], compound=compound, context=name)
+        if c:
+            return c
+    # 끝에 색을 붙인 이름에도 같은 배색 규칙을 쓴다(「PINK WHITE」). 대소문자 섞인 Mocha gray는 제외한다.
+    if compound:
+        tail = re.search(r"(?:^|\s)([A-Z]{2,}(?:\s+|[/&+])\s*[A-Z]{2,}|[가-힣]+)\s*$", name or "")
+        c = _two_tone_body(tail.group(1)) if tail else ""
+        if c:
+            return c
+    c = match_color(name, compound=compound)
+    if c:
+        return c
+    # 이름 **맨 끝**에 구분자(_ / ( - ,)를 두고 붙인 줄임말 · 매장 색이름 — 「TAILORED COAT (BK)」, 「Blouse_BG」,
+    # 「TOP_SKY」, 「Knit Polo Cardigan (Forest)」. 이름 가운데에는 대지 않는다(_FIELD_COLOR 주석 — 「NV」가 낱말 속에
+    # 걸린다). 끝자리 + 구분자로 묶으면 그 걱정이 없다. 판매중 색 빈칸 6,171벌 중 397벌이 이것이었다(2026-10-04 감사).
+    m = re.search(r"[_/(\-,]\s*([A-Za-z.]{2,12})\s*\)?\s*$", name or "")
+    if m:
+        c = _FIELD_COLOR.get(m.group(1).lower()) or _TAIL_COLOR.get(m.group(1).lower(), "")
+        if c:
+            return c
+    # 이름에 색을 안 적는 매장(9999archive: 203 중 202)이 설명에 「Color: Washed Black」으로 적는다.
+    m = re.search(r"(?:colou?r|색상|컬러)\s*[:：]\s*([^▪•|/\n]{1,40})", description or "", re.I)
+    if m:
+        c = match_color(m.group(1))
+        if c:
+            return c
+    # cafe24 「상품 요약정보」 칸 — xlim 은 이름이 「EP.6 01 SCARF」뿐이고 색을 여기에만 적는다.
+    # 그 탓에 같은 이름·같은 값 다섯 벌이 앱에서 구별이 안 됐다(897벌, 2026-09-05).
+    # 색을 따로 적어 두는 칸이 먼저다(wkndrs 는 spec["color"]="IVORY"), 그다음이 요약정보.
+    keys = [k for k in (spec or {}) if str(k).strip().lower() in
+            ("color", "colour", "색상", "컬러", "color name")]
+    for k in keys + ["상품요약정보", "상품 요약정보", "간략설명", "요약정보", "summary"]:
+        v = str((spec or {}).get(k) or "").strip()
+        if v and len(v) <= 40 and not _NOT_COLOR.search(v):
+            c = field_color(v) if k in keys else match_color(v)
+            if c:
+                return c
+    # 옵션에 적힌 색 — fabrega 「실버-FREE」, divein 「1 (95~100)-MELANGE GRAY」.
+    # 여러 색이면 다 적는다(사람 지시 2026-09-05). 「SIS PANTS [2COLOR]」처럼 한 목록에
+    # 여러 색을 함께 파는 상품이 317벌인데, 옵션에는 beige·grey 라고 멀쩡히 적혀 있다.
+    # 하나만 고르면 나머지 색을 산 사람에게 거짓말이 되고, 비워 두면 있는 것을 버린다.
+    if option_colors:
+        # 유색 멜란지가 회색과 구별되어 색 수가 늘어도 뒤의 판매색을 잃지 않는다.
+        return "·".join(option_colors)
+    # 이름 끝에 **빈칸만** 두고 붙인 줄임말 · 매장 색이름 — 「HEART ROLA T-SHIRT SKY」 · 「Duck Jacket Coal」 ·
+    # 「TRIMMING PULLOVER BK+IV」. 위의 끝자리 규칙은 구분자(_ / ( - ,)를 요구해서 이런 꼴이 비어 있었다
+    # (판매중 색 빈칸 5,359벌 중 254벌, 2026-10-05 — 코덱스 40벌 점검에서 「WHITE 티셔츠의 이웃이 SKY」로 드러남).
+    # 다른 어떤 칸도 색을 못 낼 때만 쓴다 — 기존에 색이 있던 상품은 하나도 안 바뀐다.
+    #   · 두 색을 + / 로 붙인 꼴(NV+BL · BK/IV)은 앞의 색이 대표다(match_color 의 「앞의 색이 주색」과 같은 규칙).
+    #   · 줄임말(bk · nv …)은 **대문자로 쓴 것만** 받는다 — 소문자 be · bl 은 낱말일 수 있다.
+    #   · denim 계열은 안 받는다 — 이름 끝의 Denim 은 품목이지 색이 아니다(「Relaxed Bootscut Denim」).
+    m = re.search(r"[\s_/(\-,]([A-Za-z]{2,10})\s*[+/]\s*[A-Za-z]{2,10}\s*\)?\s*$", name or "") \
+        or re.search(r"\s([A-Za-z.]{2,12})\s*\)?\s*$", name or "")
+    if m:
+        raw = m.group(1)
+        key = raw.lower()
+        c = _TAIL_COLOR.get(key, "")
+        if not c and "denim" not in key and (raw.isupper() or len(key) > 3):
+            c = _FIELD_COLOR.get(key, "")
+        if c:
+            return c
+    return ""
+
+
+# 대분류 — category 위에 한 층 얹는다. 지금 category 는 층이 섞여 있다: Tops·Shirts·
+# Knitwear 가 나란히 있어 「상의 보기」를 누르면 7,532벌만 나오고 니트 2,700 과 셔츠
+# 2,017 이 빠진다(사람 지적 2026-09-06). category 는 이미 앱·태그·보고서가 다 쓰고
+# 있으므로 건드리지 않고 열을 하나 더한다.
+# 원피스는 상의로 묶는다(사람 결정) — 상·하의로 나뉘지 않는 한 벌 옷이라 하의에 둘 수 없고,
+# 따로 두면 큰 탭이 381벌짜리 하나 더 생긴다.
+GROUP_OF = {
+    "Tops": "상의", "Shirts": "상의", "Knitwear": "상의", "Dresses": "상의",
+    "Pants": "하의", "Denim": "하의", "Skirts": "하의",
+    "Outerwear": "아우터",
+    "Bags": "가방", "Shoes": "신발", "Headwear": "모자",
+    "Accessories": "액세서리", "Jewelry": "주얼리",
+}
+
+# 상품 이름이 성별을 대놓고 말하는 경우. 매장이 제 상품에 붙인 말이라 칸보다 정확하다.
+# 「남여공용」(순서 바뀐 표기)도 — mood-inside 푸퍼 숏패딩 3벌이 남성복이었다(2026-10-10)
+NAME_UNISEX = re.compile(r"\bunisex\b|유니섹스|남[녀여]\s?공용", re.I)
+# 「(W)」·「[W]」가 든 이름은 그 매장의 여성 라인이다. tonywack 313벌 · lmood 179 ·
+# the-coldest-moment 65 · afterpray 21 — 600벌인데 그중 314벌이 남성복으로 들어가 있었다
+# (2026-09-06).
+#
+# 처음엔 **맨 앞에 있을 때만** 봤다. 「가운데의 (W) 는 다른 뜻일 수 있다」는 조심이었는데,
+# 사람이 한 매장을 열어 보고 「여성복은 (W) 적혀 있다」고 짚어 줘서 전수로 다시 쟀다.
+# 그 매장은 이름 **끝**에 붙인다: 「RIB KNIT LONG SLEEVE (W) / White」. 맨 앞만 보던 탓에
+# 통째로 놓치고 있었다.
+#
+# (W) 가 성별이라는 증거는 세 겹이다(판매중 1,537벌 · 매장 11곳):
+#   ① 1,396벌(91%)은 지금도 이미 여성이다 — 매장이 제 손으로 여성 칸에 넣어 뒀다.
+#      이름표와 칸이 따로 말하는데 같은 말을 한다. 남성 칸에 든 것은 **0벌**이다.
+#   ② (W) 를 뗀 **같은 이름의 짝**이 그 매장에 따로 있다 — heritagefloss 67벌 ·
+#      satur 138 · tonywack 46 · belier 40 · lmood 12. 색이나 치수라면 짝이 안 생긴다.
+#   ③ 색은 이름 안에 따로 적혀 있다(「… (W) / White」). (W) 가 색일 자리가 없다.
+#
+# 그래서 자리를 안 따지되, **앞 낱말에 붙은 것은 안 받는다.** moif 의 「404 GNF(B)」·
+# 「GNF(F)」가 그림 앞뒤를 가리키는 코드라 그 꼴을 막아야 한다. 이 잣대로 창고 전수를
+# 돌리면 127벌이 여성으로 바뀌고 **잃는 것은 0**이다(heritagefloss 97 · satur 24 · moif 6).
+#
+# 「(M)」은 **안 넣는다.** 같은 매장에서 (M)·(S) 는 가방·슬리퍼의 치수였다
+# (PATENT SPORTS GYM BAG (M) / White). 남성을 뜻하는 (M) 은 한 벌도 못 찾았다.
+# 「(woman)」 · 「[WOMAN]」도 여성 표시다 — mood-inside 판매중 49벌이 「(woman) 투웨이 숏패딩」인데 남성복으로 서 있었다(2026-10-10 점검).
+# 괄호 안의 홀로 선 「(man)」도 남성 표시로 받는다(괄호 밖 man 은 SPIDER MAN 같은 이름 조각이라 안 받는다).
+NAME_WOMEN = re.compile(r"(?<![A-Za-z0-9])[\(\[]\s*(?:(?:w|women|woman)\s*[\)\]]|wom[ae]n\s*-(?=[^\)\]]*[\)\]]))"
+                        r"|\bwomen'?s?\b|\bwmn\b|여성용?|우먼(?:즈)?", re.I)
+NAME_MEN = re.compile(r"\bmen'?s?\b|(?<![A-Za-z0-9])[\(\[]\s*man\s*(?:[\)\]]|-(?=[^\)\]]*[\)\]]))|남성용?|맨즈", re.I)
+
+# 매장이 여성판·남성판을 이름 맨 앞의 한 글자로 가른다 — noice 는 같은 옷 24가지를
+# 「W …」와 「M …」 두 벌로 올려 두었고, insilence 는 유니섹스 티셔츠 옆에 「W 수피마
+# 코튼 …」을 따로 판다. 칸 이름보다 이쪽이 구체적이다: noice 의 「M WOOL FLARED PANTS」는
+# 매장이 「WOMEN'S NEW ARRIVALS」 칸에도 같이 걸어 두어서 여성복이 되어 있었다(2026-09-07).
+# 대소문자를 가린다 — 소문자 「w …」는 성별 표시가 아니다.
+# 매장이 **설명글에** 성별을 선언하는 자리 — 여태 한 번도 안 읽었다.
+#
+#     「남녀 모두 착용할 수 있는 유니섹스 상품입니다」        beyond-closet
+#     「ㆍ남녀공용 착용 ㆍ여성분들은 S사이즈 착용 권장」        beyond-closet
+#     「ㆍ유니섹스 제품」                                    beyond-closet
+#
+# 전수로 715벌 · 매장 21곳(beyond-closet 277 · dunst 182 · satur 176 · suare 40).
+#
+# 검산 — 그 상품들을 매장이 **칸으로는** 어디에 넣었나:
+#     남성 칸 111 · 여성 칸 100 · 유니섹스 칸 16
+# 53:47 이다. dunst 는 같은 옷(UNISEX FISHERMAN KNIT CARDIGAN)을 색깔별로 남성 탭과
+# 여성 탭에 **둘 다** 걸어 뒀다. 설명이 틀렸다면 한쪽으로 쏠렸을 텐데 안 쏠린다 —
+# 매장이 제 칸으로 제 설명을 뒷받침한다.
+#
+# **여성·남성 선언은 안 받는다.** 여성이라 적힌 25벌 가운데 7벌이 남성 칸에 들어 있고
+# (suare 「린넨 세미 와이드 밴딩 팬츠」가 MEN 칸이다), 남성 선언은 통틀어 6벌뿐이다.
+# 꾸밈말도 안 받는다 — 「유니섹스 무드」는 선언이 아니라 분위기다. 선언 꼴만 맞춘다.
+DESC_UNISEX = re.compile(
+    r"남녀\s?모두[^.·\n]{0,12}착용|남녀\s?공용\s?착용|남녀\s?공용\s?(?:상품|제품)|"
+    r"유니섹스\s?(?:상품|제품|로\s?제작|디자인으로)|unisex\s?(?:item|product|design)|"
+    # badblood 「SIZE TIP * 본 상품은 유니섹스 입니다」 829벌(2026-10-22). 「XL사이즈는 유니섹스입니다」는 사이즈 하나라 안 받는다
+    r"(?:상품|제품|아이템)은\s?유니섹스\s?(?:입니다|이며|로)|"
+    # 성별 신호 전수 감사(2026-10-22, 꼴마다 실제 페이지 7~12벌 확인) — 좁은 선언 꼴만
+    r"유니섹스\s*아이템(?:입니다|으로|(?=\s*[(（]|\s*$))|남여\s*공용\s*(?:상품|제품|착용|아이템)|"
+    r"남[녀여]\s*구분\s*없이\s*(?:모두\s*)?착용\s*(?:이\s*)?가능|남여\s*모두\s*착용\s*가능|남녀\s*모두\s*사용\s*가능|"
+    r"유니섹스\s*(?:가방입니다|볼캡(?=\s|$)|긴팔\s*티셔츠|팬츠(?=\s|$))|남녀\s*모두에게\s*어우러지는|"
+    r"젠더리스\s*(?:아이템|제품)(?:으로|[.])", re.I | re.M)
+
+# 사이즈 줄 머리의 성별 — 「1 (women 1) - 허리 35 / …」·「For women(1) - 총장 60 …」. size_rows 가 실측 줄로 받은 머리만 본다.
+SIZE_GENDER_WORD = re.compile(r"(?i)\b(women|woman|men|man)\b|(여성|남성)")
+
+NAME_W_HEAD = re.compile(r"^\s*(?:\[[^\]]*\]\s*)?(?:W|WOMAN|WOMEN)\s+(?=[A-Za-z가-힣])")
+NAME_M_HEAD = re.compile(r"^\s*(?:\[[^\]]*\]\s*)?(?:M|MAN|MEN)\s+(?=[A-Za-z가-힣])")
+
+
+# 홀로 선 「(M)」은 옷에서만 남성이다. 잡화에서는 치수(Medium)다 — 전수로 갈라 봤다:
+#   옷      kijun 「(M) Patch Tank Top」(칸이 MEN · (W) 짝 4벌) · moif 「MICKEY TEE (M)」
+#           ((W) 짝 5/5벌) · blr 3벌(칸이 MEN)                          → 남성 11벌
+#   잡화    heritagefloss 「PATENT SPORTS GYM BAG (M)」·「(S)」 9벌 · depound 가방 5 ·
+#           lememe 「Gift Packaging Service (M)」 · rest-recreation 귀걸이  → 치수 16벌
+# 「(MEN)」처럼 철자로 적은 것은 갈래와 상관없이 NAME_MEN 이 이미 잡는다
+# (foeto 7 · youth 18 · juntae-kim 2).
+APPAREL_CODES = {"tops", "bottoms", "outer", "dress", "skirt", "suiting"}
+NAME_M_PAREN = re.compile(r"(?<![A-Za-z0-9])[\(\[]\s*m\s*[\)\]]", re.I)
+
+
+def cate_gender(category_names: list[str]) -> str | None:
+    """매장의 칸 이름이 말하는 성별. 남녀 칸에 둘 다 들었거나 유니섹스 칸이면 UNISEX, 아무 말도 없으면 None.
+
+    classify_gender 의 칸 층이 이것을 쓴다. 치수 조합 규칙(size_set_gender)은 이 값을 정답지로 삼는다.
+    """
+    joined = unspace_cate(" ".join(category_names)).lower()
+    if any(cate_says_women_solo(x) for x in category_names):
+        joined += " women"
+    hit = [g for g, keys in GENDER_RULES
+           if any(re.search(rf"\b{k}\b", joined) for k in keys)]
+    if "UNISEX" in hit or ("WOMENSWEAR" in hit and "MENSWEAR" in hit):
+        return "UNISEX"
+    return hit[0] if hit else None
+
+
+def _why(why: list | None, basis: str, g: str) -> str:
+    """classify_gender 가 어느 층에서 정했는지 적는다(gender_basis.json) — 앱 · 코파일럿이 「브랜드 기본값 유니섹스」를
+    진짜 유니섹스와 가를 수 있게(사람 2026-10-04 「성별 판정 안된 애들도 있잖아」)."""
+    if why is not None:
+        why.append(basis)
+    return g
+
+
+def classify_gender(category_names: list[str], brand_default: str, name: str = "",
+                    item_type: str = "", top_len: float | None = None,
+                    shoulder: float | None = None, category_code: str = "",
+                    waist: tuple[float, float] | None = None, description: str = "",
+                    size_text: str = "", options: list | None = None,
+                    why: list | None = None) -> str:
+    """칸 이름 → 브랜드 기본값 순으로 성별을 정하되, 상품 이름이 말하면 그게 이긴다.
+
+    지금까지는 이름을 안 봤다. 그래서 여성복 매장의 「UNISEX PADDED DENIM BOMBER JACKET」이
+    여성복이 되고, 남성복 매장의 「UNISEX PANDA T-SHIRT」가 남성복이 됐다. 반대도 있다 —
+    matin-kim 의 「BIG ARCH LOGO TOP FOR MEN」이 여성복으로 들어가 있었다.
+    이름이 대놓고 말하는데 그것과 다르게 적은 상품이 1,692벌이었다(2026-09-06 실측).
+
+      WOMENSWEAR 인데 이름은 unisex  1,021   andersson-bell UNISEX PADDED DENIM BOMBER
+      MENSWEAR   인데 이름은 unisex    447   dunst UNISEX PANDA T-SHIRT
+      WOMENSWEAR 인데 이름은 men       129   matin-kim BIG ARCH LOGO TOP FOR MEN
+      UNISEX     인데 이름은 women      80   afterpray [WOMEN] 프린티드 래글런 롱 슬리브
+      UNISEX     인데 이름은 men        15   amomento MENS CUT-OUT POCKET DENIM SHORTS
+
+    「MEN」이 「WOMEN」 안에서 걸리지 않게 낱말 경계를 쓴다 — 실제로 확인했다.
+    유니섹스를 먼저 본다. 「UNISEX … FOR MEN」처럼 둘 다 적힌 경우는 유니섹스가 맞다.
+    """
+    if name:
+        if NAME_UNISEX.search(name):
+            return _why(why, "이름", "UNISEX")
+        if category_code in APPAREL_CODES and NAME_M_PAREN.search(name) \
+                and not NAME_WOMEN.search(name):
+            return _why(why, "이름", "MENSWEAR")
+        if NAME_W_HEAD.match(name):
+            return _why(why, "이름", "WOMENSWEAR")
+        if NAME_M_HEAD.match(name):
+            return _why(why, "이름", "MENSWEAR")
+        w, m = NAME_WOMEN.search(name), NAME_MEN.search(name)
+        if w and not m:
+            return _why(why, "이름", "WOMENSWEAR")
+        if m and not w:
+            return _why(why, "이름", "MENSWEAR")
+    # 이름이 아무 말도 안 하면, 설명글의 선언을 본다 — 칸보다 앞이다.
+    # 칸은 매장이 상품을 어디 **진열**했나이고, 설명은 무엇을 **만들었나**이다.
+    # 상세 본문(size_text 에 detail_text 가 들어온다)의 선언도 본다 — saintpain 은 description 이 입금 안내뿐이고
+    # 「남녀공용 제품」은 상세 맨 앞에 있다(75벌, 2026-10-22)
+    if any(t and DESC_UNISEX.search(t) for t in (description, size_text)):
+        return _why(why, "설명", "UNISEX")
+    # 사이즈표가 줄마다 성별을 적는 매장 — 「1 (women 1) - 허리 35 …」·「3 (men 1) - …」(label-archive).
+    # 그 상품이 어느 몸에 맞춰 나왔는지를 매장이 사이즈마다 말한 것이라 칸보다 구체적이다(사람 2026-10-07).
+    if size_text:
+        heads = [h for _, h, _ in size_rows([l.strip() for l in size_text.splitlines() if l.strip()])]
+        sg = {("W" if x.group(0).lower().startswith(("wom", "여")) else "M") for h in heads for x in SIZE_GENDER_WORD.finditer(h)}
+        if sg == {"W", "M"}:
+            return _why(why, "사이즈표", "UNISEX")
+        if sg == {"W"}:
+            return _why(why, "사이즈표", "WOMENSWEAR")
+        if sg == {"M"}:
+            return _why(why, "사이즈표", "MENSWEAR")
+    cg = cate_gender(category_names)
+    # 매장이 남성 칸과 여성 칸에 **둘 다** 넣어 둔 상품이 있다. 그건 매장이 「둘 다 입는
+    # 옷」이라고 말한 것이지 둘 중 하나가 아니다. 지금까지는 GENDER_RULES 차례에 따라
+    # 여성이 먼저 걸려서 전부 여성복이 됐다 — 1,659벌(전체의 1.2%)이 그렇게 들어갔다.
+    # 매장이 제 손으로 한 말이라 표본이 아니라 실측이고, 열어 보면 성격이 분명하다:
+    #
+    #     kijun            COTERIE Cap UNISEX Black   ['WOMEN','MEN','ACC','Hat']  ← 이름이 유니섹스다
+    #     rest-recreation  RR CHINO PANTS - BEIGE     ['WOMEN','MEN']
+    #     youth            Essential Socks (Long)     ['MEN','WOMEN']
+    #     amomento         Cotton nylon shirring coat ['outwears','Women','Men']
+    #
+    # 이름에서 「UNISEX … FOR MEN」을 유니섹스로 보는 것과 같은 까닭이다. 성별 필터를
+    # 씌웠을 때 이 옷들이 남성 쪽에서 통째로 사라지는 것이 지금 문제다(사람 지적).
+    # 매장이 **유니섹스 칸을 따로 두고** 거기에 넣었으면 그게 더 구체적인 말이다.
+    # 지금은 규칙 차례상 여성이 먼저 걸려 그 말을 덮는다 — 195벌이 그렇게 들어갔다(실측):
+    #     open-yy  I LOVE YY BOX TEE   ['WOMENS','UNISEX','ESSENTIAL','RESTOCK']  → 여성
+    #     ulkin    100벌 전부                                                      → 여성
+    # 남녀 칸에 둘 다 든 것을 유니섹스로 보는 것과 같은 까닭이다. (가르는 일은 cate_gender 가 한다)
+    if cg:
+        return _why(why, "매장 칸", cg)
+    # 매장이 아무 말도 안 했으면 품목이 말한다. 짐작이 아니라 센 값이다 — 매장이 제 손으로
+    # 성별 칸에 넣어 둔 22,714벌에서 품목별로 어느 칸에 들어갔는지 셌다(2026-09-18):
+    #
+    #     스커트  남성 칸    0 / 여성 칸  954
+    #     원피스  남성 칸    0 / 여성 칸  365
+    #     티셔츠  남성 칸  960 / 여성 칸 1527   ← 기준선. 여성 칸이 원래 1.5배 많다(61%)
+    #
+    # 기준선이 61% 여성이라 「여성 비율이 높다」만으로는 아무 말도 아니다. 남성 칸이 0인
+    # 둘만 받는다. 탑(남성 105/1763 = 6%)·플랫·샌들은 0이 아니라 뺐다 — 확신 없으면 비운다.
+    if item_type in WOMEN_ONLY_ITEM or (name and NAME_WOMEN_ONLY.search(name)):
+        return _why(why, "품목", "WOMENSWEAR")
+    if (category_code == "bottoms" and waist is not None
+            and item_type not in WAIST_UNRELIABLE_ITEM
+            and not (name and WAIST_UNRELIABLE.search(name))):
+        lo, hi = waist
+        if hi < WAIST_WOMEN_MAX:
+            return _why(why, "허리", "WOMENSWEAR")
+        if lo >= WAIST_MEN_MIN:
+            return _why(why, "허리", "MENSWEAR")
+    if item_type in TOP_ITEMS or item_type in OUTER_ITEMS:
+        if top_len is not None:
+            if top_len < TOP_SHORT_CM:
+                return _why(why, "실측(총장 · 어깨)", "WOMENSWEAR")
+        elif shoulder is not None and shoulder < SHOULDER_NARROW_CM:
+            # 총장을 모를 때만 어깨를 본다 — 총장이 있는데 어깨로 덮으면 98%로 떨어진다
+            return _why(why, "실측(총장 · 어깨)", "WOMENSWEAR")
+    # 「둘다」 브랜드인데 매장이 아무 말도 안 한 옷 — 사이즈가 M부터 시작하면(S · XS 없음) 남성 옷이다.
+    # 매장이 칸을 정해 둔 둘다 브랜드 옷 3,774벌에서 95%가 남성 칸이었다(2026-10-07). 대표님 표본 40벌에서
+    # 「공용」으로 들어간 옷의 절반 넘게가 남성이었고, M부터 시작하는 옷은 전부 남성으로 골랐다.
+    # 어깨 52cm 이상은 70%뿐이라(여성 오버핏 24%) 쓰지 않는다. 매장이 유니섹스라고 하면 위에서 이미 공용이다.
+    if brand_default == "UNISEX" and options and size_starts_at_m(options):
+        return _why(why, "치수(M부터)", "MENSWEAR")
+    return _why(why, "브랜드 기본값", brand_default or "UNISEX")
+
+
+_SZ_SMALL = re.compile(r"(?i)(?:^|[\s|/(\[_\-])(?:x{1,3}s|2xs|s|small)(?=$|[\s|/)\]_\-])")
+_SZ_MID_UP = re.compile(r"(?i)(?:^|[\s|/(\[_\-])(?:m|l|x{1,3}l|\dxl|medium|large)(?=$|[\s|/)\]_\-])")
+
+
+def size_starts_at_m(options: list) -> bool:
+    """옵션에 M · L · XL 같은 알파벳 사이즈가 있고 S · XS 가 하나도 없나 — 「M | L | XL」·「BLACK_M | BLACK_L」."""
+    o = "|" + "|".join(str(x) for x in options) + "|"
+    return bool(_SZ_MID_UP.search(o)) and not _SZ_SMALL.search(o)
+
+
+# ─── HTTP — 호스트당 1초, 재시도 ───
+
+def ascii_url(u: str) -> str:
+    """한글이 든 주소를 %XX 로 — 요청 주소와 Referer 머리말 모두.
+
+    카페24 상품 주소에는 한글이 그대로 든다(kirsh 「/product/위티-버니-톰보이-스케치-티셔츠-아이보리/5687/」).
+    requests 는 요청 주소의 한글은 스스로 바꾸지만 **머리말은 latin-1 만** 받아 Referer 에 한글 주소를 넣으면
+    UnicodeEncodeError 로 요청이 아예 안 나간다 — 2026-10-27 판독에서 그림 서버가 Referer 를 볼 때 이 탓에 그림을
+    못 받았다. 이미 있는 %XX 와 구분자는 그대로 둔다(_fix_url 과 같은 규칙)."""
+    if not u or u.isascii():
+        return u
+    p = urlsplit(u)
+    try:
+        netloc = p.netloc.encode("idna").decode("ascii") if not p.netloc.isascii() else p.netloc
+    except UnicodeError:
+        netloc = p.netloc
+    return urlunsplit((p.scheme, netloc,
+                       quote(p.path, safe="/%:@!$&'()*+,;=-._~"),
+                       quote(p.query, safe="%=&/?@:!$'()*+,;+-._~"),
+                       quote(p.fragment, safe="%/?@:!$&'()*+,;=-._~")))
+
+
+class PoliteSession:
+    def __init__(self, delay: float):
+        self.delay = delay
+        self.s = requests.Session()
+        self.s.headers.update({"User-Agent": UA, "Accept-Language": "ko,en;q=0.8"})
+        self._last: dict[str, float] = {}
+        self._locks: dict[str, threading.Lock] = {}
+        self._glock = threading.Lock()
+        self.requests_made = 0
+
+    def _lock_for(self, host: str) -> threading.Lock:
+        with self._glock:
+            return self._locks.setdefault(host, threading.Lock())
+
+    def get(self, url: str, retries: int = 2, headers: dict | None = None,
+            stream: bool = False) -> requests.Response | None:
+        """headers 는 이번 한 번에만 얹는다 — 그림 머리말만 받을 때 Range 를 쓴다."""
+        url = ascii_url(url)
+        if headers:
+            headers = {k: (ascii_url(v) if k.lower() in ("referer", "origin") else v) for k, v in headers.items()}
+        host = urlparse(url).netloc
+        lock = self._lock_for(host)
+        for attempt in range(retries + 1):
+            with lock:
+                wait = self.delay + random.uniform(0, 0.3) - (time.monotonic() - self._last.get(host, 0))
+                if wait > 0:
+                    time.sleep(wait)
+                self._last[host] = time.monotonic()
+                self.requests_made += 1
+                try:
+                    r = self.s.get(url, timeout=TIMEOUT, allow_redirects=True, headers=headers, stream=stream)
+                except requests.RequestException as e:
+                    r = None
+                    err = e
+            if r is not None and r.status_code in (200, 206):
+                return r
+            if r is not None and r.status_code in (404, 410):
+                return r
+            if r is not None and stream:
+                r.close()
+            # 429·5xx·네트워크 오류 — 잠깐 물러난다
+            time.sleep(2.0 * (attempt + 1))
+        return r
+
+
+# ─── 매장 하나 ───
+
+@dataclass
+class Shop:
+    slug: str
+    base: str                     # https://host
+    brand_gender: str
+    names: tuple = ()             # 그 매장이 스스로를 부르는 이름들(한글·영문)
+    robots: RobotFileParser | None = None
+    categories: dict[int, str] = field(default_factory=dict)      # cate_no → 이름
+    membership: dict[int, set] = field(default_factory=dict)      # product_no → {cate_no}
+    product_urls: dict[int, str] = field(default_factory=dict)    # product_no → 상세 URL
+    enumerated_by: str = ""
+    errors: list[str] = field(default_factory=list)
+    list_paths: set = field(default_factory=lambda: {"/product/list.html"})
+    failures: list[dict] = field(default_factory=list)
+    content_cats: dict[int, str | None] = field(default_factory=dict)   # cate_no → 룩북 칸이면 그 이름
+    menu_gender: dict[int, str] = field(default_factory=dict)     # cate_no → 감싼 메뉴 덩이가 말한 성별
+    menu_clash: dict[int, set] = field(default_factory=dict)      # cate_no → 덩이마다 말이 엇갈린 성별들
+    page_gender: dict[int, str] = field(default_factory=dict)     # cate_no → 그 칸 목록 페이지가 스스로 말한 성별
+
+    def allowed(self, url: str) -> bool:
+        if not self.robots:
+            return True
+        try:
+            return self.robots.can_fetch(UA, url)
+        except Exception:
+            return True
+
+
+PRODUCT_NO_IN_URL = [
+    re.compile(r"product_no=(\d+)"),
+    re.compile(r"/product/[^/?#]+/(\d+)/?"),
+]
+
+
+def product_no_of(url: str) -> int | None:
+    for rx in PRODUCT_NO_IN_URL:
+        m = rx.search(url)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+CATE_NO_IN_URL = [re.compile(r"[?&]cate_no=(\d+)"), re.compile(r"/category/(\d+)(?:/|$)")]
+
+
+def cate_no_of(url: str) -> int | None:
+    for rx in CATE_NO_IN_URL:
+        m = rx.search(url)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def load_robots(http: PoliteSession, shop: Shop):
+    rp = RobotFileParser()
+    r = http.get(shop.base + "/robots.txt", retries=0)
+    if r is not None and r.status_code == 200 and r.text.strip():
+        rp.parse(r.text.splitlines())
+        shop.robots = rp
+
+
+def enumerate_by_number(http: PoliteSession, shop: Shop, limit: int = 800, miss_stop: int = 40) -> None:
+    """사이트맵도 목록도 안 되는 매장에서 상품 번호를 1부터 훑는다.
+
+    메뉴를 자바스크립트로 그리는 스킨이 있다. 그런 매장은 홈 HTML 에 상품 링크가 0개고,
+    sitemap.xml 과 /product/list.html 이 둘 다 404 라 지금까지 상품을 하나도 못 받았다
+    (두 매장이 통째로 빠져 있었다 — 2026-09-12 사람이 앱에서 없는 브랜드를 보고 짚어 줌).
+    cafe24 는 스킨과 무관하게 /product/detail.html?product_no=N 을 열어 주므로 그 길로 센다.
+
+    번호는 띄엄띄엄하다. 연달아 miss_stop 번 빈손이면 끝으로 보고 멈춘다. 다른 길로 이미
+    상품을 찾은 매장에서는 돌지 않는다 — 68개 매장은 지금까지처럼 사이트맵으로 간다.
+    """
+    if len(shop.product_urls) >= 5:
+        return
+    miss = 0
+    found = 0
+    for no in range(1, limit + 1):
+        url = f"{shop.base}/product/detail.html?product_no={no}"
+        if not shop.allowed(url):
+            continue
+        r = http.get(url, retries=1)
+        if r is None or r.status_code != 200 or "product_no" not in r.text:
+            miss += 1
+            if miss >= miss_stop:
+                break
+            continue
+        miss = 0
+        found += 1
+        shop.product_urls.setdefault(str(no), url)
+    if found:
+        shop.enumerated_by = "number-sweep"
+    print(f"[{shop.slug}] 번호로 훑기 — 찾은 상품 {found}", flush=True)
+
+
+def enumerate_by_sitemap(http: PoliteSession, shop: Shop) -> None:
+    """사이트맵(인덱스면 하위까지)에서 상품 URL 을 모은다."""
+    seen_maps: set[str] = set()
+    queue = [shop.base + "/sitemap.xml"]
+    while queue and len(seen_maps) < 30:
+        sm = queue.pop(0)
+        if sm in seen_maps:
+            continue
+        seen_maps.add(sm)
+        r = http.get(sm, retries=1)
+        if r is None or r.status_code != 200 or "<" not in r.text[:200]:
+            continue
+        # 사이트맵의 호스트가 official_url 과 다를 수 있다(badblood.co.kr → badbloodstores.com).
+        # URL 은 그대로 쓴다 — 그쪽이 매장이 스스로 말하는 정본 도메인이다.
+        if "<sitemapindex" in r.text[:500]:
+            queue += re.findall(r"<loc>\s*([^<\s]+)\s*</loc>", r.text)
+            continue
+        for loc in re.findall(r"<loc>\s*([^<\s]+)\s*</loc>", r.text):
+            loc = htmlmod.unescape(loc)
+            if "/product/" not in loc or "/product/list" in loc or "/category/" in loc.split("/product/")[-1][:0]:
+                pass
+            no = product_no_of(loc)
+            if no and "/product/" in loc and "list.html" not in loc and "search" not in loc:
+                shop.product_urls.setdefault(no, loc)
+    if shop.product_urls:
+        shop.enumerated_by = "sitemap"
+    # 사이트맵은 다 담지 않는다 — 9999archive 는 협업 상품 5개가 사이트맵에 없고 홈·카테고리에만
+    # 있었다(2026-09-02 실측, lastmod 가 8/24 라 그 뒤 올라온 것). 그래서 아래 카테고리 목록·홈
+    # 링크와 합집합을 만든다. 상품 하나가 두 경로에서 나와도 product_no 로 하나다.
+
+
+def harvest_product_links(html_text: str, shop: Shop) -> set[tuple[int, str]]:
+    """페이지 안의 상품 링크 전부 — (product_no, 절대 URL). 홈·목록 공용."""
+    found = set()
+    for href in re.findall(r'href="([^"]*)"', html_text):
+        if "/product/" in href and "list.html" not in href and (
+            "product_no=" in href or re.search(r"/product/[^/]+/\d+/", href)
+        ):
+            no = product_no_of(href)
+            if no:
+                clean = htmlmod.unescape(href).split("?")[0] if "product_no=" not in href else htmlmod.unescape(href)
+                found.add((no, urljoin(shop.base, clean)))
+    return found
+
+
+# 링크 글이 아니라 **감싼 덩이의 이름**이 성별을 말하는 매장이 있다. 메뉴가
+#   <ul class="WOMEN_menu"><li><a href="…cate_no=654">ALL</a>…
+# 꼴이라 링크 글에는 ALL·TOP·BOTTOM 밖에 없다. 덩이 이름은 「_」·「-」로 끊어 낱말이
+# 통째로 맞을 때만 받는다 — 안 그러면 class="element" 의 「men」 같은 것이 걸린다.
+MENU_GENDER_TOKEN = {
+    "women": "WOMEN", "womens": "WOMEN", "woman": "WOMEN", "womans": "WOMEN",
+    "ladies": "WOMEN", "girls": "WOMEN", "여성": "WOMEN", "우먼": "WOMEN",
+    "men": "MEN", "mens": "MEN", "man": "MEN", "mans": "MEN", "남성": "MEN",
+    "unisex": "UNISEX", "유니섹스": "UNISEX", "남녀공용": "UNISEX",
+    "genderless": "UNISEX", "젠더리스": "UNISEX", "agender": "UNISEX",
+}
+# 메뉴가 「펼침 머리글」인 매장이 있다. 성별은 여는 항목의 글에만 있고 그 항목의 주소는
+# 비어 있으며, 진짜 칸 링크는 그 아래 <ul> 에 들어 있다:
+#
+#     <li><a href="">WOMEN<div class="arrow">…</div></a>
+#         <ul><li><a href="…cate_no=384">ALL</a></li>
+#             <li><a href="…cate_no=385">OUTWEAR</a></li> … </ul></li>
+#
+# 링크 글도 아니고 덩이 class 도 아니라 앞의 두 길로는 못 읽는다. 머리글의 **제 글자만**
+# 본다(자식 <div>·<svg> 는 뺀다) — 그리고 그 글이 성별 낱말 하나뿐일 때만 받는다.
+# 「MEN 26FW」처럼 뒤에 말이 붙으면 그건 칸 이름이지 갈래 머리가 아니다.
+_MENU_HEAD = re.compile(
+    r"^\s*(?:women'?s?|woman|여성|우먼|ladies|"
+    r"men'?s?|man|남성|맨|"
+    r"unisex|유니섹스|공용|남녀공용|genderless|젠더리스)\s*$", re.I)
+
+
+def _head_gender(li) -> str | None:
+    a = li.find("a", recursive=False)
+    if a is None:
+        return None
+    own = "".join(x for x in a.strings if x.parent is a).strip()
+    if not own or not _MENU_HEAD.match(own):
+        return None
+    low = own.strip().lower()
+    # 「WOMEN'S」·「MEN'S」의 홑따옴표만 떼어 본다. 통째로 rstrip 하면 「ladies」가
+    # 「ladie」가 되어 표에서 사라진다.
+    return MENU_GENDER_TOKEN.get(low) or MENU_GENDER_TOKEN.get(re.sub(r"'s$", "", low))
+# 덩이 이름은 가까운 조상에서만 찾는다. <body class="women"> 같은 것이 매장 전체를
+# 여성으로 칠하는 것을 막는다.
+MENU_GENDER_UP = 6
+
+
+def _menu_gender(a) -> str | None:
+    up = 0
+    for el in a.parents:
+        if getattr(el, "name", None) in (None, "body", "html", "[document]"):
+            return None
+        up += 1
+        if up > MENU_GENDER_UP:
+            return None
+        vals: list[str] = []
+        cls = el.get("class")
+        if cls:
+            vals += cls if isinstance(cls, list) else [cls]
+        if el.get("id"):
+            vals.append(str(el.get("id")))
+        for v in vals:
+            for tok in re.split(r"[^0-9A-Za-z가-힣]+", str(v)):
+                g = MENU_GENDER_TOKEN.get(tok.lower())
+                if g:
+                    return g
+    return None
+
+
+# 같은 칸에 이름이 여럿 걸린다(ava-molli 의 cate 55 는 「ALL」·「WOMAN」·「View More」).
+# 성별을 말하는 쪽을 쓰되, **메뉴 이름일 때만** 쓴다. 기획전 제목에도 성별 낱말이 들어가는데
+# 그건 칸의 성별이 아니다 — 실측으로 둘이 걸렸다:
+#     crank      「🐰 MY LITTLE GIANT GIRLS 🐰」      (기획전 이름)
+#     years-ago  「26 Summer  'For Women'」           (시즌 캠페인)
+# 둘 다 길거나 숫자가 섞여 있다. 메뉴 이름은 짧고 숫자가 없다.
+def _is_menu_label(text: str) -> bool:
+    return len(text) <= 12 and not re.search(r"\d", text)
+
+
+# 홈 메뉴가 바뀌어도 판매 분류부터 찾는다. 원본 데이터의 주소는 별도로 고친다.
+CATEGORY_STARTS = {
+    "ahhorn": {66: "WOMAN", 67: "MAN", 68: "ACC"},
+    "thecolorcolour": {58: "ALL", 53: "Autumn-Winter 2026"},
+}
+
+
+def load_categories(http: PoliteSession, shop: Shop, soup: BeautifulSoup, html_text: str = "",
+                    _from_list: bool = False) -> None:
+    for no, name in CATEGORY_STARTS.get(shop.slug, {}).items():
+        shop.categories.setdefault(no, name)
+    votes: dict[int, set[str]] = {}
+    for a in soup.select('a[href*="cate_no="]'):
+        href = a.get("href", "")
+        m = re.search(r"cate_no=(\d+)", href)
+        if not m:
+            continue
+        no = int(m.group(1))
+        text = a.get_text(" ", strip=True)
+        # 긴 시즌 이름도 주소는 유효하다(STU 155). 이름 길이로 분류를 버리지 않는다.
+        is_list = bool(re.search(r"/product/(?:[^/?]+/)?list\w*\.html(?:\?|$)", href))
+        if text and (len(text) <= 40 or is_list) and not is_shop_name(shop, text):
+            had = shop.categories.get(no)
+            if had is None or (
+                says_gender(text) and _is_menu_label(text) and not says_gender(had)
+            ):
+                shop.categories[no] = text[:120]
+        g = _menu_gender(a)
+        if g:
+            votes.setdefault(no, set()).add(g)
+    # 펼침 머리글 아래에 달린 칸들
+    for li in soup.find_all("li"):
+        g = _head_gender(li)
+        if not g:
+            continue
+        sub = li.find("ul")
+        if sub is None:
+            continue
+        for x in sub.select('a[href*="cate_no="]'):
+            m = re.search(r"cate_no=(\d+)", x.get("href", ""))
+            if m:
+                votes.setdefault(int(m.group(1)), set()).add(g)
+    # 덩이 이름은 만장일치일 때만 받는다. 매장이 메뉴를 복사해 놓고 한쪽 class 를 안 고친
+    # 곳이 있어(goodlifeworks 의 모바일 메뉴가 여성 칸을 MEN_menu 로 감싼다) 엇갈리면
+    # 아무 말도 안 하는 편이 낫다 — 틀린 성별이 빈 성별보다 나쁘다.
+    # 여기서는 적어만 두고 이름은 안 바꾼다. 덩이 이름만으로는 못 믿기 때문이다 —
+    # apply_menu_gender 가 매장이 제 입으로 한 말로 검산한 뒤에야 붙인다.
+    for no, gs in votes.items():
+        if says_gender(shop.categories.get(no, "")):
+            continue
+        if len(gs) == 1:
+            shop.menu_gender[no] = next(iter(gs))
+        else:
+            # 엇갈린다고 곧바로 버리지 않는다. 매장이 메뉴를 복사해 놓고 한쪽 class 를 안
+            # 고친 곳이 있는데(goodlifeworks 의 모바일 메뉴가 여성 칸 여섯을 MEN_menu 로
+            # 감쌌다), 그 여섯 칸의 목록 페이지는 스스로 「WOMEN」이라 말한다. 매장이 제
+            # 입으로 한 말이 있는데 메뉴의 실수 때문에 버리면 손해다 — 적어 두고,
+            # apply_menu_gender 에서 페이지가 고르게 한다.
+            shop.menu_clash[no] = set(gs)
+    # 목록 페이지 이름이 list.html 이 아닌 매장이 있다 — pogservice 는 list2.html, matinkim 은
+    # /product/kimmatin/list.html 을 같이 쓴다. 홈 링크에서 본 경로를 전부 후보로 둔다.
+    for m in re.finditer(r'href="((?:https?://[^/"]+)?(/product/(?:[^/?"]+/)?list\w*\.html))\?[^"]*cate_no=', html_text):
+        shop.list_paths.add(m.group(2))
+    # 메뉴가 「/category/clothes/45」 꼴인 매장 — cate_no= 도 안 붙고 사이트맵도 없다.
+    # 그런 곳은 이게 유일한 실마리라서 못 주우면 그 브랜드가 통째로 빈다. 실제로 셋이
+    # 그랬다(2026-09-06): numbering 0벌 · opus-0012 0벌 · pog-service 0벌.
+    # 셋 다 지금도 열리는 cafe24 매장이고 홈에 「/category/acc/47」·「/category/bottoms/46」이
+    # 걸려 있는데 우리가 안 봤다. 이름은 주소의 토막을 그대로 쓴다.
+    for m in re.finditer(r'href="[^"]*?/category/([^/"?<>]{1,40})/(\d+)', html_text):
+        nm = unquote(m.group(1))
+        if not is_shop_name(shop, nm):
+            shop.categories.setdefault(int(m.group(2)), nm)
+    # 내비에 없는 카테고리가 상품 링크의 /category/N/ 에 숨어 있다(9999archive 의 협업 카테고리 1).
+    for m in re.finditer(r"/product/[^/\"]+/\d+/category/(\d+)/", html_text):
+        shop.categories.setdefault(int(m.group(1)), f"cate_{m.group(1)}")
+    # 홈에 걸린 상품 링크도 후보다
+    for no, href in harvest_product_links(html_text, shop):
+        shop.product_urls.setdefault(no, href)
+    # 메뉴를 자바스크립트로 그리는 매장은 홈 HTML 에 카테고리 링크가 하나도 없다 — numbering 이 그래서
+    # 0벌이었다(_skipped_non_cafe24 「메뉴가 자바스크립트」, 2026-09-06). 카페24 는 그 메뉴를
+    # /exec/front/Product/SubCategory 라는 공개 JSON 으로 받아 그린다(아스트라 D 가 찾아 줬다,
+    # 2026-09-23). 링크를 하나도 못 주웠을 때만 묻는다 — 멀쩡한 매장의 메뉴를 흔들지 않게.
+    if not shop.categories:
+        r = http.get(f"{shop.base}/exec/front/Product/SubCategory", retries=1)
+        if r is not None and r.status_code == 200 and "json" in (r.headers.get("content-type") or ""):
+            try:
+                cats = r.json()
+            except ValueError:
+                cats = []
+            for c in cats if isinstance(cats, list) else []:
+                no, nm = c.get("cate_no"), (c.get("name") or "").strip()
+                if isinstance(no, int) and nm and len(nm) <= 40 and not is_shop_name(shop, nm):
+                    shop.categories.setdefault(no, nm)
+    # 그 JSON 도 빈 매장이 있다 — freckle 은 홈 메뉴가 자바스크립트이고 SubCategory 가 null 이며, 상품 번호가
+    # 6천 번대라 번호 훑기(800까지)도 닿지 않아 0벌이었다(2026-09-27). 그런데 칸 없이 연 목록 페이지
+    # (/product/list.html)는 메뉴를 서버 HTML 로 그려 준다 — 칸 24·25·26·30·32·56·69 가 거기 있었다.
+    # 홈에서 아무것도 못 주웠을 때만, 한 번만 그 페이지를 홈 대신 읽는다.
+    if not shop.categories and not _from_list:
+        u = f"{shop.base}/product/list.html"
+        r = http.get(u, retries=1) if shop.allowed(u) else None
+        if r is not None and r.status_code == 200:
+            load_categories(http, shop, BeautifulSoup(r.text, "lxml"), r.text, _from_list=True)
+
+
+# 임직원·사내·관계자 전용 칸은 손님이 살 수 있는 상품이 아니다. 목록에서 아예 뺀다(사람 결정 2026-09-04).
+PRIVATE_CATE = re.compile(r"임직원|직원|사내|스태프|관계자|가족|비공개|staff|employee|internal|wholesale|b2b", re.I)
+
+
+def crawl_category_lists(http: PoliteSession, shop: Shop, max_pages: int = 80) -> None:
+    """목록을 훑어 product_no → 카테고리 소속을 얻는다. 사이트맵이 없었으면 상품 URL 도 여기서 채운다."""
+    starts = CATEGORY_STARTS.get(shop.slug, {})
+    pending = list(starts) + sorted(set(shop.categories) - set(starts))
+    visited: set[int] = set()
+    while pending:
+        cate_no = pending.pop(0)
+        if cate_no in visited:
+            continue
+        visited.add(cate_no)
+        name = shop.categories.get(cate_no, "")
+        if name and PRIVATE_CATE.search(str(name)):
+            shop.errors.append(f"임직원 전용으로 보여 건너뜀: {name} (cate_no={cate_no})")
+            continue
+        for list_path in sorted(shop.list_paths):
+            _crawl_one_list(http, shop, cate_no, list_path, max_pages)
+        pending += [c for c in shop.categories if c not in visited and c not in pending]
+    if shop.product_urls:
+        shop.enumerated_by = (shop.enumerated_by + "+lists") if shop.enumerated_by else "category-lists"
+
+
+def is_shop_name(shop: "Shop", text: str) -> bool:
+    """그 글이 매장 이름인가 — 빈칸·기호를 떼고 맞춰 본다."""
+    key = re.sub(r"[^0-9a-z가-힣]", "", (text or "").lower())
+    if not key:
+        return False
+    return any(key == re.sub(r"[^0-9a-z가-힣]", "", (n or "").lower())
+               for n in (shop.names or ()))
+
+
+def says_gender(name: str) -> bool:
+    """칸 이름이 성별을 말하나 — GENDER_RULES 와 같은 낱말을 쓴다."""
+    if cate_says_women_solo(name):
+        return True
+    low = unspace_cate(name or "").lower()
+    return any(re.search(rf"\b{k}\b", low) for _, keys in GENDER_RULES for k in keys)
+
+
+# 목록 페이지의 제목·「현재 위치」줄은 매장이 그 칸을 뭐라 부르는지 제 입으로 말한 것이다.
+#     goodlifeworks  cate 460  「GLW | MEN」
+#     brownbreath    cate 1014 「NEW ARRIVALS … 현재 위치 MEN NEW ARRIVALS」
+#     umarmung       cate 348  「WOMEN - UMARMUNG」
+# 반대로 아무 말도 안 하는 곳도 많다(horlisun 은 「Outerwears - 홀리선」뿐이다).
+_PATH_SEL = ("#contents .path", ".xans-product-headcategory", ".titleArea",
+             ".path", "h2.title", ".location", ".displayArea .title")
+_SAYS_W = re.compile(r"\b(?:women|woman|womens|ladies)\b|여성|우먼", re.I)
+_SAYS_M = re.compile(r"\b(?:men|man|mens)\b|남성", re.I)
+_SAYS_U = re.compile(r"\bunisex\b|\bgenderless\b|유니섹스|젠더리스|남녀공용", re.I)
+
+
+def page_says_gender(html_text: str) -> str | None:
+    """그 칸 목록 페이지가 스스로 성별을 말하나 — 둘 다 말하면 아무 말도 안 한 것으로 친다."""
+    try:
+        soup = BeautifulSoup(html_text, "html.parser")
+    except Exception:
+        return None
+    bits = []
+    if soup.title:
+        bits.append(soup.title.get_text(" ", strip=True))
+    for sel in _PATH_SEL:
+        for el in soup.select(sel)[:2]:
+            bits.append(el.get_text(" ", strip=True))
+    txt = " | ".join(b for b in bits if b)[:400]
+    # 셋을 **대칭으로** 본다 — 하나만 나올 때만 받는다. 유니섹스를 먼저 보게 했다가
+    # 틀렸다: 매장에 따라 메뉴 글자가 통째로 제목 자리에 찍혀서(markm 의
+    # 「마크엠 | SHOP ONLINE NEW IN UNISEX ALL … WOMEN ALL … DRESS」) UNISEX 가 늘 걸린다.
+    # 그건 그 칸 이야기가 아니라 머리 메뉴다. 둘 이상이면 아무 말도 안 한 것으로 친다.
+    hit = [g for g, rx in (("WOMEN", _SAYS_W), ("MEN", _SAYS_M), ("UNISEX", _SAYS_U))
+           if rx.search(txt)]
+    return hit[0] if len(hit) == 1 else None
+
+
+# 덩이 메뉴가 「이 칸은 남성」이라 말한 것을, 매장이 제 입으로 한 말로 검산한 뒤에만 이름에
+# 붙인다. 검산 없이 붙였다가 horlisun 에서 틀렸다 — 그 매장의 category-sub-men 안에는
+# 가게 전체(cate 87 「Shop」)가 들어 있어서, 남성 칸이라는 것들의 상품이 여성 칸 상품과
+# 53~100% 겹쳤다(실측). 아래 두 길 중 하나로 확인되면 받는다:
+#
+#   ㄱ. 그 칸의 목록 페이지가 스스로 같은 성별을 말한다        ← 매장이 직접 한 말
+#   ㄴ. 그 매장의 덩이 메뉴가 실제로 상품을 남녀로 가른다      ← 겹침이 작은 쪽의 절반 미만
+#
+# 매장 단위로 잰 겹침은 두 무리로 깨끗이 갈렸다(2026-09-19 실측, 창고 전수):
+#     가르는 곳  insilence 0% · rough-side 0% · belier 4% · anotheroffice 6% · dunst 8% ·
+#                brown-yard 22% · wooyoungmi 29%
+#     아닌 곳    brownbreath 90% · horlisun 99%
+# 자름값 50% 는 두 무리 사이 빈 자리에 둔다.
+MENU_GENDER_CROSS = 0.5
+
+
+def apply_menu_gender(shop: Shop) -> None:
+    if not shop.menu_gender:
+        return
+    side: dict[str, set] = {"MEN": set(), "WOMEN": set(), "UNISEX": set()}
+    for no, cats in shop.membership.items():
+        for c in cats:
+            g = shop.menu_gender.get(c)
+            if g:
+                side[g].add(no)
+    splits = False
+    if side["MEN"] and side["WOMEN"]:
+        cross = len(side["MEN"] & side["WOMEN"]) / min(len(side["MEN"]), len(side["WOMEN"]))
+        splits = cross < MENU_GENDER_CROSS
+        shop.errors.append(
+            f"메뉴 덩이 성별: 남 {len(side['MEN'])}벌 · 여 {len(side['WOMEN'])}벌 · "
+            f"겹침 {cross:.0%} → {'가른다' if splits else '안 가른다 — 덩이 이름은 안 쓴다'}")
+    kept = dropped = solved = 0
+    for no, g in shop.menu_gender.items():
+        said = shop.page_gender.get(no)
+        if said == g or (splits and said is None):
+            had = shop.categories.get(no, "")
+            if not says_gender(had):
+                shop.categories[no] = f"{g} {had}".strip()
+            kept += 1
+        else:
+            dropped += 1
+    # 말이 엇갈린 칸은 **페이지가 고른 것만** 받는다. 페이지가 말이 없으면 버린다.
+    for no, gs in shop.menu_clash.items():
+        said = shop.page_gender.get(no)
+        if said in gs:
+            had = shop.categories.get(no, "")
+            if not says_gender(had):
+                shop.categories[no] = f"{said} {had}".strip()
+            solved += 1
+        else:
+            dropped += 1
+    if solved:
+        shop.errors.append(f"메뉴 덩이 성별: 말이 엇갈린 {solved}칸을 그 칸 페이지가 갈랐다")
+    if dropped:
+        shop.errors.append(f"메뉴 덩이 성별: {kept + solved}칸 받고 {dropped}칸 버림(매장이 말이 없다)")
+
+
+def _crawl_one_list(http: PoliteSession, shop: Shop, cate_no: int, list_path: str, max_pages: int) -> None:
+        page = 1
+        seen_here: set[int] = set()
+        while page <= max_pages:
+            url = f"{shop.base}{list_path}?cate_no={cate_no}&page={page}"
+            if not shop.allowed(url):
+                shop.errors.append(f"robots disallow cate_no={cate_no}")
+                break
+            r = http.get(url, retries=1)
+            if r is None or r.status_code != 200:
+                break
+            # <title> 이 카테고리 이름을 더 정확히 말해 준다("Outerwears - MATINKIM")
+            if page == 1:
+                said = page_says_gender(r.text)
+                if said:
+                    shop.page_gender[cate_no] = said
+                m = re.search(r"<title>\s*([^<]+?)\s*(?:-|\||·)\s*[^<]*</title>", r.text)
+                if m and 1 < len(m.group(1)) <= 40:
+                    nm = m.group(1).strip()
+                    # 제목은 앞 토막만 떼어 온다. 「SHOP - MEN - 미세키서울」이면 MEN 을 버리고
+                    # SHOP 을 적는다 — 그 매장의 남성 칸 211벌·여성 칸 737벌이 둘 다 「SHOP」이
+                    # 되어 성별을 통째로 잃었다(2026-09-18 실측). 제목 떼는 규칙을 손대면 다른
+                    # 매장 칸 이름이 줄줄이 바뀌어서, 여기서는 잃는 것만 막는다: 이미 성별을
+                    # 말하는 이름(메뉴 주소의 /category/men/79/ 에서 온 「men」)이 있으면
+                    # 성별을 말하지 않는 이름으로 덮지 않는다.
+                    had = shop.categories.get(cate_no, "")
+                    # **매장 이름은 칸 이름이 아니다.** 목록 페이지 제목이 늘 매장 이름인
+                    # 곳이 있어(till-i-die 의 제목이 「틸아이다이」다) 칸이란 칸이 죄다 그
+                    # 이름으로 덮였다 — 다시 훑어도 성별 칸을 못 찾는다. 실측: till-i-die
+                    # 2,810벌의 칸 이름이 한 가지(「틸아이다이」)뿐이고, juntae-kim 은
+                    # 「JUNTAE KIM」, atelier-de-lumen 은 「Atelier de LUMEN」이다.
+                    if not is_shop_name(shop, nm) and not (says_gender(had) and not says_gender(nm)):
+                        shop.categories[cate_no] = nm
+            links = harvest_product_links(r.text, shop)
+            # 목록 페이지에 하위 카테고리 링크가 더 있으면 그것도 훑는다
+            for m in re.finditer(r'href="[^"]*cate_no=(\d+)[^"]*"[^>]*>\s*([^<]{1,40}?)\s*<', r.text):
+                nm2 = m.group(2).strip()
+                if not is_shop_name(shop, nm2):
+                    shop.categories.setdefault(int(m.group(1)), nm2)
+            # 「/category/women/112/」 꼴도 여기서 줍는다. 여태 홈에서만 주웠는데, 그 링크를
+            # **홈에 안 걸고 안쪽 목록에만** 둔 매장이 있다 — bmuette 의 women 112·men 113 이
+            # SHOP 칸(111) 안에만 있어서 성별 칸을 통째로 못 봤다(판매중 308벌).
+            for m in re.finditer(r'href="[^"]*?/category/([^/"?<>]{1,40})/(\d+)', r.text):
+                nm3 = unquote(m.group(1))
+                if not is_shop_name(shop, nm3):
+                    shop.categories.setdefault(int(m.group(2)), nm3)
+            new = {no for no, _ in links} - seen_here
+            if not new:
+                break
+            for no, href in links:
+                shop.membership.setdefault(no, set()).add(cate_no)
+                # 합집합이되 목록 URL 이 이긴다 — 목록은 지금 살아 있는 페이지에서 왔고, 사이트맵은
+                # 옛 주소를 들고 있을 수 있다(lmood: http:// 주소 86개가 전부 404, 2026-09-02).
+                shop.product_urls[no] = href
+            seen_here |= new
+            page += 1
+
+
+# ─── 상세 파싱 ───
+
+def _js_num(html_text: str, var: str) -> str | None:
+    """「var product_sale_price = 117000;」처럼 따옴표 없이 적힌 수 — _js_str 는 따옴표 값만 읽는다."""
+    m = re.search(rf"var\s+{var}\s*=\s*'?([\d.,]+)'?\s*;", html_text)
+    return m.group(1) if m else None
+
+
+def _js_str(html_text: str, var: str) -> str | None:
+    m = re.search(rf"var\s+{var}\s*=\s*'((?:[^'\\]|\\.)*)'", html_text)
+    if not m:
+        m = re.search(rf'var\s+{var}\s*=\s*"((?:[^"\\]|\\.)*)"', html_text)
+    if not m:
+        return None
+    raw = m.group(1)
+    try:
+        return json.loads(f'"{raw}"')  # \uXXXX·\' 해석
+    except Exception:
+        return raw.replace("\\'", "'")
+
+
+def _fix_url(u: str, base: str) -> str:
+    if not u:
+        return u
+    if u.startswith("//"):
+        u = "https:" + u
+    elif u.startswith("/"):
+        u = urljoin(base, u)
+    # 구분자와 기존 %XX 는 그대로 둔다. unquote 후 quote 하면 %2F·%26 의 뜻이 바뀐다.
+    parts = urlsplit(u)
+    return urlunsplit((parts.scheme, parts.netloc,
+                       quote(parts.path, safe="/%:@!$&'()*+,;=-._~"),
+                       quote(parts.query, safe="%=&/?@:!$'()*+,;+-._~"),
+                       quote(parts.fragment, safe="%/?@:!$&'()*+,;=-._~")))
+
+
+def _color_swatch(img) -> bool:
+    for el in (img, *img.parents):
+        if not getattr(el, "get", None):
+            continue
+        classes = el.get("class") or []
+        if any(re.search(r"(?:color[-_](?:img|chip)|swatch)", c, re.I) for c in classes):
+            return True
+        # 러프사이드의 현재 색 견본은 갤러리에도 같은 주소로 중복된다.
+        if "current-item" in classes and el.parent and el.parent.select_one(".current-item-label"):
+            return True
+    return any(str(img.get(k) or "").isdigit() and 0 < int(img[k]) <= 100
+               for k in ("width", "height"))
+
+
+def _og_too_small(soup, image: str, base: str, http=None) -> bool:
+    """HTML(og:image:width/height)·URL 의 크기 표시로만 판정한다. 모르면 작지 않은 것으로 둔다."""
+    dims = {}
+    current = ""
+    for meta in soup.select('meta[property^="og:image"]'):
+        prop, value = meta.get("property"), meta.get("content", "")
+        if prop == "og:image":
+            current = _fix_url(value, base)
+        elif current == image and prop in ("og:image:width", "og:image:height") and value.isdigit():
+            dims[prop.rsplit(":", 1)[1]] = int(value)
+    parts = urlsplit(image)
+    for key, vals in parse_qs(parts.query).items():
+        if key.lower() in ("w", "width", "h", "height") and vals[0].isdigit():
+            dims["width" if key.lower() in ("w", "width") else "height"] = int(vals[0])
+    match = re.search(r"(?:/|_)(\d{1,4})x(\d{1,4})(?=[/_.])", parts.path, re.I)
+    if match:
+        dims.update(width=int(match[1]), height=int(match[2]))
+    if any(v < 300 for v in dims.values()):
+        return True
+    if len(dims) == 2:
+        return False
+
+    # 크기를 모르면 버리지 않는다 — 상품마다 그림을 한 번 더 받으면 주간 수집이 수십 시간 늘어난다(카페24 OG 는
+    # 대개 크기 표시가 없다). 견본 그림은 위의 color-img 판정이 이미 거른다(heritagefloss 40벌, 추가 요청 0).
+    return False
+
+
+# 영문 하의 라벨 「LEGOPENING」·「OUT SEAM」·「BOTTOM HEM」은 여기 없어서 표에서 그 줄이 통째로 빠졌다 —
+# 밑단·총장이 없는 바지 표가 6개 매장 538벌(2026-09-11, 사람이 앱 화면에서 발견). 정식 라벨로의 대응은
+# data/size_labels.json 이 맡는다(leg opening→밑단, out seam→총장).
+# 「소매기장」은 「소매」에 걸리고 뒤에 숫자가 없어 버려진 다음 「기장 62.5」로 다시 읽혔다 — 기장은 총장으로
+# 맞춰지므로 소매 길이가 총장 자리에 앉았다(전수 4,700여 벌 · 제너럴아이디어 무드인사이드 포에토 …,
+# 코덱스 검증 008 이 제너럴아이디어에서 짚었다 2026-09-28).
+# 긴 이름부터 읽고 원래 이름의 둘레·단면을 보존한다. 단위 판단은 정규화 단계에서 한다.
+SIZE_LABELS = (r"(shoulder\s*\+\s*sleeve|옆목\s*~\s*소매단|래글런|레글런|"
+               r"소매\s*(?:끝\s*단면|끝|밑단|부리|단면|단|통\s*(?:둘레|단면)?|너비|넓이|폭|장)|"
+               r"(?:앞|뒤|뒷)\s*밑위|밑위\s*길이|어개|"
+               r"총\s*장|총\s*길이|총\s*기장|(?<![매팔])(?<!매\s)(?<!팔\s)기장|어깨\s*너비|어깨\s*단면|어깨|가슴\s*단면|상동\s*단면|가슴\s*둘레|가슴|소매\s*길이|소매\s*기장|소매|화장|암홀\s*단면|암홀|허리\s*단면|허리\s*둘레|허리|밑위|팔\s*기장|팔\s*통|"
+               r"앙덩이|밑딘|허벅지\s*단면|허벅지|소매\s*밑단|밑단\s*(?:단면|너비|둘레)|밑단|엉덩이\s*단면|엉덩이\s*둘레|엉덩이|힙\s*둘레|힙|sleeve\s*length|total\s*length|shoulder\s*width|chest\s*width|"
+               r"leg\s*opening|out\s*seam|bottom\s*hem|bottom\s*width|hem\s*width|"
+               r"front\s*rise|back\s*rise|arm\s*holes?|cuff\s*width|cuff|sleeve\s*opening|sleeve\s*width|팔\s*길이|"
+               r"length|shoulder|chest|bust|sleeve|waist|hip|thigh|hem|rise|inseam)")   # bust — kindersalmon 「Bust : 52 cm」(2026-10-08)
+# 「Length - 61cm Shoulder - 55cm」(anotheryouth)처럼 붙임표로 잇는 표기도 읽는다
+SIZE_RX = re.compile(SIZE_LABELS + r"\s*(?:\([^)]{0,20}\))?\s*[:：\-–—]?\s*((?:\d{1,4}(?:\.\d{1,2})?\s*(?:cm|mm)?\s*[/,|]?\s*){1,8})", re.I)
+
+
+def strip_html_comments(text: str) -> str:
+    return re.sub(r"<!--.*?-->", " ", text or "", flags=re.S)   # 닫힌 주석만 — 안 닫힌 「<!--」가 문서 끝까지 먹지 않게
+
+
+def decimal_commas(text: str) -> str:
+    # 붙은 쉼표 뒤 한 자리만 소수로 — 「53, 55」 같은 값 목록은 그대로 둔다.
+    return re.sub(r"(?<![\d.,])(\d{1,3}),(\d)(?![\d.,])", r"\1.\2", text)
+
+
+def strip_model_measurements(text: str) -> str:
+    # 모델 머리 뒤의 몸 치수만 지운다. 이어지는 상품 실측 머리에서 멈춘다.
+    stop = re.compile(r"size\s*(?:guide|chart|&\s*fit)|measurements?|사이즈\s*가이드|실측|총장|어깨|shoulder|length|fabric|care", re.I)
+    body = re.compile(r"\b(?:bust|chest|waist|hips?)\s*[:：]?\s*\d{1,3}(?:\.\d+)?\s*(?:cm|inch|[\"″])?", re.I)
+    for m in reversed(list(re.finditer(r"\bmodel\b|모델", text, re.I))):
+        end = min(len(text), m.end() + 240)
+        cut = stop.search(text, m.end(), end)
+        end = cut.start() if cut else end
+        segment = text[m.end():end]
+        if re.search(r"(?:height|키|신장)\s*[:：]?\s*1[5-9]\d", segment, re.I):
+            text = text[:m.end()] + body.sub(" ", segment) + text[end:]
+    return text
+
+
+def parse_json_ld_product(html_text: str) -> dict:
+    """<script type="application/ld+json"> 의 Product. cafe24 가 매장마다 넣어 준다(실측 11곳 중 10곳 —
+    dnsr 만 없음). 이름·설명·가격·재고(availability)가 스킨과 무관하게 깨끗하게 들어 있어서,
+    HTML 을 뒤지는 것보다 먼저 본다. lmood 의 「상품 설명」 아코디언은 HTML 에 없고 여기에만 있었다."""
+    for raw in re.findall(r'<script type="application/ld\+json">(.*?)</script>', html_text, re.S):
+        try:
+            j = json.loads(raw)
+        except Exception:
+            continue
+        items = j if isinstance(j, list) else [j]
+        for it in items:
+            if isinstance(it, dict) and it.get("@type") == "Product":
+                return it
+    return {}
+
+
+def json_ld_availability(html_text: str) -> str | None:
+    """첫 상품의 모든 옵션을 본다. 일부 품절·누락을 전체 품절로 읽지 않는다."""
+    def state(node):
+        if not isinstance(node, dict):
+            return None
+        if node.get("@type") == "ProductGroup" and node.get("hasVariant"):
+            variants = node["hasVariant"]
+            if not isinstance(variants, list):
+                return None
+            states = [state(v) for v in variants]
+        else:
+            offers = node.get("offers") or []
+            offers = offers if isinstance(offers, list) else [offers]
+            states = []
+            for offer in offers:
+                value = str(offer.get("availability") or "").rstrip("/").rsplit("/", 1)[-1] if isinstance(offer, dict) else ""
+                states.append("OutOfStock" if value in ("OutOfStock", "SoldOut") else
+                              "InStock" if value in ("InStock", "PreOrder", "PreSale", "LimitedAvailability") else None)
+        if "InStock" in states:
+            return "InStock"
+        return "OutOfStock" if states and all(s == "OutOfStock" for s in states) else None
+
+    for raw in re.findall(r'''<script\b[^>]*\btype\s*=\s*['"]application/ld\+json['"][^>]*>(.*?)</script>''', html_text, re.S | re.I):
+        try:
+            data = json.loads(raw)
+        except (ValueError, TypeError):
+            continue
+        nodes = data if isinstance(data, list) else [data]
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            candidates = node.get("@graph") if isinstance(node.get("@graph"), list) else [node]
+            for product in candidates:
+                if isinstance(product, dict) and product.get("@type") in ("Product", "ProductGroup"):
+                    return state(product)
+    return None
+
+
+def json_ld_group_description(html_text: str) -> str:
+    """<script type="application/ld+json"> 이 Product 가 아니라 ProductGroup(옵션 묶음)인 매장의 설명글.
+    설명은 묶음에 없고 hasVariant 의 각 Product 에 똑같이 들어 있다. parse_json_ld_product 는 Product 만 찾아
+    이 글을 통째로 놓쳤다 — studiojkoo 「Chief Material: Cotton81% Tencel14% Span5%」, waviness 「OUTSHELL Cotton 100%」,
+    saintpain 4322 「면 100% 제조국 : 방글라데시」(2026-10-01, 받아 본 페이지로 확인). 가격 · 재고는 그대로 HTML 에서 읽게
+    두고(옵션마다 다를 수 있다) 설명만 가져온다."""
+    for raw in re.findall(r'<script type="application/ld\+json">(.*?)</script>', html_text, re.S):
+        try:
+            j = json.loads(raw)
+        except Exception:
+            continue
+        for it in (j if isinstance(j, list) else [j]):
+            if not isinstance(it, dict) or it.get("@type") != "ProductGroup":
+                continue
+            if (it.get("description") or "").strip():
+                return it["description"]
+            for v in it.get("hasVariant") or []:
+                if isinstance(v, dict) and (v.get("description") or "").strip():
+                    return v["description"]
+    return ""
+
+
+# 「사이즈마다 라벨을 다시 적는」 표 — 한 줄에 라벨과 값이 번갈아 나오고 그 줄이 사이즈 수만큼 되풀이된다.
+#   [1] Length 64 / Shoulder 34 / Chest 40  [2] Length 66 / Shoulder 37 / Chest 43   (divein)
+#   SIZE M 어깨 52 가슴 63 총장 64  L 어깨 54 가슴 65 총장 65                          (nick-nicole)
+# SIZE_RX 는 라벨마다 첫 값만 담아 왔다 — 세 사이즈짜리 옷이 한 칸이 되어 앱에 「프리사이즈」로 떴다
+# (사람이 앱 화면에서 발견, 2026-09-11. 판매중 옷 4,065벌).
+_BLOCK_NAME = re.compile(r"(\[\s*[A-Za-z0-9]{1,4}\s*\]|[0-9]{1,3}\s*사이즈|"
+                         r"\b(?:XXS|XS|S|M|L|XL|XXL|XXXL|2XL|3XL|FREE|ONE)\b|\b[0-9]{1,3}\b)"
+                         r"[^가-힣A-Za-z0-9]{0,4}$", re.I)
+
+
+def repeated_block_table(seq: list[tuple[str, list[float], int]], t: str) -> dict[str, list[float]]:
+    """되풀이되는 라벨 묶음을 칸으로 편다. 아니면 빈 dict — 그러면 예전대로 첫 값만 쓴다."""
+    if len(seq) < 4:
+        return {}
+    cnt = Counter(l for l, _, _ in seq)
+    k = max(cnt.values())
+    # 같은 표를 페이지에 여러 번 찍는 매장이 있다(nomanual 은 세 번). 사이즈 넷짜리 표가
+    # 세 번이면 k=12 라 8 에서 잘려 표가 통째로 버려졌다 — 살아 있는 페이지에서 확인했다.
+    # 접는 일은 collapse_repeated_columns 가 하니, 여기서는 접을 여지까지 받아 준다.
+    if not 2 <= k <= 24:
+        return {}
+    multi = [l for l, c in cnt.items() if c == k]
+    if len(multi) < 2:
+        return {}
+    # 되풀이되는 라벨은 저마다 값이 하나여야 한다 — 값이 여럿이면 그건 이미 칸이 펴진 표다.
+    if any(len(nums) != 1 for l, nums, _ in seq if l in multi):
+        return {}
+    cols = {l: [nums[0] for ll, nums, _ in seq if ll == l] for l in multi}
+    # 같은 표가 두 번 찍힌 것뿐이면(값이 죄다 같다) 칸을 늘리지 않는다.
+    if all(len(set(v)) == 1 for v in cols.values()):
+        return {}
+    # 묶음마다 앞에 붙은 사이즈 이름을 주워 본다 — k 개가 다 다를 때만 쓴다.
+    starts = [pos for l, _, pos in seq if l == multi[0]]
+    names = []
+    for i, pos in enumerate(starts):
+        head = t[(starts[i - 1] if i else max(0, pos - 40)):pos]
+        m = _BLOCK_NAME.search(head)
+        nm = re.sub(r"[\[\]\s]", "", m.group(1)) if m else ""
+        names.append(re.sub(r"사이즈$", "", nm)[:12])
+    if len(names) == k and all(names) and len(set(names)) == k:
+        cols["_names"] = names
+    return cols
+
+
+_JUNK_NAMES = {"INFO", "SIZE", "SIZEINFO", "CM", "INCH", "사이즈", "단위"}
+
+
+def collapse_repeated_columns(tbl: dict) -> dict:
+    """같은 표가 페이지에 두 번 찍혀 칸이 배로 늘어난 것을 접는다.
+
+    한글 표와 영문 표를 나란히 싣는 매장이 있다. 되풀이 묶음 파서가 그걸 8칸으로 읽어
+    「총장 [56.5, 57.5, 56.5, 57.5]」 같은 표가 나왔고, 옵션이 둘뿐이라 사이저가 그 표를
+    통째로 버렸다 — 한 매장 668벌이 사이즈를 잃었다(2026-09-12). 모든 라벨에서 앞 절반과
+    뒤 절반이 똑같을 때만 접는다. 한 라벨이라도 다르면 진짜 여러 사이즈다.
+    """
+    allk = [k for k in tbl if not k.startswith("_")]
+    if not allk:
+        return tbl
+    n = max(len(tbl[k]) for k in allk)
+    # 칸 수가 가장 많은 라벨만 본다 — 모델 치수(「waist 23.6」)처럼 한 칸짜리가 섞여 있어도
+    # 표 자체는 접을 수 있어야 한다(2026-09-12: 그 탓에 두 벌이 안 접혀 사이즈를 잃었다).
+    labs = [k for k in allk if len(tbl[k]) == n]
+    if n < 2 or len(labs) < 2:
+        return tbl
+    nm = tbl.get("_names")
+    nm = nm if isinstance(nm, list) and len(nm) == n else None
+    # 표 머리말(「SIZE INFO」)이나 첫 값(「31」)이 이름 줄로 잡힌 표 — 이름이 달라 접히지 않아 값이 두 번씩 섰다
+    # (arend 93벌 「_names ['31', 'INFO']」, 코덱스 014). 사이즈 이름이 아닌 낱말이 섞였으면 이름을 믿지 않는다.
+    junk = nm is not None and any(str(x).strip().upper() in _JUNK_NAMES for x in nm)
+    if junk:
+        nm = None
+    for p in range(1, n):
+        if n % p:
+            continue                     # 되풀이 마디는 칸 수를 나누어떨어뜨려야 한다
+        if any(v[i] != v[i % p] for l in labs for i, v in ((i, tbl[l]) for i in range(n))):
+            continue
+        if nm and any(nm[i] != nm[i % p] for i in range(n)):
+            continue                     # 이름이 다르면 진짜 다른 사이즈다(S M L XL)
+        for l in labs:
+            tbl[l] = tbl[l][:p]
+        if nm:
+            tbl["_names"] = nm[:p]
+        elif junk:
+            tbl.pop("_names", None)
+        return tbl
+    return tbl
+
+
+# 파이썬 str.splitlines() 는 U+0085(NEL)·U+2028·U+2029 도 줄바꿈으로 센다. json.dumps 는
+# ensure_ascii=False 면 그것들을 그대로 흘리므로, 그런 글자가 든 줄은 **읽는 쪽에서
+# 조각나고 통째로 버려진다** — 아무 소리 없이. 2026-09-15 에 wiggle-wiggle 에서 잡았다:
+# 매장이 준 그림 주소에 잘못 디코드된 한글 자모가 섞여 0x85 바이트가 U+0085 로 들어갔고,
+# 상품 한 벌이 조각 셋으로 흩어져 사라졌다. 쓸 때 escape 해 둔다 — 읽는 쪽 서른두 자리를
+# 전부 고치는 것보다 한 자리를 막는 쪽이 확실하다.
+_LINE_SEPS = str.maketrans({"\u0085": "\\u0085", "\u2028": "\\u2028", "\u2029": "\\u2029"})
+
+
+def jsonl_line(obj) -> str:
+    """JSONL 한 줄 — 줄바꿈으로 세어지는 글자를 escape 해서 낸다."""
+    return json.dumps(obj, ensure_ascii=False).translate(_LINE_SEPS)
+
+
+def extract_size_table(html_text: str) -> dict[str, list[float]]:
+    """사이즈 실측 — 총장·어깨·가슴… 뒤에 오는 숫자 묶음. 표(th/td)든 목록(ul/li)이든 스크립트 문자열
+    안이든(lmood) 태그를 벗기고 글자 흐름에서 잡는다. 사이즈 이름(44/46/48)은 안 잡고 값의 순서만 남긴다 —
+    옷장에서 실측을 쓸 때 정리한다. 매장마다 표가 달라 지금 컬럼화하지 않는다(2026-09-02 결정)."""
+    t = re.sub(r'<script type="application/ld\+json">.*?</script>', " ", strip_html_comments(html_text), flags=re.S)
+    # 스크립트 안의 자바스크립트 「x.length > 50」 — 스크립트는 일부러 남긴다(lmood 는 표를 스크립트 문자열에
+    # 둔다). 그런데 saintpain 스킨의 스크립트에 `original.length > 50` 이 있어 SIZE_RX 가 그것을 「length 50」
+    # 으로 읽었고, 499벌 전부에 가짜 표 {"length": [50.0]} 이 붙었다(뒤에서 length_is_placeholder 가 막고
+    # 있었지만 출처는 여기다, 2026-10-01). 식별자 바로 뒤의 「.length」에 비교·연산 기호가 이어지는 것만
+    # 지운다 — 사람이 쓴 「Sleeve.Length 60」처럼 뒤에 값이 바로 오는 글은 안 걸린다.
+    t = re.sub(r"(?<=[\w\])])\.length\b(?=\s*(?:[<>!=]=?|[-+*/%;,)\]&|?:]))", " ", t)
+    t = htmlmod.unescape(re.sub(r"<[^>]+>", " ", t))
+    # 폭 없는 글자(BOM·zero-width space)는 눈에 안 보이지만 \s 가 아니라 줄을 끊는다. 9999archive 본문에
+    # 「… / 32 \ufeff2: 67 / …」처럼 둘째 줄 앞에 BOM 이 끼어 세 사이즈짜리 표가 한 칸만 읽혔다
+    # (사람이 앱 화면에서 「프리사이즈」로 뜬 것을 보고 찾음, 2026-09-11).
+    t = re.sub(r"[\ufeff\u200b-\u200d\u2060\u00ad]", " ", t)
+    t = re.sub(r"[ \t\r\n]+", " ", t)
+    # le의 글꼴 태그로 갈라진 SMALL 머리만 붙인다.
+    t = re.sub(r"\bSMAL\s+L(?=\s*:\s*허리)", "SMALL", t)
+    t = strip_model_measurements(decimal_commas(t))
+    # 「총장(앞/뒤)74/76.5」 — 앞뒤 기장을 한 칸에 적는 매장(dunst · gonak · ava-molli). 그대로 두면
+    # 「/76.5」가 다음 값을 밀어 dunst 셔츠의 사이즈 이름이 「5어깨55」가 됐다. 우리 총장은 뒤 기장이다.
+    t = re.sub(r"(총장|총기장|기장)\s*[（(]\s*앞\s*/\s*뒤\s*[)）]\s*(\d{1,3}(?:\.\d)?)\s*/\s*(\d{1,3}(?:\.\d)?)",
+               r" \1 \3 ", t)
+    t = re.sub(r"(총장|총기장|기장)\s*[（(]\s*뒤\s*/\s*앞\s*[)）]\s*(\d{1,3}(?:\.\d)?)\s*/\s*(\d{1,3}(?:\.\d)?)",
+               r" \1 \2 ", t)
+    # 밀리미터로 적는 매장(mischief 「SIZE(mm) S 허리 345 기장 1020」)은 10 으로 나눈다.
+    mm = bool(re.search(r"(?:size|사이즈|단위)\s*[（(]?\s*mm\s*[)）]?", t, re.I))
+    lo, hi = (30, 2000) if mm else (3, 200)
+    rows: dict[str, list[float]] = {}
+    seq: list[tuple[str, list[float], int]] = []
+    for m in SIZE_RX.finditer(t):
+        label = re.sub(r"\s+", "", m.group(1)).lower()
+        nums = [float(x) for x in re.findall(r"\d{1,4}(?:\.\d{1,2})?" if mm else r"\d{1,3}(?:\.\d{1,2})?", m.group(2))]
+        nums = [n / 10 if mm else n for n in nums if lo <= n <= hi]
+        # 인치 표시가 붙은 값은 모델 치수다 — kindersalmon 「Model Height 177 cm / Bust 31 " - Waist 22.5 " - Hip 34.5 "」가
+        # 허리 22.5 · 엉덩이 34.5 실측으로 들어갔다(2026-10-08). 실측표는 cm 라 이 표시가 없다.
+        if re.match(r"\s*(?:[\"”″]|inch|in\b)", t[m.end():m.end() + 8], re.I) or re.search(r"[\"”″]\s*$", m.group(2)):
+            continue
+        # 「Bust」는 모델 몸 치수에도 쓴다(sinoon 「167 Bust 76 Waist 58」 · antome 「Bust 79」). 몸 가슴둘레는 75 넘고
+        # 옷 가슴 단면은 70 안쪽이라, 70 넘는 값이 있으면 이 라벨을 받지 않는다(2026-10-08 전수 대조 4,064벌).
+        # 36 아래(arend 「Bust 30.3 Waist 23.4」 — 인치 표시 없는 모델 치수)거나 표에 가슴 칸이 이미 있어도 받지 않는다.
+        if label == "bust" and (any(n > 70 or n < 36 for n in nums)
+                                or any(k in rows for k in ("가슴", "가슴단면", "chest", "chestwidth", "상동", "상동단면"))):
+            continue
+        # 「… 소매 60 3 SIZE(cm) 총장 66 …」 — 다음 묶음의 이름(3)이 앞 라벨의 값으로 딸려 온다.
+        # 그 한 칸 때문에 되풀이 묶음 파서가 「칸이 하나가 아니다」라며 표 접기를 포기해,
+        # 매장이 두세 사이즈를 파는데 앞 사이즈만 남았다(fabrega 122 · divein 16, 2026-09-12).
+        # 값이 둘 이상일 때만 뗀다 — 하나뿐인 값을 떼면 라벨이 통째로 사라진다.
+        if len(nums) >= 2 and re.match(r"\s*(?:size|사이즈)\b", t[m.end():m.end() + 10], re.I):
+            nums = nums[:-1]
+        if not nums:
+            continue
+        seq.append((label, nums, m.start()))
+        if label not in rows:
+            rows[label] = nums[:8]
+    rep = repeated_block_table(seq, t)
+    # 세트의 구성품 머리는 사이즈 행이 아니다 — 같은 라벨이어도 이어 붙이지 않는다.
+    pieces = re.findall(r"\b(cardigan|sleeveless|top|pants|skirt|bolero)\s*[-:]\s*(?=총장|총기장|length|어깨|가슴|허리)", t, re.I)
+    if rep and len({p.lower() for p in pieces}) < 2:
+        rows.update(collapse_repeated_columns(rep))
+    if len(rows) < 2:
+        mat = extract_size_matrix(t)
+        if len(mat) > len(rows):
+            rows = mat
+    # 붙여 쓴 표는 칸 수로 이긴다 — 글자 파서는 이 꼴에서 언제나 첫 줄만 읽어 한 칸을 준다.
+    # 다만 사이즈 이름이 있는 쪽을 먼저 본다(table_is_better 와 같은 잣대). 한 페이지에 표가
+    # 둘 실린 매장에서 되풀이 묶음 파서가 두 표를 한 줄로 이어 붙여 칸이 배로 늘어난 적이
+    # 있다 — 치마·바지 세트에서 총길이가 [36,38,40,100,101,102] 이 됐다. 칸 수만 보면 그게
+    # 이기지만 그건 표가 아니라 두 표가 붙은 것이다(foeto/1875, 살아 있는 페이지에서 확인).
+    run = extract_size_runon(t)
+    if run and len({p.lower() for p in pieces}) < 2:
+        have = max((len(v) for k, v in rows.items() if k != "_names"), default=0)
+        want = max((len(v) for k, v in run.items() if k != "_names"), default=0)
+        if bool(run.get("_names")) != bool(rows.get("_names")):
+            if run.get("_names") and want >= 2:
+                rows = run
+        elif want > have:
+            rows = run
+    return rows
+
+
+# 행렬 표 — 머리 줄에 라벨, 다음 줄부터 「사이즈 이름 + 숫자 N개」. rssc 의 ul.size_guide 가 이 모양이다
+# (「size(cm) Length Shoulder Chest Sleeve.L / 1size 61 50 59 59」, 2026-09-03 사람 발견). SIZE_RX 는 「라벨 뒤
+# 숫자」만 봐서 이 표를 통째로 놓쳤다(rssc 370건 0%). 머리는 「size(cm)」 같은 표식 뒤에서 첫 사이즈 행이
+# 나오기 전까지의 낱말 전부다 — 모르는 낱말(Crotch)이 섞여도 자리를 지켜야 숫자가 옆 칸으로 밀리지 않는다.
+# 「SIZE 2」처럼 이름이 뒤에 붙는 표기를 맨 앞에 둔다 — 안 그러면 SIZE 의 S 만 사이즈로 먹고 줄을 버린다
+# (far-from-what 「SIZE 2 42 115 30.5 19 / SIZE 3 …」에서 둘째 줄을 놓쳤다, 2026-09-04)
+_SIZE_TOKEN = r"(?:size\s*\d{1,3}|one\s*size|\d{1,3}\s*size|xxs|xs|s|m|l|xl|xxl|2xl|3xl|free|f|os|\d{1,3})"
+# 「▪ Size (Length / Chest / Shoulder / Arm) 2: 64 / 58.5 / 51 / 65.5」(9999archive 본문 글, 2026-09-03 사람 발견)도 여기서 잡는다
+# 「단위(=cm)」(perenn)·「단위 : cm」처럼 괄호 안에 = 나 : 가 끼는 표기도 표의 시작으로 본다.
+_HEADER_MARK = re.compile(r"(?:size\s*\(\s*cm\s*\)|사이즈\s*\(\s*cm\s*\)|size\s*guide\s*\(?\s*cm\s*\)?|\(\s*[=:]?\s*cm\s*\)|단위\s*[（(]?\s*[=:]?\s*cm\s*[)）]?|단위\s*[:：]\s*cm|\(\s*unit\s*[:：]?\s*cm\s*\)|unit\s*[:：]\s*cm|size\s*\(cm\)|사이즈\s*표|size\s*chart|size\s*guide|size\s*info|size\s*cm\b|size\s*(?=\()|사이즈\s*(?=\()|\bsize\b(?=\s+[A-Za-z가-힣(])|\b사이즈\b(?=\s+[A-Za-z가-힣(]))", re.I)
+# 두 낱말짜리 라벨 — 공백으로 쪼개면 칸 수가 어긋난다(depound 「SLEEVE LENGTH」, badblood 「어깨 너비」)
+_COMPOUND = [("sleeve", "length"), ("소매", "길이"), ("어깨", "너비"), ("가슴", "단면"), ("허리", "단면"), ("밑단", "단면"), ("허벅지", "단면"), ("total", "length"), ("shoulder", "width")]
+# 소수점 두 자리도 받는다 — 「31.75」 한 칸 때문에 그 아래 사이즈 줄을 통째로 버렸다(far-from-what, 2026-09-04)
+_NUM = r"\d{1,3}(?:\.\d{1,2})?"
+# 사이즈 이름 뒤에 올 수 있는 것: 「(여성용)」「size small」「|」「:」 — badblood·rough-side(2026-09-04)
+# 그리고 「1 size 29-30 81 102 …」처럼 라벨에 없는 인치 표기가 한 칸 끼기도 한다(rough-side). 이 칸을
+# 값으로 세면 그 줄이 통째로 버려지거나(size {}) 라벨이 한 칸씩 밀린다(기장 95·어깨 116cm).
+_ROW_LEAD = r"(?:\s*(?:size)?\s*(?:small|medium|large|x-?small|x-?large|free)?\s*(?:\([^)]{0,12}\))?\s*[:：\-|]?\s*(?:\d{1,2}\s*[-~]\s*\d{1,2}\s+)?)"
+_KNOWN = re.compile(r"^(?:" + SIZE_LABELS[1:-1] + r"|crotch|inseam|rise|arm|암홀|밑위|가슴둘레|허리둘레|밑단둘레|어깨너비|소매길이|가슴단면|상동|아웃심|outseam)", re.I)   # 상동 = 가슴 단면(lookast · grove 「상동 53.5」, 2026-10-08 판독)
+
+
+# 사이즈 이름과 표 사이의 꼴이 매장마다 다르다 — 실제로 본 것만 넷이다:
+#   XS_총장85화장82…            붙여 쓰기
+#   28 : 허리단면 38 / 밑위 28.5  콜론 + 슬래시
+#   28 - 총기장 105.5 허리 37.5   붙임표
+#   [1] 총장 64 / 가슴단면 40     대괄호 이름 + 공백
+# 값 뒤에 단위(cm)를, 라벨 뒤에 측정 기준을 괄호로 다는 곳도 있다
+# (「S - 총장 62cm 소매길이(래글런) 73cm」).
+_RUNON = re.compile(
+    r"(?<![0-9.A-Za-z가-힣])\[?\s*(\d{1,2}(?:\.\d)?\([A-Za-z]{1,3}\)|[0-9A-Za-z가-힣]{1,6})\s*\]?\s*[_:\-]?\s*"
+    r"((?:(?:" + SIZE_LABELS[1:-1] + r")\s*(?:[(（][^)）]{1,12}[)）])?\s*"
+    r"\d{1,3}(?:\.\d{1,2})?\s*(?:cm|CM|센티)?[\s/·,]*)+)")
+_RUNON_PAIR = re.compile(SIZE_LABELS + r"\s*(?:[(（][^)）]{1,12}[)）])?\s*(\d{1,3}(?:\.\d{1,2})?)")
+
+
+def extract_numbered_size_rows(text: str) -> dict:
+    """숫자+사이즈 머리로 행을 자른다. 라벨 없는 첫 수가 이름 끝으로 붙지 않게 한다."""
+    heads = list(re.finditer(r"(?<![\d.])(\d{1,2})\s*사(?:이|티)즈", text))
+    rows = {}
+    for i, m in enumerate(heads):
+        tail = text[m.end():heads[i + 1].start() if i + 1 < len(heads) else len(text)]
+        vals = {}
+        for pm in _RUNON_PAIR.finditer(tail):
+            key = re.sub(r"\s+", "", pm.group(1)).lower()
+            key = {"앙덩이": "엉덩이", "밑딘": "밑단"}.get(key, key)
+            v = float(pm.group(2))
+            if key in vals:
+                break
+            if 3 <= v <= 200:
+                vals[key] = v
+        if len(vals) >= 2:
+            rows.setdefault(m.group(1) + "사이즈", vals)
+    if len(rows) < 2:
+        return {}
+    labs = list(dict.fromkeys(k for vals in rows.values() for k in vals))
+    common = set.intersection(*(set(v) for v in rows.values()))
+    if len(common) < 2:
+        return {}
+    return {**{k: [v.get(k) for v in rows.values()] for k in labs}, "_names": list(rows)}
+
+
+def extract_size_runon(t: str) -> dict[str, list[float]]:
+    """사이즈 이름 뒤에 라벨과 값을 붙여 쓴 표 — 「XS_총장85화장82가슴56.5밑단63.7」.
+
+    라벨과 값 사이를 슬래시로 끊는 매장도 같은 꼴이다 —
+    「28 : 허리단면 38 / 밑위 28.5 / 허벅지단면 30 / 밑단단면 27 / 총장 45」.
+
+    표(<table>)도 아니고 그림도 아니다. 상세 화면의 접힌 칸(「DETAIL & SIZE」 토글) 안에
+    <ul> 로 들어 있고, 줄바꿈이 <br> 이라 태그를 벗기면 다섯 줄이 한 줄로 붙는다.
+    그래서 글자 파서가 맨 앞 XS 한 줄만 읽고 끝냈다 — 사이즈 다섯인 옷이 한 칸이 되어
+    앱에서 프리사이즈로 떴다(사람 지적 2026-09-13: 「표 아마 사진말고 토글 열면 나오는
+    방식도 많을거야」). 창고 글에 이 꼴이 든 판매중 옷이 2,323벌이다.
+
+    줄이 둘 이상이고 라벨이 둘 이상일 때만 받는다 — 한 줄짜리는 기존 파서가 이미 읽는다.
+    """
+    numbered = extract_numbered_size_rows(t)
+    if numbered:
+        return numbered
+    rows: list[tuple[str, dict[str, float]]] = []
+    for m in _RUNON.finditer(t):
+        vals: dict[str, float] = {}
+        for pm in _RUNON_PAIR.finditer(m.group(2)):
+            lab = re.sub(r"\s+", "", pm.group(1)).lower()
+            v = float(pm.group(2))
+            if 3 <= v <= 200 and lab not in vals:
+                vals[lab] = v
+        if len(vals) >= 2:
+            rows.append((m.group(1).strip(), vals))
+    # 같은 칸이 두 번 실린 페이지가 있다(모바일·데스크톱 두 벌). 이름이 되풀이되면 첫 벌만 쓴다 —
+    # 안 그러면 사이즈 다섯짜리가 열 칸이 되고, 이름이 겹쳐 _names 도 통째로 버려진다.
+    first: dict[str, dict[str, float]] = {}
+    order: list[str] = []
+    for nm, vals in rows:
+        if nm not in first:
+            first[nm] = vals
+            order.append(nm)
+    rows = [(nm, first[nm]) for nm in order]
+    if len(rows) < 2:
+        return {}
+    # 모든 줄에 다 있는 라벨만 쓴다 — 줄마다 칸 수가 다르면 값이 옆으로 밀린다
+    common = set(rows[0][1])
+    for _, v in rows[1:]:
+        common &= set(v)
+    if len(common) < 2:
+        return {}
+    out: dict[str, list[float]] = {lab: [v[lab] for _, v in rows] for lab in common}
+    names = [n for n, _ in rows]
+    if len(set(names)) == len(names):
+        out["_names"] = names
+    return out
+
+
+_LABEL_ENUM = re.compile(r"^\s*(?:\d{1,2}|[A-Ha-h]|[①-⑩])\s*[.)．]\s*(?=[가-힣A-Za-z])")
+
+
+def _table_number(cell: str) -> float | None:
+    # 칸 전체가 수일 때만 소수점 공백·중복을 고친다.
+    m = re.fullmatch(r"\s*(\d{1,3})(?:\s*([.,]|\.\.)\s*(\d{1,2}))?\s*(?:cm)?\s*", cell, re.I)
+    if not m:
+        return None
+    v = float(m.group(1) + ("." + m.group(3) if m.group(3) else ""))
+    return v if 3 <= v <= 200 else None
+
+
+def _table_range(cell: str) -> list[float] | None:
+    m = re.fullmatch(r"\s*(\d{1,3}(?:\.\d{1,2})?)\s*[-~–]\s*(\d{1,3}(?:\.\d{1,2})?)\s*(?:cm)?\s*", cell, re.I)
+    if m:
+        a, b = map(float, m.groups())
+        if 3 <= a < b <= 200:
+            return [a, b]
+    return None
+
+
+def _extract_size_table_node(soup) -> dict[str, list[float]]:
+    """진짜 <table> 이면 칸 단위로 읽는다. 글자열로 펴면 라벨에 없는 칸이 첫 라벨로 밀려 들어간다 —
+    rough-side 는 첫 칸이 「1 size 95」(95·100·105 는 한국 사이즈 번호)라 843벌이 통째로 한 칸씩
+    어긋나 있었다(어깨 116cm, 기장 95cm — 2026-09-04). 칸 자리는 어긋날 수가 없다:
+        ['Size cm', '기장', '가슴둘레', '어깨', '소매']
+        ['1 size 95', '68',  '116',   '49',  '28.5']
+    """
+    best: dict[str, list[float]] = {}
+    for tb in [soup]:
+        rows = []
+        for tr in tb.find_all("tr"):
+            cells = [re.sub(r"[\ufeff\u200b-\u200d\u2060\u00ad]", "", c.get_text(" ", strip=True))
+                     for c in tr.find_all(["th", "td"])]
+            if any(cells):
+                rows.append(cells)
+        if len(rows) < 2:
+            continue
+        for hi, head in enumerate(rows[:3]):
+            # 「1.허리 · 2.엉덩이 · 3.허벅지」처럼 그림 번호를 라벨 앞에 붙이는 매장이 있다(legacy 의
+            # edinfo 표). 번호가 앞에 있으면 _KNOWN 이 머리를 못 봐 표를 통째로 놓치고, 글자열
+            # 파서로 넘어가 번호를 값으로 읽었다(「엉덩이 3 · 허벅지 4」, 55벌 — 2026-09-26).
+            labels = [re.sub(r"[().\s]", "", _LABEL_ENUM.sub("", c)).lower() for c in head]
+            known = [i for i, l in enumerate(labels) if _KNOWN.match(l)]
+            if len(known) < 2:
+                continue
+            # 머리줄이 라벨과 **첫 사이즈의 값**을 한 칸에 같이 담은 표가 있다:
+            #     <td>Size(cm)<br>00</td><td>어깨<br>57</td><td>가슴<br>62</td>
+            #     <td>01</td>            <td>59.5</td>     <td>64</td>
+            # get_text 는 「어깨 57」로 주는데 라벨을 만들며 공백을 지워 「어깨57」이 된다.
+            # _KNOWN 이 앞머리만 보므로 라벨로는 통과하고, 57(첫 사이즈 실측)은 라벨에 먹힌다.
+            # 그래서 사이즈가 셋인 옷이 둘로 줄고 첫 칸 실측이 통째로 사라졌다 — 1,303벌
+            # (2026-09-13. 사람 지적: 「실제로 사이즈표가 있는데도 프리사이즈로 뜬다」).
+            # 라벨 칸이 **전부** 그 꼴일 때만 믿는다 — 라벨 끝에 숫자가 붙는 매장도 있어서다.
+            inline: list[float | None] = [None] * len(head)
+            split = 0
+            for i in known:
+                m = re.fullmatch(r"(.*?)\s+(\d{1,3}(?:\.\d{1,2})?)", (head[i] or "").strip())
+                if not m or not m.group(1).strip():
+                    continue
+                base = re.sub(r"[().\s]", "", m.group(1)).lower()
+                v = float(m.group(2))
+                if _KNOWN.match(base) and 3 <= v <= 200:
+                    labels[i], inline[i] = base, v
+                    split += 1
+            if split != len(known):
+                inline = [None] * len(head)
+
+            cols: dict[str, list[float]] = {}
+            ranges = {}
+            names: list[str] = []
+            # 라벨이 아닌 칸 가운데 첫 칸이 사이즈 이름이다(「S」·「1 size 95」·「M(110)」).
+            # 여태 버리고 있어서, 값이 여러 벌인 상품 9,419건이 「어느 게 M 인지」를 몰랐다.
+            # 비교 기능은 사이즈별 실측을 나란히 놓아야 해서 이 이름이 꼭 필요하다(2026-09-05).
+            name_col = next((i for i in range(len(head)) if i not in known), None)
+            if any(v is not None for v in inline):
+                for i in known:
+                    cols.setdefault(labels[i], []).append(inline[i])
+                # 이름 칸도 같은 꼴이다 — 「Size(cm) 00」의 뒷토막이 첫 사이즈 이름이다
+                parts = (head[name_col] or "").strip().split() if name_col is not None else []
+                names.append(parts[-1][:20] if len(parts) >= 2 else "")
+            for r in rows[hi + 1:hi + 10]:
+                # 값 줄 끝에 빈 칸이 하나 더 붙은 표가 있다(plac 「사이즈 · 총장 · … · 소매 단면」 6칸에
+                # 값 줄 7칸, 마지막은 <br> 뿐). 끝의 빈 칸은 잘라 보고 칸 수를 맞춘다(2026-09-26).
+                while len(r) > len(head) and not (r[-1] or "").strip():
+                    r = r[:-1]
+                if len(r) != len(head):
+                    continue
+                values = []
+                spans = []
+                for i in known:
+                    values.append(_table_number(r[i] or ""))
+                    spans.append(_table_range(r[i] or ""))
+                if not any(v is not None for v in values + spans):
+                    continue
+                if name_col is not None:
+                    nm = re.sub(r"\s+", " ", (r[name_col] or "").strip())[:20]
+                    names.append(nm)
+                for i, v, span in zip(known, values, spans):
+                    cols.setdefault(labels[i], []).append(v)
+                    ranges.setdefault(labels[i], [None] if any(x is not None for x in inline) else []).append(span)
+            cols = {k: v for k, v in cols.items() if any(x is not None for x in v)}
+            if len(cols) > len(best):
+                best = cols
+                # 값을 실제로 읽은 줄만큼만 이름을 남긴다
+                n = max((len(v) for v in cols.values()), default=0)
+                nm = names[:n]
+                if len(nm) == n and all(nm) and n >= 1:
+                    best["_names"] = nm
+                if any(any(v) for v in ranges.values()):
+                    best["_ranges"] = {k: v for k, v in ranges.items() if any(v)}
+            break
+        else:
+            # 전치 표 — 라벨이 첫 「열」에 있고 사이즈가 첫 행에 있다(diafvine, 2026-09-04 사람 지적):
+            #     　　　　 M(38)  L(40)  XL(42)
+            #     a 어깨   48.5   50     51.5
+            #     e 총장   65.5   67     68.5
+            # 라벨 앞의 그림 기호(a·b·c)는 떼고 읽는다.
+            cols = {}
+            ranges = {}
+            head0 = [re.sub(r"\s+", " ", (c or "").strip())[:20] for c in rows[0][1:]]
+            while head0 and not head0[-1]:
+                head0.pop()
+            for r in rows:
+                if len(r) < 2:
+                    continue
+                lab = re.sub(r"^[a-eA-E가-마][\.\)]?\s+", "", (r[0] or "").strip())
+                lab = re.sub(r"[().\s]", "", lab).lower()
+                if not _KNOWN.match(lab) or lab in cols:
+                    continue
+                # 이름 칸 밖의 빈 여백만 자른다. 이름이 있는 빈 실측 칸은 남긴다.
+                while len(r) > len(head0) + 1 and not r[-1].strip():
+                    r = r[:-1]
+                vals = [_table_number(cell or "") for cell in r[1:]]
+                if "inch" in lab:
+                    vals = [v for v in vals if v is not None]
+                spans = [_table_range(cell or "") for cell in r[1:]]
+                if any(spans):
+                    ranges[lab] = spans[:8]
+                if any(v is not None for v in vals):
+                    cols[lab] = vals[:8]
+            if cols and all(len(v) == len(head0) for v in list(cols.values()) + list(ranges.values())):
+                # 모든 실측이 빈 사이즈는 정방향 표와 같이 건너뛴다.
+                keep = [i for i in range(len(head0))
+                        if any(v[i] is not None for v in list(cols.values()) + list(ranges.values()))]
+                cols = {k: [v[i] for i in keep] for k, v in cols.items()}
+                ranges = {k: [v[i] for i in keep] for k, v in ranges.items()}
+                head0 = [head0[i] for i in keep]
+            if len(cols) >= 2 and len(cols) > len(best):
+                best = cols
+                n = max((len(v) for v in cols.values()), default=0)
+                # 첫 행(라벨 칸을 뺀 나머지)이 사이즈 이름이다 — 「M(38) L(40) XL(42)」
+                single_head = (n == 1 and re.fullmatch(
+                    r"(?:size|사이즈|단위)?\s*(?:\(?\s*cm\s*\)?)?", rows[0][0], re.I)
+                    and re.fullmatch(rf"{_SIZE_TOKEN}(?:\([^)]*\))?", head0[0] if head0 else "", re.I))
+                if len(head0) == n and all(head0) and (n >= 2 or single_head):
+                    best["_names"] = head0
+                if ranges:
+                    best["_ranges"] = ranges
+    return best
+
+
+def extract_size_from_tables(soup) -> dict[str, list[float]]:
+    """표를 따로 읽고, 같은 구역의 세트·성별·기장 표만 함께 담는다."""
+    candidates = []
+    for tb in soup.find_all("table"):
+        if tb.find("table"):
+            continue
+        cols = _extract_size_table_node(tb)
+        if len([k for k in cols if not k.startswith("_")]) < 2:
+            continue
+        cell = tb.find(["th", "td"])
+        heading = cell.get_text(" ", strip=True) if cell else ""
+        candidates.append((tb, heading, cols))
+    if not candidates:
+        return {}
+    best = {}
+    for _, _, cols in candidates:
+        if len([k for k in cols if not k.startswith("_")]) > len(best) - ("_ranges" in best):
+            best = cols
+    def scope(t):
+        p = t.parent
+        # 수아레는 성별마다 contents-size를 한 번씩 감싼다.
+        return p.parent if p.get("id") == "contents-size" else p
+
+    def merge_variants(group):
+        # 세트의 하의도 Size(팬츠-30L)·Size(슬랙스-32L)처럼 기장별로 갈린다.
+        variants = []
+        for h, c in group:
+            m = re.fullmatch(r"(?:Size\s*\((?:(?:팬츠|슬랙스)-)?(\d{2}L)\)|(Women|Men)\s+Size)", h, re.I)
+            if m and c.get("_names"):
+                variants.append((next(x for x in m.groups() if x), c))
+        if len(variants) >= 2 and len({v for v, _ in variants}) == len(variants):
+            keys = [k for k in variants[0][1] if k != "_names"]
+            if all(set(c) - {"_names"} == set(keys) for _, c in variants) and not any(k.startswith("_") for k in keys):
+                return {**{k: [x for _, c in variants for x in c[k]] for k in keys},
+                        "_names": [f"{v}-{n}" for v, c in variants for n in c["_names"]]}
+        return {}
+
+    for tb, _, _ in candidates:
+        group = [(h, c) for t, h, c in candidates if scope(t) is scope(tb)]
+        # 상의·하의 칸이 명확히 갈리고 같은 구역에 있을 때만 세트로 본다.
+        upper = [c for _, c in group if sum(bool(re.match(r"^(?:어깨|가슴|소매|shoulder|chest|sleeve)", k)) for k in c) >= 2
+                 and not any(re.match(r"^(?:허리|허벅지|밑위|waist|thigh|rise)", k) for k in c)]
+        lower = [(h, c) for h, c in group if sum(bool(re.match(r"^(?:허리|허벅지|밑위|엉덩이|힙|waist|thigh|rise|hip)", k))
+                                          for k in set(c) | set(c.get("_ranges", {}))) >= 2
+                 and not any(re.match(r"^(?:어깨|가슴|소매|shoulder|chest|sleeve)", k) for k in c)]
+        low = lower[0][1] if len(lower) == 1 else merge_variants(lower)
+        if len(upper) == 1 and low:
+            return {**upper[0], "_parts": [{"part": "하의", **low}]}
+        # 이름이 겹치는 성별·기장 표는 명시된 머리를 접두어로 쓴다.
+        merged = merge_variants(group)
+        if merged:
+            return merged
+    # 한 전치 표 안에서 총장만 Short·Original·Long으로 갈리는 꼴.
+    lengths = [(k, re.fullmatch(r"총장(short|original|long)", k)) for k in best]
+    lengths = [(k, m.group(1).capitalize()) for k, m in lengths if m]
+    names = best.get("_names") or []
+    if len(lengths) >= 2 and names and all(len(v) == len(names) for v in best.values()):
+        shared = {k: v for k, v in best.items() if k != "_names" and k not in dict(lengths)}
+        return {**{k: v * len(lengths) for k, v in shared.items()},
+                "총장": [x for k, _ in lengths for x in best[k]],
+                "_names": [f"{label}-{n}" for _, label in lengths for n in names]}
+    return best
+
+
+_SLOT = re.compile(r"/web/product/(extra/)?(big|medium|small|tiny)/")
+_SLOT_RANK = {"big": 3, "medium": 2, "small": 1, "tiny": 0}
+
+
+def _gallery_tail(gallery: list[str], start: int = 12, cap: int = 28) -> list[str]:
+    """갤러리 13장째부터(OCR 만 읽는 꼬리) — 같은 그림의 크기 칸 중복을 접고 28장까지.
+
+    상품 페이지는 썸네일 줄(extra/small)과 큰 그림 줄(extra/big)을 둘 다 싣는다. 예전엔 갤러리를 그대로
+    [12:40] 으로 잘랐는데, 알리스 769 는 작은 그림 21장 + 큰 그림 21장이라 마지막 그림 — 실측표
+    (extra/big/202602/cfd3747b….jpg) — 의 큰 칸이 41번째로 잘려 나갔다(2026-10-01). 꼬리 안에서 같은 그림이
+    다시 나오면 더 큰 칸으로 **그 자리를** 바꾸고, 앱 갤러리(앞 12장)에 이미 있는 그림은 더 큰 칸일 때만
+    꼬리에 둔다(판독기가 썸네일 대신 큰 그림을 읽게 — 예전과 같다).
+    """
+    def key(u: str) -> str:
+        return _SLOT.sub(lambda m: f"/web/product/{m.group(1) or ''}*/", u.split("?")[0])
+
+    def rank(u: str) -> int:
+        m = _SLOT.search(u)
+        return _SLOT_RANK[m.group(2)] if m else -1
+
+    head = {key(u): rank(u) for u in gallery[:start]}
+    tail: list[str] = []
+    at: dict[str, int] = {}
+    for u in gallery[start:]:
+        k = key(u)
+        if k in at:
+            if rank(u) > rank(tail[at[k]]):
+                tail[at[k]] = u
+            continue
+        if k in head and rank(u) <= head[k]:
+            continue
+        at[k] = len(tail)
+        tail.append(u)
+    return tail[:cap]
+
+
+_INLINE_TAGS = {"span", "font", "b", "strong", "i", "em", "u"}
+_SPLIT_TAIL = re.compile(r"\d$")
+_SPLIT_HEAD = re.compile(r"^\d{1,3}(?:\.\d{1,2})?\s*(?:cm|mm)\b", re.I)
+
+
+def _join_split_numbers(el) -> None:
+    """편집기가 숫자 하나를 글꼴 칸 둘로 쪼갠 것을 붙인다 — 「S l 1<span …>04cm / 34cm …」.
+
+    get_text(" ") 는 칸마다 띄어 「1 04cm」로 내고, badblood 「90s 빈티지 클럽 폴드오버 져지 보이쇼츠」(14511)의
+    총장 104 가 「1」과 「04」로 갈렸다(2026-10-01). 붙이는 것은 좁게 — 앞 글이 숫자로 **띄어쓰기 없이**
+    끝나고, 뒤 글이 「04cm」처럼 숫자+단위로 **띄어쓰기 없이** 시작하고, 사이에 글꼴 꼬리표(span·b …)만
+    있을 때. 칸마다 값을 따로 둔 「<span>65</span><span>70</span>」은 단위가 없어 안 붙는다.
+    """
+    from bs4 import NavigableString
+    for s in list(el.find_all(string=True)):
+        if not isinstance(s, NavigableString) or not _SPLIT_TAIL.search(str(s)):
+            continue
+        nxt, ok = s.next_element, True
+        while nxt is not None and not isinstance(nxt, NavigableString):
+            if getattr(nxt, "name", None) not in _INLINE_TAGS:
+                ok = False
+                break
+            nxt = nxt.next_element
+        # 닫는 꼬리표는 next_element 로 안 보이므로, 앞 글이 든 칸에서 빠져나갈 때 블록을 건너는지 따로 본다
+        if not ok or nxt is None or not _SPLIT_HEAD.match(str(nxt)):
+            continue
+        p = s.parent
+        while p is not None and p is not el and not (nxt in p.descendants):
+            if p.name not in _INLINE_TAGS:
+                ok = False
+                break
+            p = p.parent
+        if ok:
+            s.replace_with(str(s) + str(nxt))
+            nxt.replace_with("")
+
+
+_PLAIN_CELL = re.compile(r"\s*\d{1,3}(?:\.\d{1,2})?\s*(?:cm)?\s*")
+
+
+def size_tables_as_text(soup) -> str:
+    """실측 <table> 가운데 **값 칸이 숫자 하나가 아닌** 표를 줄 그대로 글로 돌려준다(「S | 65~67 | 56~58 …」).
+
+    extract_size_from_tables 는 칸마다 숫자 하나만 받는다. horlisun 와플 티(1332 · 1333)의 「Size Measurement」
+    표는 값이 전부 폭(「65~67」)이라 칸이 하나도 안 남아 size_table 이 비었고, 설명 글은 _clean_text 가 표를
+    지우므로 거기에도 없었다 — 표가 페이지에 멀쩡히 있는데 창고 어디에도 값이 안 남았다(2026-10-01).
+    폭을 어떻게 읽을지는 해석기(size_from_ocr)가 정할 일이라 여기서는 고르지 않고 글로만 남긴다.
+    숫자만 든 표는 지금처럼 size_table 로 가므로 여기서 다시 내지 않는다(다른 매장 글이 안 바뀌게).
+    """
+    out: list[str] = []
+    for tb in soup.find_all("table"):
+        rows = []
+        for tr in tb.find_all("tr"):
+            cells = [re.sub(r"\s+", " ", re.sub(r"[﻿​-‍⁠­]", "", c.get_text(" ", strip=True))).strip()
+                     for c in tr.find_all(["th", "td"])]
+            if any(cells):
+                rows.append(cells)
+        if len(rows) < 2:
+            continue
+        for hi, head in enumerate(rows[:3]):
+            labels = [re.sub(r"[().\s]", "", _LABEL_ENUM.sub("", c)).lower() for c in head]
+            known = [i for i, l in enumerate(labels) if _KNOWN.match(l)]
+            if len(known) < 2:
+                continue
+            body = [r for r in rows[hi + 1:hi + 10] if len(r) == len(head)]
+            odd = any(re.search(r"\d", r[i] or "") and not _PLAIN_CELL.fullmatch(r[i] or "")
+                      for r in body for i in known)
+            if body and odd:
+                out.extend(" | ".join(r) for r in [head] + body)
+            break
+    return "\n".join(out)
+
+
+def _head_labels(head: str) -> list[list[str]]:
+    """표 머리 낱말을 라벨 목록으로 — 두 낱말 라벨을 붙이지 않은 안, 붙인 안 차례로 돌려준다."""
+    out: list[list[str]] = []
+    for merge in (False, True):
+        if "/" in head:
+            words = [w.strip(" ()") for w in head.split("/") if w.strip(" ()")]       # 「총장 / 어깨 너비 / 소매 길이」
+        else:
+            words = [w for w in re.split(r"\s+", head) if w]
+            if merge:
+                merged, i = [], 0
+                while i < len(words):
+                    pair = (words[i].lower(), words[i + 1].lower()) if i + 1 < len(words) else None
+                    if pair in _COMPOUND:
+                        merged.append(words[i] + words[i + 1]); i += 2
+                    else:
+                        merged.append(words[i]); i += 1
+                words = merged
+        words = [w for w in words if w.lower() not in ("size", "사이즈", "cm", "size(cm)")]   # 머리의 「SIZE」 칸은 라벨이 아니다
+        labels = [re.sub(r"[().\s]", "", w).lower() for w in words]
+        labels = [re.sub(r"l(?:ength)?$", "", l) if l.startswith("sleeve") and l != "sleeve" else l for l in labels]
+        if labels and labels not in out:
+            out.append(labels)
+    return out
+
+
+def extract_size_matrix(t: str) -> dict[str, list[float]]:
+    best: dict[str, list[float]] = {}
+    best_score = (0, 0)
+    for h in _HEADER_MARK.finditer(t):
+        # 머리: 표식 뒤 낱말들(숫자 아닌 토큰) — 첫 사이즈 행(이름 + 숫자)이 시작되는 곳까지, 최대 10개
+        # 낱말은 통째로 먹는다(공백 없이) — 「Hem」의 m 을 사이즈 M 으로 잘라 읽던 버그(2026-09-04)
+        # 낱말 부분은 되짚지 않는다(*+ 소유 반복). 되짚게 두면 「This size chart is based on the average
+        # sizing for each country…」 같은 안내문에서 낱말을 쪼개 보는 경우의 수가 터져 파서가 멈춘다 —
+        # open-yy 앵클부츠 한 벌에 measure 가 1시간 넘게 붙들려 있었다(2026-09-12).
+        # 머리말은 표식 바로 뒤 600자 안에서만 찾는다 — 그보다 멀면 그 표식의 표가 아니다.
+        m = re.match(r"\s*((?:[A-Za-z가-힣(][A-Za-z가-힣.()]*+\s*/?\s*){1,12}?)(?<![A-Za-z가-힣])(?=" + _SIZE_TOKEN + _ROW_LEAD + _NUM + r")", t[h.end():h.end() + 600], re.I)
+        if not m:
+            continue
+        head = m.group(1).strip().strip("()")
+        # 「SLEEVE LENGTH」를 한 칸으로 볼지 두 칸으로 볼지는 표마다 다르다. depound 는 한 칸(소매 길이)이고,
+        # dnsr 의 「SHOULDER CHEST SLEEVE LENGTH / M 49 55 58 60」은 네 칸이다(2026-09-04 OCR 실패 286건에서 발견).
+        # 둘 다 시도해 숫자 칸 수가 맞아떨어지는 쪽을 쓴다 — 붙인 쪽을 뒤에 둬서 같은 줄 수면 붙인 쪽이 이긴다.
+        for labels in _head_labels(head):
+            if sum(1 for l in labels if _KNOWN.match(l)) < 2:
+                continue
+            n = len(labels)
+            row_rx = re.compile(r"\s*(" + _SIZE_TOKEN + r")" + _ROW_LEAD + r"((?:" + _NUM + r"\s*(?:cm)?\s*[/,|:;]?\s*){" + str(n - 1) + r"}" + _NUM + r")(?!\d)", re.I)
+            cols: dict[str, list[float]] = {l: [] for l in labels}
+            pos = h.end() + m.end()
+            got = 0
+            names: list[str] = []
+            while got < 8:
+                r = row_rx.match(t, pos)
+                if not r:
+                    break
+                nums = [float(x) for x in re.findall(_NUM, r.group(2))][:n]
+                if len(nums) < n or not all(3 <= x <= 200 for x in nums):
+                    break
+                for l, x in zip(labels, nums):
+                    cols[l].append(x)
+                # 줄 머리의 사이즈 이름(S·M·1 size·FREE) — 이미 읽고 있으면서 버리고 있었다.
+                # 값이 여러 벌인 상품 1만 건이 「어느 게 M 인지」를 몰랐고, 비교 기능은
+                # 사이즈별 실측을 나란히 놓아야 해서 이 이름이 꼭 필요하다(2026-09-05).
+                names.append(re.sub(r"\s+", " ", r.group(1).strip())[:20])
+                got += 1
+                pos = r.end()
+            keep = {l: v for l, v in cols.items() if v and _KNOWN.match(l)}
+            if got and (got, len(keep)) >= best_score:
+                best, best_score = keep, (got, len(keep))
+                if len(names) == got >= 2 and len(set(names)) == got:
+                    best["_names"] = names
+    return best
+
+
+# 스킨 자산(로고·아이콘·버튼)은 파일 이름이 짧고 낱말 하나로 끝난다. 낱말만 보고 버리면
+# 상품 이름에 그 낱말이 든 옷의 상세 그림이 통째로 날아간다 — the-coldest-moment
+# 「mini logo pocket work jacket」이 그랬다(2026-09-05: 611벌, 그 중 사이즈 빈 옷 105벌).
+# 사람이 붙인 상세 그림 이름은 길다. 짧은 이름에서 구분자에 붙은 낱말만 자산으로 본다.
+_SIZE_WORD = re.compile(r"size|chart|guide|measure|사이즈|실측|치수", re.I)
+_ASSET_WORD = re.compile(r"(?:^|[/_.\-])(?:ico|icon|btn|logo|blank|spacer|badge|arrow)s?"
+                         r"(?:[0-9]|[/_.\-]|$)", re.I)
+
+
+def is_skin_asset(url: str, max_stem: int = 24) -> bool:
+    stem = re.sub(r"\?.*$", "", url).rsplit("/", 1)[-1]
+    stem = re.sub(r"\.[a-z0-9]{2,4}$", "", stem, flags=re.I)
+    if _SIZE_WORD.search(stem):
+        return False          # frizmworks 「fws_logo_hoody_size.jpg」 — 이름이 짧아도 사이즈표다
+    return len(stem) <= max_stem and bool(_ASSET_WORD.search(stem))
+
+
+# C0 제어문자 — 매장 본문에 \x03·\x08 이 섞여 있다(93줄). 눈에 안 보이는데 JSON·CSV·DB 로
+# 옮길 때 줄을 깨뜨린다. 줄바꿈·탭은 남긴다.
+_CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+# 소재를 적은 줄 — 「COTTON 100%」「· 100% poly」「겉감 : 폴리에스터 100%」. 상세 글을 모을 때 짧거나 정책 칸에 섞인
+# 줄이라도 이것만은 줍는다(parse_detail 의 _collect 주석). 섬유 낱말 + 퍼센트가 붙어 있어야 한다.
+_FIBER_WORDS = (r"면|코튼|cotton|폴리에스[터테]르?|폴리|polyester|poly|나일론|nylon|polyamide|레이온|rayon|비스코스|viscose|"
+                r"울|wool|양모|아크릴|acrylic|린넨|linen|실크|silk|캐시미어|cashmere|스판덱스|스판|spandex|span|elastane|"
+                r"폴리우레탄|polyurethane|텐셀|tencel|모달|modal|아세테이트|acetate|리오셀|lyocell|큐프라|cupro|"
+                r"알파카|alpaca|모헤어|mohair|앙고라|angora|가죽|leather|오리털|거위털|down|feather")
+_MAT_LINE = re.compile(rf"(?<![가-힣A-Za-z])(?:{_FIBER_WORDS})\s*[:：]?\s*\d{{1,3}}(?:\.\d+)?\s*%"
+                       rf"|\d{{1,3}}(?:\.\d+)?\s*%\s*(?:{_FIBER_WORDS})(?![가-힣A-Za-z])", re.I)
+_MAT_KEY = re.compile(r"소재|혼용|원단|fabric|material|composition", re.I)
+
+
+def _strip_tags(s: str) -> str:
+    return re.sub(r"\s+", " ", _CTRL.sub("", htmlmod.unescape(re.sub(r"<[^>]+>", " ", strip_html_comments(s))))).strip()
+
+
+# 옵션 칸에 든 안내 문구 — 사이즈가 아니다. 예전엔 한 문장만 정확히 맞춰 뺐는데
+# 매장마다 말이 달라서 2,958벌이 새고 있었다(2026-09-06 실측):
+#   low-classic 「- [필수] SELECT SIZE -」 768 · open-yy 「- [필수] SIZE 선택 -」 727 ·
+#   andersson-bell 「- [필수] Choose your size -」 664 · thebarnnet 「옵션 선택」 470 ·
+#   kamien 「OPTION」 57
+# 선택창의 **제목 줄**이 옵션으로 섞여 오는 매장 — 제목 낱말 하나뿐인 값만 뺀다(코덱스 검증 004, 2026-09-28).
+OPTION_HEADER = re.compile(r"^\s*(?:colou?rs?|sizes?|색상?|컬러|사이즈|options?|옵션)\s*$", re.I)
+OPTION_PROMPT = re.compile(
+    r"^\s*[-–*\[\(]*\s*(?:\[?필수\]?|옵션\s*선택|옵션을?\s*선택|선택\s*하세요|사이즈\s*선택|"
+    r"색상\s*선택|choose\b|select\b|please\b|option\s*$|-{2,}|={2,}|\.{2,})", re.I)
+
+# 「S [품절]」처럼 재고 딱지가 이름에 붙어 온다. 이름에서 떼고 어느 사이즈가 품절인지는
+# 따로 적어 둔다 — 앱에 「S [품절]」이 사이즈 이름으로 서면 안 된다(1,879벌).
+OPTION_SOLDOUT = re.compile(r"\s*[\[\(]?\s*(?:품절|sold\s?out|out\s?of\s?stock|일시\s?품절|재입고\s?예정)\s*[\]\)]?\s*$", re.I)
+# 추가금이 붙는 옵션은 카페24 가 이름 끝에 값을 적어 보낸다 — 「M [품절]  (+1₩)」 · 「블랙 / L (-10,800원)」.
+# 품절 딱지가 **값 앞에** 있어서 끝에 닻을 내린 OPTION_SOLDOUT 이 못 보고, 앱에는 「M [품절] (+1₩)」이
+# 사이즈 이름으로 섰다(코덱스 검증 008, 2026-09-28 — 22곳 80벌 · 딱지를 못 봐 판매중으로 나간 118벌). 값 꼬리를 먼저 떼고 딱지를 본다.
+OPTION_PRICE = re.compile(r"\s*\(\s*[+\-]\s*[\d,.]+\s*(?:원|₩|won|krw)?\s*\)\s*$", re.I)
+
+
+def split_option(v: str) -> tuple[str, bool]:
+    """옵션 글자 → (이름, 품절 딱지가 붙었나). 값 꼬리와 품절 딱지를 뗀다."""
+    v = OPTION_PRICE.sub("", str(v)).strip()
+    m = OPTION_SOLDOUT.search(v)
+    if m:
+        return v[:m.start()].strip(), True
+    return v, False
+OPTION_SIZE_TITLE = re.compile(r"size|사이즈|사이스|치수", re.I)
+
+
+# ── 상품표(products_full.csv)의 options 칸 — 앱이 「옵션」으로 그대로 내는 자리 ──────────────
+# 수집기(parse_detail)는 옵션을 **넓게** 받는다. 사이즈 칸을 앞에 세우고 색 칸도 받는 것은 일부러다 — pick_color 가
+# 색을 읽고, fold_reruns 가 「서로 상대에게 없는 색을 팔면 다른 상품」을 가르는 근거다. 그래서 원본(jsonl)은 두고
+# 상품표 칸만 씻는다(build_csv 가 다 쓴 다음, 파일에 쓰기 직전에). 코덱스 공개 매장 감사 023(2026-10-02)이 짚었다:
+#   curetty 1613 「RED | S」 · s-e-o 1060 「1 | 2 | 에크루」 — 사이즈 칸이 있는데 색이 사이즈처럼 섰다
+#   salondeju 4248 「S (26-마른27) | M (27-28) | 동의 | 동의」 — 개인정보 · 주문제작 동의 칸
+#   juntae-kim 153 「SIZE | XS | S …」 — 선택창 제목 줄(제목 줄을 빼는 코드가 수집기에 들어오기 전에 담긴 줄)
+# 창고 전수(137,547행): 사이즈+색 22,197행 · 제목/안내 줄 6,051행 · 동의 757행.
+# size_from_ocr 도 이 칸을 읽는다 — 사이즈 이름은 그대로 남으니 이름 붙이기(names_from_options)는 같고,
+# 「옵션이 전부 사이즈일 때만」 쓰는 _lz_opt_names 는 색 · 제목이 빠져 이제 사이즈 이름을 받는다.
+_APP_OPT_TAG = re.compile(r"^\s*[-–*\s]*\[\s*(?:필수|선택|required|optional)\s*\]\s*", re.I)
+# 동의 · 교환 불가 · 제작 기간 · 배송 고르기 — 사이즈도 색도 아니다. 앞에 사이즈 · 색이 붙은 꼴(「M (교환 및 반품 불가
+# 동의)」 「39(260)교환/취소/반품불가동의」 「Black (리퍼브 교환 환불 불가 동의)」)은 앞 토막을 살린다.
+# 「1차 · 2차」는 예약 판매 차수다(gongdreen 「스몰 | 미디움 | … | 1차」) — 사이즈 「1」로 읽히면 안 된다.
+_APP_OPT_NOTICE = re.compile(r"동의|불가|환불|교환|반품|소요|주문\s*제작|제작\s*기간|공지|당일\s*도착|배송|delivery|"
+                             r"확인\s*후|확인하였|확인했|(?<![\d.])\d{1,2}\s*차(?![가-힣])", re.I)
+_APP_OPT_ONE = re.compile(r"^(?:one|os|o/s|free|f|프리|원사이즈)$", re.I)
+
+
+def _app_opt_is_size(o: str) -> bool:
+    import size_from_ocr as so          # 사이즈 판정은 이름 붙이기와 같은 정규식으로(잣대가 둘이면 어긋난다)
+    u = so._OPT_STOCK.sub("", so._OPT_SOLDOUT.sub("", o)).strip()
+    if so._SIZE_OPT.match(u) or so._combo_rank(u) is not None or so._SIZE_HEAD.match(u):
+        return True
+    sizes, other = _option_parts(o)
+    return bool(sizes) and not other
+
+
+def _app_opt_is_color(o: str) -> bool:
+    """색 이름**뿐**인 옵션. 「BLACK / 1」 「BLACK-ONE」 「(19)Black」처럼 사이즈 · 번호가 낀 것은 색이 아니다(남긴다)."""
+    if _app_opt_is_size(o):
+        return False
+    toks = [t for t in re.split(r"[\s/,+&()\[\]\-_]+", o) if t]
+    if any(re.search(r"\d", t) or _SIZE_PART.match(t) or _APP_OPT_ONE.match(t) for t in toks):   # 「217bis(BEIGE)」 같은 번호 붙은 색도 남긴다
+        return False
+    return bool(field_color(o))
+
+
+def app_options(opts: str) -> str:
+    out: list[str] = []
+    for o in (opts or "").split(" | "):
+        o = _APP_OPT_TAG.sub("", o.strip()).strip()
+        if not o or OPTION_PROMPT.match(o) or OPTION_HEADER.match(o) or \
+                all(_OPT_HEAD_PART.match(p.strip()) for p in re.split(r"[-_/]", o)):
+            continue                    # 제목 줄 · 안내 문구(「SIZE」 「- [필수] SELECT SIZE -」 「COLOR-SIZE」)
+        if _APP_OPT_NOTICE.search(o):
+            o = re.sub(r"\s*[(\[（][^)\]）]*[)\]）]", lambda m: "" if _APP_OPT_NOTICE.search(m.group(0)) else m.group(0), o)
+            m = _APP_OPT_NOTICE.search(o)
+            if m:
+                o = o[:m.start()]
+            o = o.strip(" -/:,·")
+            if not o or not (_app_opt_is_size(o) or field_color(o)):
+                continue                # 남은 앞 토막이 사이즈도 색도 아니면(「상세 설명」 「서울/경기」) 통째로 뺀다
+        if o not in out:
+            out.append(o)
+    # 사이즈 칸이 있는 상품은 색만 적은 옵션을 뺀다 — 색은 대표색 칸(representative_color)이 따로 낸다.
+    if any(_app_opt_is_size(o) for o in out):
+        out = [o for o in out if not _app_opt_is_color(o)]
+    return " | ".join(out)
+
+
+def _known_label(lab: str) -> bool:
+    """「뒷총장」·「앞밑위」처럼 앞뒤를 붙인 라벨도 받는다 — 칸 이름은 size_from_ocr 가 다시 맞춘다."""
+    return bool(_KNOWN.match(lab) or _KNOWN.match(re.sub(r"^(?:뒷|뒤|앞)", "", lab)))
+
+
+_TF_NUM = r"\d{1,3}(?:\.\d{1,2})?"
+
+
+# ─── 사이즈 출처 손질 (2026-10-27 사이즈 판독) ───
+# 사이즈 없는 판매중 옷 816벌을 사람 대신 손으로 읽게 하고(여섯 묶음), 수집기가 놓친 자리를 모았다. 그 가운데
+# 여러 매장에 걸리는 것만 여기 둔다 — 원사이즈 한 줄 표 · 표와 품목이 어긋나는 남의 표 · 남의 상세 그림 · 세트 구성품.
+
+# 원사이즈 한 줄 표 — 「SIZE(cm) 총장 46 어깨단면 45.5 가슴단면 51.5 …」 · 「SIZE INFO 허리 33 총장 93 힙 46 밑단 52」.
+# 사이즈 이름 없이 라벨 · 값 쌍만 잇는다. 여태 extract_size_table 이 이 줄을 「사이즈 이름 + 값」 줄로 오해했다:
+#   diagonal 6217 → {"소매장": [57.3, 22.2], "_names": ["46", "슬리브"]}  (총장 46 이 사이즈 이름, 뒤 「하프 슬리브」 줄이 둘째 사이즈)
+#   arend 902     → {"총장": [93, 93], "_names": ["33", "INFO"]}         (허리 33 이 사이즈 이름)
+# 그런 표는 뒤 단계가 버려서 두 매장 다섯 벌이 치수 없음이었다. 머리말 바로 뒤에서 라벨 · 값 쌍이 끊김 없이 셋 이상
+# 이어질 때만 받는다 — 쌍이 아닌 낱말(「하프 슬리브 :」)이 나오면 거기서 멈춘다(그 뒤는 다른 칸의 표다).
+_SINGLE_HEAD = re.compile(r"(?i)(?:size\s*(?:\(\s*cm\s*\)|info(?:rmation)?|guide|chart|\[\s*cm\s*\])|"
+                          r"사이즈\s*(?:\(\s*cm\s*\)|정보|안내)|실측\s*(?:사이즈)?\s*(?:\(\s*cm\s*\))?|원\s*사이즈|"
+                          r"one\s*size|free\s*size|프리\s*사이즈)\s*[:：]?\s*(?:\(\s*(?:cm|단면|cm\s*/\s*단면)\s*\)\s*)?")
+_SINGLE_PAIR = re.compile(r"\s*[,/·|]?\s*([가-힣A-Za-z][가-힣A-Za-z ]{0,12}?)\s*(?:\([^)]{0,10}\))?\s*[:：]?\s*"
+                          r"(\d{1,3}(?:\.\d{1,2})?)\s*(?:cm)?(?![\d.~\-])")
+_SIZE_NAME_START = re.compile(r"(?i)^\s*(?:x{0,3}s|x{0,3}l|m|\d?xl|free|f|one\s*size|\d{1,3}\s*(?:\(|size|사이즈))\b")
+
+
+def extract_single_size_run(text: str) -> dict[str, list[float]]:
+    """머리말(SIZE(cm) · SIZE INFO · 원사이즈 …) 뒤 원사이즈 한 줄 표 → {라벨: [값]}. 못 읽으면 {}."""
+    best: dict[str, list[float]] = {}
+    # 보이지 않는 글자(BOM · 폭 없는 공백)를 걷는다 — arend 는 「﻿허리 33」처럼 라벨 앞에 U+FEFF 가 붙어 있다
+    text = re.sub(r"[\ufeff\u200b\u200c\u200d\u2060]", "", text or "")
+    for m in _SINGLE_HEAD.finditer(text):
+        rest = text[m.end():m.end() + 400]
+        if _SIZE_NAME_START.match(rest):
+            continue          # 「SIZE(cm) S 총장 …」은 사이즈마다 줄이 있는 표다 — 다른 파서 몫
+        out: dict[str, list[float]] = {}
+        pos = 0
+        while True:
+            pm = _SINGLE_PAIR.match(rest, pos)
+            if not pm:
+                break
+            lab = re.sub(r"\s+", "", pm.group(1))
+            if not _known_label(lab) or lab in out:
+                break
+            out[lab] = [float(pm.group(2))]
+            pos = pm.end()
+        if len(out) >= 3 and len(out) > len(best):
+            best = out
+    return best
+
+
+_BOGUS_NAME = re.compile(r"(?i)^(?:info|size|size\s*info|guide|chart|cm|inch|단위|사이즈|실측)$")
+
+
+def _bogus_names(st: dict) -> bool:
+    """표의 사이즈 이름 자리에 사이즈가 아닌 낱말이 앉았다 — 「슬리브」 · 「INFO」 · 「총장」.
+    모르는 이름을 다 의심하면 「Small」 · 「S-M」 · 「W28」 같은 멀쩡한 이름까지 걸리므로, **아닌 것이 분명한** 것만 본다:
+    머리말 낱말 · 치수 라벨 · 사이즈 말(사이즈 · 호 · 프리)이 없는 한글 낱말."""
+    names = st.get("_names") if isinstance(st, dict) else None
+    if not names:
+        return False
+    for n in names:
+        t = re.sub(r"\s+", "", str(n))
+        if _BOGUS_NAME.match(t) or _known_label(t):
+            return True
+        if re.fullmatch(r"[가-힣]{2,}", t) and not re.search(r"사이즈|호|프리|스몰|미디움|라지|소|중|대", t):
+            return True
+    return False
+
+
+# 표와 품목이 어긋나는 남의 표 — 매장이 다른 상품의 표를 그대로 붙여 둔 자리(2026-10-27 판독):
+#   anotheroffice 「Officer Chino Pants」 SIZE GUIDE 표가 앞총장 · 어깨 · 가슴 · 소매(상의 표)
+#   years-ago 「M-52 washed cotton trouser」 「사이즈 측정」 표가 어깨 · 가슴 · 소매 · 총장
+#   s-e-o 「Paneled Culotte Mini Skirt」 「원사이즈 총장 42.5 어깨 48.5 가슴 42 밑단 37.5 소매 57」
+#   crank 「BIKINI BRA TOP」 표가 비키니 하의(BRIEFS)의 Waist(band) · Hip · Thigh
+# 표의 칸만으로 판정한다: 하의에 상의 칸만 · 스커트에 어깨 · 소매 · 상의(아우터)에 허벅지 · 밑위 같은 하의 전용 칸만.
+# 허리 · 엉덩이는 원피스 · 긴 코트 · 핏 블라우스에도 적으니 상의 쪽 판정에 안 쓴다. 원피스 · 세트는 판정하지 않는다.
+_TOP_LAB = re.compile(r"(?i)가슴|어깨|소매|화장|암홀|상동|chest|bust|shoulder|sleeve|arm\s*hole|pit\s*to\s*pit")
+_LOW_LAB = re.compile(r"(?i)허리|엉덩이|앙덩이|힙|허벅지|밑위|인심|아웃심|waist|hip|thigh|rise|inseam|out\s*seam|crotch")
+_LOW_ONLY_LAB = re.compile(r"(?i)허벅지|밑위|인심|thigh|rise|inseam|crotch")
+_SET_WHOLE = re.compile(r"(?i)(?<![a-z])(?:set\s*-?\s*up|set|two\s*-?\s*piece|2\s*pcs?)(?![a-z])|세트|셋업|투피스|상하의|"
+                       r"jumpsuit|점프\s*수트|overall|오버올|멜빵|bib")
+
+
+def name_garment_code(name: str) -> str | None:
+    """상품 이름이 말하는 옷 갈래(tops · outer · bottoms · skirt · dress …). 세트 · 점프수트처럼 위아래가 다 맞는 옷은 None.
+    「LK SET-UP JACKET」처럼 셋업의 한 벌을 따로 파는 이름은 옷 낱말이 한쪽(위 · 아래)뿐이면 그 갈래로 본다."""
+    if not name:
+        return None
+    if _SET_WHOLE.search(name) or _TWO_PIECE.search(name):
+        lname = name.lower()
+        up = any(w in lname for w in _IMG_UP_WORDS)
+        low = any(w in lname for w in _IMG_LOW_WORDS)
+        if up == low or re.search(r"(?i)jumpsuit|점프\s*수트|overall|오버올|멜빵|bib", name):
+            return None
+    return ITEM_TO_CATEGORY.get(garment_head(name))
+
+
+def size_labels_conflict(labels, code: str | None) -> str:
+    """표 칸 이름과 옷 갈래가 어긋나면 그 까닭(빈 글이면 맞다). code 는 category_code(tops · bottoms · skirt …)."""
+    labs = [str(x) for x in labels if not str(x).startswith("_") and str(x) != "part"]
+    if not labs or not code:
+        return ""
+    top = [x for x in labs if _TOP_LAB.search(x)]
+    low = [x for x in labs if _LOW_LAB.search(x)]
+    # 스커트에 어깨 · 소매만 따로 보지 않는다 — 「플레어 맥시 스커트」 표에 허리 · 엉덩이와 함께 sleevelength 한 줄이 섞인
+    # 매장이 있다(and-you). 하의 칸이 하나도 없을 때만 남의 표로 본다(s-e-o 「원사이즈 총장 · 어깨 · 가슴 · 밑단 · 소매」).
+    if code in ("bottoms", "skirt") and top and not low:
+        return "하의인데 표에 상의 칸만"
+    if code in ("tops", "outer") and any(_LOW_ONLY_LAB.search(x) for x in labs) and not top:
+        return "상의인데 표에 하의 칸만"
+    return ""
+
+
+_TWO_PIECE = re.compile(r"[&+]|(?i:\band\b)")
+_SWIM = re.compile(r"(?i)bikini|swim|monokini|비키니|수영복|모노키니")
+_SWIM_PART = re.compile(r"(?i)top|bra|bottom|brief|탑|브라|바텀|브리프|팬티")
+
+
+def table_category_conflict(labels, code: str | None, name: str = "") -> str:
+    """size_from_ocr 가 분류가 끝난 상품에 거는 남의 표 판정 — size_labels_conflict 에 세트 · 수영복 한 벌 예외를 더한다.
+    「[SET] 후디&팬츠」 · 「Blazer + R-801」은 위아래 표가 다 맞는 말이고, 「RR LOGO CHARM BIKINI」(위아래 한 벌)는
+    하의 칸만 적어도 그 옷 표다. 「BIKINI BRA TOP」처럼 한쪽을 이름에 적은 수영복은 판정한다(crank)."""
+    nm = name or ""
+    if _SET_WHOLE.search(nm) or _TWO_PIECE.search(nm):
+        return ""
+    if _SWIM.search(nm) and not _SWIM_PART.search(nm):
+        return ""
+    return size_labels_conflict(labels, code)
+
+
+# 남의 상세 그림 — 그림 주소(파일 이름 · 폴더)가 다른 상품을 가리킨다(2026-10-27 판독):
+#   lartisan 「LK SET-UP JACKET」 상세 그림 LKSETUPSLACKSBLACK.jpg(바지 실측)
+#   crank 「BIKINI BRA TOP」 상세 그림 BIKINI BRIEFS_ST.jpg(하의 실측)
+#   noirer 「싱글 롱 코트」(Style.No N24SCT01-BR) 상세 그림이 전부 …/JK/N24SJK03-BE/…(다른 재킷)
+# 그 그림을 OCR 이 읽으면 남의 실측 · 소재가 이 상품 것이 된다. 그래서 detail_images 에서 빼서 따로 남긴다.
+# ① 옷 낱말: 주소에 나온 옷 낱말이 **모두** 이 상품과 다른 갈래(위 ↔ 아래)이고 상품 이름에는 그 낱말이 없을 때.
+# ② 품번: 매장이 적은 이 상품 품번(Style.No · 품번 · 상품코드)과 꼴(글자/숫자 자리)이 같고 앞 세 자가 같은데
+#    값이 다른 품번이 주소에 있고, 이 상품 품번은 주소에 없을 때. 꼴이 같아야 해서 그림 이름의 해시와는 안 겹친다.
+_IMG_LOW_WORDS = ("slacks", "trousers", "briefs", "leggings", "pants", "jeans", "shorts", "skirt", "슬랙스", "팬츠", "바지", "스커트")
+_IMG_UP_WORDS = ("jacket", "blouson", "cardigan", "sweatshirt", "hoodie", "parka", "blouse", "shirt", "coat",
+                 "jumper", "재킷", "자켓", "블루종", "가디건", "후드", "후디", "셔츠", "블라우스", "코트", "점퍼")
+_CODE_KEY = re.compile(r"(?i)style\s*\.?\s*no|품번|상품\s*코드|모델\s*(?:명|번호)|model\s*(?:no|name)|product\s*code|item\s*code")
+_CODE_TOK = re.compile(r"[A-Za-z0-9]{6,14}")
+
+
+def _code_shape(t: str) -> str:
+    return re.sub(r"\d", "9", re.sub(r"[A-Za-z]", "A", t))
+
+
+def own_style_codes(spec: dict | None, name: str = "") -> set[str]:
+    out = set()
+    for k, v in (spec or {}).items():
+        if _CODE_KEY.search(k):
+            for t in _CODE_TOK.findall(str(v)):
+                if re.search(r"[A-Za-z].*\d|\d.*[A-Za-z]", t) and sum(c.isdigit() for c in t) >= 2:
+                    out.add(t.upper())
+    return out
+
+
+_NO_CODE = object()
+
+
+def foreign_image_reason(url: str, name: str, codes: set[str], code=_NO_CODE) -> str:
+    """이 상세 그림이 다른 상품의 것이라는 근거(없으면 빈 글). code 는 name_garment_code(name) — 그림이 여럿이면
+    한 번만 구해 넘긴다(garment_head 가 가볍지 않다)."""
+    if not url or url.startswith("data:"):
+        return ""          # 글로 박힌 그림 — base64 글자에 「coat」 같은 낱말이 우연히 든다
+    try:
+        path = unquote(urlsplit(url).path)
+    except Exception:
+        path = url
+    # 옷 낱말은 끝 세 칸(폴더 둘 + 파일 이름)에서만 찾는다 — 앞 칸은 매장 아이디다(cafe24img.poxo.com/shirter/… 의
+    # 「shirter」가 셔츠로 읽혔다). 「shortsleeve」의 「shorts」는 반팔이지 반바지가 아니다(goodlifeworks · lartisan).
+    low = re.sub(r"shorts?[\s_\-]*sleeve", "sleeve", "/".join(path.lower().split("/")[-3:]))
+    if code is _NO_CODE:
+        code = name_garment_code(name)
+    if code in ("tops", "outer", "bottoms", "skirt"):
+        lname = (name or "").lower()
+        ups = [w for w in _IMG_UP_WORDS if w in low and w not in lname]
+        lows = [w for w in _IMG_LOW_WORDS if w in low and w not in lname]
+        # 「sweatshirt」 안의 「shirt」처럼 겹친 낱말은 한 번만 센다 — 쪽 판정만 하므로 상관없다.
+        mine_up = code in ("tops", "outer")
+        # 이름이 그 쪽 옷 낱말을 하나라도 가지면(「트러커 자켓 BLUE JEAN」 — 색 이름 JEAN 탓에 바지로 읽힌다) 남의 그림으로 안 본다
+        name_up = any(w in lname for w in _IMG_UP_WORDS)
+        name_low = any(w in lname for w in _IMG_LOW_WORDS)
+        # 그림 이름에 이 상품 이름의 옷 낱말이 같이 있으면(「denim_jacket_pants」 — 재킷 상품) 함께 찍은 컷이라 둔다
+        own_in_img = any(w in low for w in _IMG_UP_WORDS + _IMG_LOW_WORDS if w in lname)
+        if mine_up and lows and not ups and not name_low and not own_in_img:
+            return f"그림 이름이 하의({lows[0]})"
+        if not mine_up and ups and not lows and not name_up and not own_in_img:
+            return f"그림 이름이 상의({ups[0]})"
+    if codes:
+        up = path.upper()
+        if not any(c in up for c in codes):
+            for t in _CODE_TOK.findall(up):
+                for c in codes:
+                    if t != c and len(t) == len(c) and _code_shape(t) == _code_shape(c) and t[:3] == c[:3]:
+                        return f"그림 주소의 품번 {t} ≠ 이 상품 {c}"
+    return ""
+
+
+_SET_MARK = re.compile(r"(?i)^\s*[\(\[]\s*(?:set\s*-?\s*up|set|세트|셋업)\s*[\)\]]\s*|\s*[\(\[]\s*(?:set\s*-?\s*up|set|세트|셋업)\s*[\)\]]\s*$")
+
+
+def _norm_name(t: str) -> str:
+    return re.sub(r"[^0-9a-z가-힣]", "", (t or "").lower())
+
+
+def set_components(html_text: str, soup, base: str) -> list[dict]:
+    """카페24 세트 상품의 구성품 — [{"set_no": 구성품 번호, "name": 이름, "product_no": 같은 이름 단품 링크 번호 | None}].
+    세트가 아니면 []. 구성품 번호(5607)는 세트 안에서만 쓰는 숨은 상품이라 열어도 카페24 빈 화면이다 — 단품 링크가 실측 자리다."""
+    raw = _js_str(html_text, "set_option_data")
+    if not raw:
+        return []
+    try:
+        comp = json.loads(raw)
+    except ValueError:
+        return []
+    if not isinstance(comp, dict) or len(comp) < 2:
+        return []
+    links: dict[str, int] = {}
+    for a in soup.select("a[href]"):
+        no = product_no_of(a.get("href") or "")
+        txt = _norm_name(a.get_text(" ", strip=True))
+        if no and len(txt) >= 6:
+            links.setdefault(txt, no)
+    out = []
+    for k, v in comp.items():
+        if not isinstance(v, dict) or not str(k).isdigit():
+            continue
+        nm = _SET_MARK.sub("", htmlmod.unescape(str(v.get("product_name") or ""))).strip()
+        out.append({"set_no": int(k), "name": nm, "product_no": links.get(_norm_name(nm))})
+    return out
+
+
+def fill_set_tables(rows: dict[int, dict]) -> int:
+    """세트 상품에 구성품 단품의 실측표를 붙인다 — 위(상의 · 아우터)는 표 본체, 아래(바지 · 스커트)는 「_parts」 하의.
+    size_from_ocr 가 _parts 의 하의를 size_parts 로 내고 앱이 「상의 / 하의」 탭으로 보인다(html_low_part 주석).
+    위 구성품 표가 없으면 붙이지 않는다 — 하의 표만 본체에 두면 세트 전체 치수처럼 읽힌다. 고친 상품 수를 돌려준다."""
+    by_name = {_norm_name(d.get("name")): d for d in rows.values() if d.get("size_table")}
+    n = 0
+    for d in rows.values():
+        parts = d.get("set_parts") or []
+        if not parts or d.get("size_table"):
+            continue
+        up = low = None
+        used = []
+        for c in parts:
+            src = rows.get(c.get("product_no")) if c.get("product_no") else None
+            src = src if src and src.get("size_table") else by_name.get(_norm_name(c.get("name")))
+            if not src:
+                continue
+            code = name_garment_code(src.get("name") or c.get("name") or "")
+            st = {k: v for k, v in src["size_table"].items() if k != "_parts"}
+            if code in ("tops", "outer") and up is None and not size_labels_conflict(st, code):
+                up = st
+                used.append(src["product_no"])
+            elif code in ("bottoms", "skirt") and low is None and not size_labels_conflict(st, code):
+                low = st
+                used.append(src["product_no"])
+        if up is None:
+            continue
+        d["size_table"] = {**up, **({"_parts": [{"part": "하의", **low}]} if low else {})}
+        d["size_table_from_set"] = used
+        n += 1
+    return n
+
+
+def mark_template_tables(rows: dict[int, dict], min_n: int = 10, min_kinds: int = 3) -> int:
+    """매장이 한 표를 상관없는 옷 여럿에 똑같이 붙였으면 틀(template)로 보고 그 표를 버린다(size_reject 에 남긴다).
+
+    lmood 는 가디건 · 니트 · 셔츠 · 플리스 자켓 · 슬랙스 22벌에 「44 · 46 · 48 / 총장 59.5 · 61 · 62.5 / 어깨너비 52.5 …」가
+    똑같이 들어 있다(2026-10-27 판독 — 사이즈 가이드 탭 div.size_guide_table). 색만 다른 같은 옷 스무 벌은 흔하므로 벌 수만으로는
+    안 되고, 품목 갈래(tops · outer · bottoms …)가 셋 넘게 갈릴 때만 본다 — size_from_ocr.shop_wide_tables 와 같은 잣대를
+    수집 단계에서도 건다(그쪽은 다 지은 category 를 보고, 여기는 같은 분류기를 크롤 기록에 돌린다). 고친 상품 수를 돌려준다."""
+    seen: dict[str, list] = collections.defaultdict(lambda: [[], set()])
+    for no, d in rows.items():
+        st = d.get("size_table")
+        rej = d.get("size_reject") or {}
+        if not st and str(rej.get("why", "")).startswith("매장 틀"):
+            st = rej.get("table")      # 지난 판에 이미 버린 것도 센다 — 안 세면 새 상품만으로는 문턱에 못 닿는다
+        if not (isinstance(st, dict) and st) or d.get("size_table_from_set"):
+            continue
+        key = json.dumps(st, sort_keys=True, ensure_ascii=False)
+        seen[key][0].append(no)
+        # 품목 갈래는 CSV 를 지을 때와 같은 classify_category 로 센다. 처음엔 이름의 품목(garment_head)을 셌더니
+        # badblood 처럼 한 패턴을 맨투맨 · 후드 · 후드집업에 같이 쓰는 매장(모두 상의)이 틀로 걸렸다(창고 전수 2026-10-27).
+        # 옷 갈래만 센다 — 모자 챙 길이 「length 8」이 모자 · 기타 · 잡화로 갈려 세 갈래가 되는 것(nomanual 캡 79벌)은 틀이 아니다.
+        # 갈래 이름은 CSV 의 category 칸(Tops · Knitwear · Shirts · Outerwear · Pants · Denim …)과 같게 짓는다 — size_from_ocr 가
+        # 같은 칸으로 센다. 니트 · 셔츠를 상의(tops)로 뭉치면 lmood 틀(가디건 · 니트 · 셔츠 · 플리스 자켓)이 두 갈래로 줄어 못 잡는다.
+        code = classify_category(d.get("name") or "", d.get("category_names") or [], "", d.get("options"))
+        if code in APPAREL_CODES:
+            item = garment_head(d.get("name") or "")
+            seen[key][1].add("Denim" if item == "데님" else "Knitwear" if item in ("니트", "가디건", "케이블니트", "아가일니트")
+                             else "Shirts" if item in ("셔츠", "웨스턴셔츠") else code)
+    n = 0
+    for key, (nos, kinds) in seen.items():
+        if len(nos) < min_n or len(kinds) < min_kinds:
+            continue
+        for no in nos:
+            d = rows[no]
+            if not d.get("size_table"):
+                continue
+            d["size_reject"] = {"why": f"매장 틀 — 같은 표가 {len(nos)}벌 · 품목 {len(kinds)}가지", "table": d["size_table"]}
+            d["size_table"] = {}
+            n += 1
+    return n
+
+
+# 빈 사이즈 탭 — 「Size(cm)」 · 「SIZE GUIDE」 · 「사이즈 가이드」 머리말은 있는데 그 칸에 숫자도 그림도 없다.
+# 매장이 칸만 만들고 실측을 안 적은 것이다(2026-10-27 판독: 이런 상품을 사람이 「실측 없음」으로 적었다). 표가 없는
+# 상품에 size_tab_empty 를 달아, 뒤에서 「못 읽음」과 「매장이 안 적음」을 가를 수 있게 한다. 수집 값은 바꾸지 않는다.
+_TAB_HEAD = re.compile(r"(?i)^\s*(?:size\s*(?:\(\s*cm\s*\)|guide|info(?:rmation)?|chart|measurement)?|"
+                       r"사이즈\s*(?:\(\s*cm\s*\)|가이드|정보|표|측정)?|실측\s*(?:사이즈)?)\s*[+\-−]?\s*$")
+
+
+def size_tab_empty(soup) -> bool:
+    """사이즈 머리말이 있고, 그 머리말이 여는 칸(바로 다음 형제)이 모두 비었으면 True. 머리말이 없거나 한 칸이라도 차 있으면 False."""
+    # 글 조각에서 찾아 그 부모로 올라간다 — 요소마다 get_text 를 부르면 큰 페이지에서 느리다.
+    heads = []
+    for t in soup.find_all(string=_TAB_HEAD):
+        el = t.parent
+        # <a><span>SIZE</span></a> 처럼 싼 것은 머리말 덩이(형제가 칸인 자리)까지 두 겹 올라간다
+        for _ in range(2):
+            if el is not None and el.find_next_sibling() is None and el.parent is not None \
+                    and _TAB_HEAD.match(el.parent.get_text(" ", strip=True) or "x"):
+                el = el.parent
+        if el is not None and el.name not in ("script", "style", "option", "title") and el not in heads:
+            heads.append(el)
+    seen = 0
+    for h in heads:
+        panel = h.find_next_sibling()
+        if panel is None or _TAB_HEAD.match(panel.get_text(" ", strip=True) or "x"):
+            continue
+        seen += 1
+        if re.search(r"\d", panel.get_text(" ", strip=True)) or panel.find("img"):
+            return False
+    return seen > 0
+
+
+def extract_size_text_forms(text: str) -> dict[str, list[float]]:
+    """글로 적은 사이즈표 가운데 **꼴이 딱 정해진** 두 가지만 읽는다 — 헐겁게 읽으면 틀린 값이 된다.
+
+    ① 라벨마다 한 줄, 사이즈 이름과 cm 값이 번갈아(plac):
+         총장 : 24 103.5cm 25 104cm 26 104.5cm
+         허리 : 24 32cm 25 33cm 26 34.5cm
+       글자열 파서(extract_size_table)는 이름 24·25 를 값으로 읽어 「총장 24 · 103.5 · 25 · 104」가
+       됐다. 값에만 cm 가 붙는 것을 믿고 이름과 값을 가른다. 줄마다 이름 차례가 같아야 받는다.
+    ② 머리 한 줄을 슬래시로, 사이즈마다 한 줄(far-from-what, JSON-LD 설명):
+         Size : 뒷총장 / 어깨 폭 / 가슴단면 / 팔 길이
+         Size1 : 58cm / 50cm / 63cm / 60cm
+       칸 수가 머리와 같고 전부 수일 때만 받는다.
+    (2026-09-26 — 결손을 다시 열어 보다가 찾았다. plac 74벌 · far-from-what 41벌)
+    """
+    text = strip_html_comments(text)
+    paren = parenthesized_size_rows(text)
+    if paren:
+        return paren
+    text = re.sub(r"\bSMAL\s+L(?=\s*:\s*허리)", "SMALL", text)
+    lines = [l.strip() for l in re.split(r"[\r\n]+|\\r\\n|\\n", text or "") if l.strip()]
+    cols: dict[str, list[float]] = {}
+    names: list[str] | None = None
+    for l in lines:
+        m = re.match(rf"^([가-힣A-Za-z ]{{1,12}}?)\s*[:：]\s*((?:[A-Za-z0-9]{{1,5}}\s+{_TF_NUM}\s*cm\s*){{2,}})$", l, re.I)
+        if not m:
+            continue
+        lab = re.sub(r"[().\s]", "", m.group(1)).lower()
+        if not _known_label(lab) or lab in cols:
+            continue
+        pairs = re.findall(rf"([A-Za-z0-9]{{1,5}})\s+({_TF_NUM})\s*cm", m.group(2), re.I)
+        nm, vals = [p[0] for p in pairs], [float(p[1]) for p in pairs]
+        if names is None:
+            names = nm
+        if nm != names or not all(3 <= v <= 200 for v in vals):
+            continue
+        cols[lab] = vals
+    if len(cols) >= 2 and names:
+        cols["_names"] = names
+        return cols
+    for i, l in enumerate(lines):
+        m = re.match(r"^(?:size|사이즈)\s*(?:\(cm\))?\s*[:：]\s*(.+/.+)$", l, re.I)
+        if not m:
+            continue
+        labs = [re.sub(r"[().\s]", "", x).lower() for x in m.group(1).split("/")]
+        if sum(_known_label(x) for x in labs) < 2:
+            continue
+        cols, names = {}, []
+        for l2 in lines[i + 1:i + 10]:
+            m2 = re.match(r"^([A-Za-z0-9 ]{1,12}?)\s*[:：]\s*(.+)$", l2)
+            if not m2:
+                break
+            vals = [x.strip() for x in m2.group(2).split("/")]
+            nums = [re.fullmatch(rf"({_TF_NUM})\s*(?:cm)?", v, re.I) for v in vals]
+            if len(vals) != len(labs) or not all(nums):
+                break
+            nm = re.sub(r"(?i)\bsize\s*|\s*size\b", "", m2.group(1)).strip() or m2.group(1).strip()
+            names.append(nm[:20])
+            for lab, n in zip(labs, nums):
+                if _known_label(lab) and 3 <= float(n.group(1)) <= 200:
+                    cols.setdefault(lab, []).append(float(n.group(1)))
+        if len(cols) >= 2 and names and all(len(v) == len(names) for v in cols.values()):
+            cols["_names"] = names
+            return cols
+    # ③ 사이즈마다 한 줄, 「이름 (덧말) - 라벨 값 / 라벨 값 …」(label-archive):
+    #      1 (women 1) - 허리  35  /  힙  46.5  /  총장  103 (women 페이지에서 구매 가능)
+    #      3 (men 1) - 허리  40  /  힙 50  /  총장  108
+    #    ①②에 안 걸려 글자열 파서가 첫 줄만 읽었다(2026-10-07 사람 지적 — label-archive 608벌이 사이즈 하나뿐).
+    #    줄마다 라벨 차례가 같고 두 줄 이상일 때만 받는다.
+    #    같은 매장 안에서도 꼴이 섞여 있다 — 「For women(1) - 총장 60 가슴단면 52」(슬래시 없음) ·
+    #    「3 size - 어깨단면 49.5 / 가슴단면 63」 · 「1 - (women 1) - 허리 34.5 힙 45」.
+    rows3 = size_rows(lines)
+    if len(rows3) >= 2 and len({tuple(k for k, _ in kv) for _, _, kv in rows3}) == 1:
+        cols = {}
+        for _, _, kv in rows3:
+            for k, v in kv:
+                cols.setdefault(k, []).append(v)
+        cols["_names"] = [nm for nm, _, _ in rows3]
+        return cols
+    # ④ 사이즈들이 **한 줄에 이어 붙은** 꼴(줄바꿈이 사라진 상세 글):
+    #      S : 허리단면 33 힙단면 49 … 총장 36 M : 허리단면 35.5 힙단면 51.5 … 총장 36.5      (lookast)
+    #      Size detail (cm) * 1 Length 102.5 Waist 35.5 … 2 Length 105 Waist 38 …           (miseki-seoul)
+    #      - S : 허리 31 허벅지 33.5 … 총기장 108 - M : 허리 33.5 …                          (junne)
+    #    ③은 줄 단위라 첫 사이즈만 남았다(2026-10-08 Claude 그림 판독에서 lookast 684 · miseki 259 · junne 가
+    #    「기존 표는 첫 사이즈 한 줄」로 드러남). 사이즈 머리 다음에 바로 라벨·수 짝이 와야 머리로 본다.
+    t = inline_size_blocks(lines)
+    if t:
+        return t
+    # ⑤ 머리 한 번을 빗금으로, 사이즈마다 「(이름) : 값 / 값 …」을 **한 줄에 이어** 적은 꼴(aeae):
+    #      SHOULDER / CHEST / SLEEVE / LENGTH (cm) (0) : 49 / 54 / 20 / 69 (1) : 51 / 57 / 21 / 71.5
+    #    ②는 사이즈마다 줄이 바뀌어야 읽혔다. 기존 표가 0 사이즈 값에 「1」 이름만 붙은 한 줄이었다(25벌, 2026-10-08 판독).
+    return slash_header_inline(lines)
+
+
+def parenthesized_size_rows(text: str) -> dict:
+    """상품 단면 구역의 S(총장 … B … W …)를 모델 체촌과 갈라 읽는다."""
+    start = re.search(r"상품\s*치수\s*안내\s*\(\s*단면\s*\)", text)
+    if not start:
+        return {}
+    body = re.split(r"재는\s*방법|모델\s*사이즈|MODEL", text[start.end():], maxsplit=1, flags=re.I)[0]
+    rows = []
+    for m in re.finditer(r"(?i)(?<![A-Za-z])(ONE\s*SIZE|FREE|XXS|XS|S|M|L|XL|XXL)\s*\(([^()]*)\)", body):
+        pairs = []
+        for pm in re.finditer(rf"([가-힣A-Za-z]+)\s*({_TF_NUM})\s*cm", m.group(2), re.I):
+            lab = {"B": "가슴단면", "W": "허리단면", "H": "엉덩이단면"}.get(pm.group(1).upper(), pm.group(1))
+            if _known_label(lab):
+                pairs.append((lab, float(pm.group(2))))
+        if len(pairs) >= 2:
+            prev = next((p for n, p in rows if n == m.group(1).upper()), None)
+            if prev is not None:
+                if prev != pairs:
+                    return {}
+                continue
+            rows.append((m.group(1).upper(), pairs))
+    if len(rows) < 2 or len({n for n, _ in rows}) != len(rows):
+        return {}
+    keys = [k for k, _ in rows[0][1]]
+    if any([k for k, _ in pairs] != keys for _, pairs in rows):
+        return {}
+    return {**{k: [dict(p)[k] for _, p in rows] for k in keys}, "_names": [n for n, _ in rows]}
+
+
+_SLASH_HEAD = re.compile(r"((?:[A-Za-z가-힣][A-Za-z가-힣 .]{0,14}\s*/\s*){1,9}[A-Za-z가-힣][A-Za-z가-힣 .]{0,14})\s*(?:\(\s*cm\s*\))?", re.I)
+# 빗금 칸 안의 소수점 공백만 허용한다(badblood 「42 .5」).
+_SLASH_NUM = r"\d{1,3}(?:\s*\.\s*\d{1,2})?(?:\s*cm|m|\s+m(?=\s*/))?"   # 「65m」·「67 m /」는 cm 오타(badblood)
+_SLASH_ROW = re.compile(rf"(?:(?<![\w.])|(?<=cm))\(?\s*([A-Za-z0-9]{{1,6}})\s*\)?\s*(?:[:：l|ㅣ]|(?<=[A-Za-z]\s)(?=\d))\s*({_SLASH_NUM}(?:\s*/\s*{_SLASH_NUM})+)", re.I)   # 「M 63cm / …」 구분자 빠짐
+
+
+def slash_header_inline(lines: list[str]) -> dict[str, list[float]]:
+    """⑤ — 빗금 머리 뒤에 「(이름) : 값/값…」 덩이가 둘 이상 이어지면 받는다. 칸 수가 머리와 같고, 머리 칸 중 둘 이상이
+    아는 라벨일 때만. 같은 이름이 다시 나오면(설명글 · 상세글에 같은 표 두 번) 첫 묶음에서 끊는다."""
+    # <br>로 머리와 행을 나눈 표도 한 묶음으로 읽는다.
+    for l in ["\n".join(lines)]:
+        for hm in _SLASH_HEAD.finditer(l):
+            # 머리 앞에 붙은 글(「MADE IN KOREA SHOULDER」)은 떼고 마지막 낱말로 본다
+            labs = []
+            for x in hm.group(1).split("/"):
+                lab = re.sub(r"[().\s]", "", x).lower()
+                if not _known_label(lab) and x.split():
+                    lab = re.sub(r"[().\s]", "", x.split()[-1]).lower()
+                labs.append(lab)
+            if sum(_known_label(x) for x in labs) < 2:
+                continue
+            pos, names, rows = hm.end(), [], []
+            for rm in _SLASH_ROW.finditer(l, pos):
+                if re.search(r"[A-Za-z가-힣]{3,}", l[pos:rm.start()]):
+                    break           # 덩이 사이에 다른 글이 끼면 끝
+                vals = [float(re.sub(r"\s|c?m", "", v, flags=re.I))
+                        for v in re.split(r"\s*/\s*", rm.group(2))]
+                if len(vals) != len(labs) or rm.group(1) in names:
+                    break
+                names.append(rm.group(1)); rows.append(vals); pos = rm.end()
+            if len(rows) < 2:
+                continue
+            cols = {lab: [r[i] for r in rows] for i, lab in enumerate(labs) if _known_label(lab)}
+            if len(cols) >= 2 and all(3 <= v <= 200 for vs in cols.values() for v in vs):
+                cols["_names"] = names
+                return cols
+    return {}
+
+
+_INLINE_HEAD = re.compile(r"(?i)(?<![\w.])(?:-\s*)?(x{0,3}s|x{0,3}l|m|\d?xl|xxl|free|f|[0-6])\s*[:：]?\s+(?=[가-힣A-Za-z])")
+
+
+_INLINE_PAIR = re.compile(rf"([가-힣A-Za-z]{{1,10}})\s*({_TF_NUM})\s*(?:cm)?")   # frontrise 처럼 9자 라벨이 있다
+
+
+def inline_size_blocks(lines: list[str]) -> dict[str, list[float]]:
+    """한 줄 안의 「사이즈 머리 + 라벨·수 짝들」 덩이를 이어 읽는다. 덩이 둘 이상, 공통 라벨 둘 이상일 때만.
+
+    덩이마다 앞에서부터 이어지는 짝만 쓴다(뒤에 붙은 설명 글은 버린다). 같은 사이즈 이름이 다시 나오면
+    (설명글·상세글에 같은 표가 두 번) 첫 묶음에서 끊는다. 사이즈마다 라벨이 조금 다르면(lookast 5429 는 M 에
+    밑단이 없다) 모두에게 있는 라벨만 받는다 — 빈칸을 다른 값으로 메우지 않는다.
+    """
+    for l in lines:
+        heads = [m for m in _INLINE_HEAD.finditer(l)]
+        blocks: list[tuple[str, list[tuple[str, float]]]] = []
+        for i, m in enumerate(heads):
+            end = heads[i + 1].start() if i + 1 < len(heads) else len(l)
+            # 「Front-rise」 「back rise」는 한 라벨이다 — 붙여 두지 않으면 앞말이 끼어든 글로 보여 덩이가 끊긴다
+            seg, pos, pairs = re.sub(r"(?i)\b(front|back)[-\s]+(rise)\b", r"\1\2", l[m.end():end]), 0, []
+            for pm in _INLINE_PAIR.finditer(seg):
+                if re.search(r"[가-힣A-Za-z0-9]", seg[pos:pm.start()].replace("-", "")):
+                    break               # 짝 사이에 다른 글이 끼면 거기까지
+                lab = re.sub(r"[().\s]", "", pm.group(1)).lower()
+                if not _known_label(lab):
+                    break
+                pairs.append((lab, float(pm.group(2))))
+                pos = pm.end()
+            if len(pairs) < 2:
+                if blocks:
+                    break               # 덩이가 끊기면 그 줄의 표는 거기까지
+                continue
+            nm = m.group(1).upper()
+            prev = next((b for b in blocks if b[0] == nm), None)
+            if prev is not None:
+                if prev[1] != pairs:
+                    blocks = []         # 같은 이름에 다른 값 = 표가 둘(세트 · 숏/롱, miseki 3137) — 어느 쪽인지 모르니 안 읽는다
+                break
+            blocks.append((nm, pairs))
+        if len(blocks) < 2:
+            continue
+        common = [k for k, _ in blocks[0][1] if all(k in dict(p) for _, p in blocks[1:])]
+        if len(common) < 2:
+            continue
+        cols = {k: [dict(p)[k] for _, p in blocks] for k in common}
+        if not all(3 <= v <= 200 for vs in cols.values() for v in vs):
+            continue
+        # 사이즈가 커지는데 값이 1cm 넘게 줄면 사이즈 줄이 아니다(foeto 2489 「1 캐미 · 2 가디건」 같은 세트 조각,
+        # arend 499 의 L 허리 29 오기) — 표를 통째로 버린다. 판독과 대조해 이 꼴만 틀렸다(2026-10-08).
+        if any(b - a < -1 for vs in cols.values() for a, b in zip(vs, vs[1:])):
+            continue
+        cols["_names"] = [nm for nm, _ in blocks]
+        return cols
+    return {}
+
+
+_ROW_HEAD = re.compile(r"^(?P<head>.{1,28}?)\s*[-–:：/]\s*(?P<body>.+)$")
+_ROW_PAIR = re.compile(rf"([가-힣A-Za-z]{{1,8}})\s*[:：]?\s*({_TF_NUM})\s*(?:cm)?")
+_ROW_SIZE = re.compile(r"(?i)\b(?:size\s*\d{1,3}|small|medium|large|x{0,3}[sml]|xxl|\d?xl|free|one\s*size|f|\d{1,3})\b")
+
+
+def size_rows(lines: list[str]) -> list[tuple[str, str, list[tuple[str, float]]]]:
+    """「사이즈 머리 - 라벨 값 라벨 값 …」 줄들 → [(사이즈 이름, 머리 원문, [(라벨, 값) …])].
+
+    머리는 짧고(28자 이하) 사이즈 낱말(1 · M · XL · one size …)을 품어야 한다. 몸통은 라벨 · 숫자 짝이
+    둘 이상이고, 짝을 걷어 낸 나머지가 구분자 · 괄호 덧말뿐이어야 한다 — 모델 정보 「men - height 185cm
+    bust 33」은 bust · waist 가 실측 라벨이 아니라서 걸러진다.
+    """
+    out = []
+    seen: set[str] = set()
+    for l in lines:
+        # 설명글과 상세글에 같은 표가 두 번 들어 있다 — 같은 줄은 한 번만 읽는다(1~5 가 두 번 이어져 표가 버려졌다).
+        key = re.sub(r"\s+", " ", l).strip()
+        if key in seen:
+            continue
+        seen.add(key)
+        m = _ROW_HEAD.match(l) or re.match(r"(?i)^(?P<head>small|medium|large)\s+(?P<body>.+)$", l)
+        if not m:
+            continue
+        head, body = m.group("head").strip(), m.group("body")
+        if not _ROW_SIZE.search(head):
+            continue
+        body = re.sub(r"\([^)]*\)", " ", body)
+        pairs = [(re.sub(r"[().\s]", "", a).lower(), float(b)) for a, b in _ROW_PAIR.findall(body)]
+        rest = _ROW_PAIR.sub(" ", body)
+        if len(pairs) < 2 or re.search(r"[가-힣A-Za-z0-9]", rest):
+            continue
+        if not all(_known_label(k) and 3 <= v <= 200 for k, v in pairs):
+            continue
+        hd = re.sub(r"\([^)]*\)", " ", re.sub(r"(?i)\b(?:for|women|woman|men|man|size)\b|[-–]", " ", head))
+        nm = re.sub(r"\s+", " ", hd).strip() or head
+        out.append((nm[:12], head, pairs))
+    return out
+
+
+def _repair_size_html(html_text: str) -> str:
+    # goodlifeworks의 닫는 >가 빠진 숫자 칸. 다른 속성·태그는 건드리지 않는다.
+    return re.sub(r'(<li\s+class=["\']row["\'])\s*(\d{1,3}(?:\.\d{1,2})?)</li>',
+                  r'\1>\2</li>', html_text)
+
+
+def _size_list_tables(soup) -> dict:
+    """칸 경계가 있는 목록·격자 표만 임시 table로 읽는다."""
+    groups = []
+    for box in soup.select(".detail_table"):
+        groups.append([ul.find_all("li", recursive=False) for ul in box.find_all("ul", recursive=False)])
+    for box in soup.select(".size_guide_table"):
+        groups.append([ul.find_all("li", recursive=False) for ul in box.find_all("ul")])
+    for detail in soup.find_all("details"):
+        summary = detail.find("summary", recursive=False)
+        if not summary or not re.fullmatch(r"Size\s*&\s*Fit\s*Guide\s*\(cm\)", summary.get_text(" ", strip=True), re.I):
+            continue
+        groups.append([row.find_all("div", recursive=False) for row in detail.find_all("div")
+                       if re.search(r"display\s*:\s*grid\b", row.get("style", ""))
+                       and "grid-template-columns" in row.get("style", "")])
+    for rows in groups:
+        table = BeautifulSoup("<table></table>", "lxml")
+        for cells in rows:
+            tr = table.new_tag("tr")
+            for cell in cells:
+                td = table.new_tag("td")
+                # 한 칸에 한국어·영어 번역을 함께 둔 격자.
+                td.string = (cell.select_one(".ko") or cell).get_text(" ", strip=True)
+                tr.append(td)
+            table.table.append(tr)
+        cols = extract_size_from_tables(table)
+        if cols:
+            return cols
+    return {}
+
+
+_TEXT_BLOCKS = {"p", "div", "li", "ol", "ul", "tr", "td", "th", "table", "h1", "h2", "h3", "h4", "h5", "h6"}
+
+
+def _block_text(node) -> str:
+    """줄은 <br>·블록에서만 나눈다. 「S l 1<span>05cm</span>」처럼 숫자 가운데 끼운 span 은 잇는다(badblood)."""
+    out = []
+    def walk(n):
+        for ch in n.children:
+            if isinstance(ch, str):
+                out.append(str(ch))
+            elif ch.name == "br":
+                out.append("\n")
+            elif ch.name not in ("script", "style"):
+                block = ch.name in _TEXT_BLOCKS
+                if block:
+                    out.append("\n")
+                walk(ch)
+                if block:
+                    out.append("\n")
+    walk(node)
+    return "".join(out)
+
+
+def _extract_size_soup(soup, description: str = "") -> dict:
+    # Details에 다른 상품 표가 섞여 있어도 명시된 Size Guide가 우선이다.
+    guides = []
+    for a in soup.select("li > a"):
+        if re.fullmatch(r"size\s+guide", a.get_text(" ", strip=True), re.I):
+            panel = a.find_next_sibling("ol", class_="tab_wrap")
+            if panel is not None:
+                guides.append(panel)
+    for scope in guides + [soup]:
+        t = extract_size_from_tables(scope) or _size_list_tables(scope)
+        if len(t) < 2:
+            text = _block_text(scope)
+            if scope is soup:
+                text += "\n" + description
+            t = extract_size_text_forms(text)
+        if len(t) < 2:
+            t = extract_size_table(str(scope))
+        if len(t) >= 2:
+            return t
+    return t
+
+
+def material_tables_as_text(soup) -> str:
+    """설명에서 지우는 표 중 소재·부위가 명시된 칸만 남긴다."""
+    import product_desc
+    lines = []
+    for tr in soup.select("#prdDetail tr, #prdInfo tr, .xans-product-additional tr, .detailArea tr"):
+        if tr.find_parent(class_=re.compile(r"review|qna|relation", re.I)):
+            continue
+        cells = tr.find_all(["th", "td"], recursive=False)
+        if len(cells) != 2:
+            continue
+        key, value = [c.get_text(" ", strip=True) for c in cells]
+        if not (re.fullmatch(r"(?i)(?:main\s+)?(?:materials?|fabrics?|composition)|(?:제품\s*)?소재|혼용[률율]", key)
+                or product_desc._MIX_PART_RX.fullmatch(key)):
+            continue
+        line = f"{key}: {value}"
+        if line not in lines:
+            lines.append(line)
+    return "\n".join(lines)
+
+
+def labeled_material_text(soup) -> str:
+    """알려진 상세 그릇 밖의 MAIN MATERIAL·소재 칸도 비율과 함께 보존한다."""
+    label = re.compile(r"(?i)^\s*(?:(?:main|sub)\s+materials?|materials?|fabrics?|composition|소재|혼용[률율])\s*[:：]?\s*")
+    lines = []
+    for node in soup.find_all(string=label):
+        parent = node.parent
+        if parent.find_parent(["script", "style", "select"]) or parent.name in {"script", "style", "option"}:
+            continue
+        if any(re.search(r"review|qna|relation", " ".join(p.get("class", [])), re.I) for p in parent.parents):
+            continue
+        for _ in range(3):
+            text = parent.get_text(" ", strip=True)
+            if len(text) > 1000:
+                break
+            if label.match(text) and re.search(r"\d\s*%", text):
+                if text not in lines:
+                    lines.append(text)
+                break
+            sibling = parent.find_next_sibling()
+            if re.fullmatch(label, text) and sibling is not None:
+                value = sibling.get_text(" ", strip=True)
+                if len(value) <= 500 and re.search(r"\d\s*%", value):
+                    text += " " + value
+                    if text not in lines:
+                        lines.append(text)
+                    break
+            if parent.parent is None:
+                break
+            parent = parent.parent
+    return "\n".join(lines)
+
+
+def extract_size_any(html_text: str) -> dict[str, list[float]]:
+    """표를 뽑는 두 길을 parse_detail 과 똑같은 차례로 태운다 — <table> 먼저, 글자열은 그 다음.
+
+    refetch_sizes 의 size-only 길이 글자열 파서만 쓰고 있었다. 그쪽은 칸 이름(_names)을 못 만들고
+    「소매기장」을 「기장」으로 잘라 읽어, 이미 잘 읽어 둔 표를 덮어쓰면 도리어 나빠진다
+    (2026-09-11 select=all 한 판에 1,396벌이 사이즈 이름을 잃었다).
+    """
+    html_text = _repair_size_html(strip_html_comments(html_text))
+    soup = BeautifulSoup(html_text, "lxml")
+    return _extract_size_soup(soup, parse_json_ld_product(html_text).get("description") or "")
+
+
+def table_is_better(new: dict, old: dict) -> bool:
+    """이름 유무 → 구성품 전체의 실측 라벨 수 → 수치 칸 수로 비교한다.
+
+    기장별 총장 행은 한 라벨이다. 같으면 새 것을 쓴다(값이 바뀌었을 수 있다).
+    """
+    if not new:
+        return False
+    if not old:
+        return True
+    n_nm, o_nm = bool(new.get("_names")), bool(old.get("_names"))
+    if n_nm != o_nm:
+        return n_nm
+    def quality(table):
+        cols = {k: v for k, v in table.items() if not k.startswith("_") and k != "part"}
+        labels = {re.sub(r"^총장(?:short|original|long)$", "총장", k) for k in cols}
+        cells = sum(sum(isinstance(x, (int, float)) for x in v) for v in cols.values() if isinstance(v, list))
+        parts = [quality(p) for p in table.get("_parts", []) if isinstance(p, dict)]
+        return len(labels) + sum(p[0] for p in parts), cells + sum(p[1] for p in parts)
+    return quality(new) >= quality(old)
+
+
+# 카페24 는 품절된 옵션을 선택창에서 **숨길** 수 있다(매장 설정). 숨긴 옵션은 select · ul 에 없고 페이지의
+# `var option_stock_data = '{…}'` 에만 is_display "F" 로 남는다 — frizmworks 2144 는 선택창이 「L」 하나인데 자료에는
+# M · XL 이 숨긴 품절로 있었다(2026-10-02 살아 있는 페이지). 품절은 재입고되면 다시 팔리는 사이즈라, 옵션이 「L」뿐이라고
+# 실측표의 M · XL 칸을 자르면 안 된다(size_from_ocr.trim_unsold_sizes). 그래서 숨긴 것까지 **그 상품의 옵션 값 전부**를
+# options_all 에 따로 남긴다. options(선택창에 보인 것)는 그대로 — pick_color · 품절 판정 · 앱 옵션이 그것을 쓴다.
+_OPT_STOCK_DATA = re.compile(r"(?<![\w$])option_stock_data\s*=\s*'((?:[^'\\]|\\.)*)'")
+
+
+def _option_stock_rows(html_text: str) -> list[dict] | None:
+    m = _OPT_STOCK_DATA.search(html_text or "")
+    if not m:
+        return None
+    try:
+        data = json.loads(json.loads('"' + m.group(1).replace("\\'", "'") + '"'))
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return [v for v in data.values() if isinstance(v, dict)]
+
+
+# 매장 딱지(soldout_icon)만으로는 품절을 못 믿어 「옵션에 품절 표시가 없으면 판다」로 두었는데(2026-09-20),
+# 그 18,118벌 중 표본 72벌을 살아 있는 페이지와 대조하니 53벌이 재고를 쓰는 매장에서 **모든 옵션 재고 0**,
+# 재고가 남은 것은 0벌이었다(2026-10-04, 코파일럿 제보 eastlogue 1712). 재고 숫자가 딱지보다 확실한 근거다.
+#   "all0" — 재고를 쓰는 옵션뿐이고 전부 0 이하(또는 판매 안 함) → 품절
+#   "some" — 하나라도 재고가 남았다
+#   None   — 재고 자료가 없거나, 재고를 안 쓰는 옵션이 섞였다(숫자로 판단 못 함)
+def stock_state(html_text: str) -> str | None:
+    rows = _option_stock_rows(html_text)
+    if not rows:
+        return None
+    if not all(r.get("use_stock") in (True, "T") for r in rows):
+        return None
+    left = 0
+    for r in rows:
+        n = r.get("stock_number")
+        if not isinstance(n, (int, float)):
+            return None
+        if n > 0 and r.get("is_selling", "T") != "F":
+            left += 1
+    return "some" if left else "all0"
+
+
+def option_values_all(html_text: str) -> list[str] | None:
+    """option_stock_data 의 옵션 값 전부(숨긴 것 포함, 조합 옵션은 칸마다 떼어). 자료가 없거나 못 읽으면 None."""
+    rows = _option_stock_rows(html_text)
+    if rows is None:
+        return None
+    out: list[str] = []
+    for v in rows:
+        vals = v.get("option_value_orginal")
+        if not isinstance(vals, list) or not vals:
+            vals = [v.get("option_value")]
+        for x in vals:
+            x, _ = split_option(str(x or ""))
+            if x and x not in out:
+                out.append(x)
+    return out[:60] or None
+
+
+def _is_addproduct_option(tag) -> bool:
+    """추가상품 옵션은 본품 옵션에서 뺀다."""
+    for el in (tag, *tag.parents):
+        classes = el.get("class") or []
+        if any(c == "xans-product-addproduct" or c.startswith("xans-product-addproduct-")
+               for c in classes):
+            return True
+        if "productSet" in classes and "additional" in classes:
+            return True
+        if (el.get("module") or "").lower() == "product_addproduct":
+            return True
+        for attr in ("id", "name", "ec-dev-id", "ec-dev-name", "product_type", "product_option_area"):
+            if (el.get(attr) or "").lower().startswith("addproduct_"):
+                return True
+    return False
+
+
+def cafe24_sale_price(html_text: str, soup, price: int | None) -> int | None:
+    """공개 할인판매가를 먼저 읽고 회원 최적 할인가는 제외한다."""
+    def amount(text):
+        m = re.search(r"\d[\d,]*(?:\.\d+)?", text or "")
+        if not m or (text or "")[m.end():].lstrip().startswith("%"):
+            return None
+        return int(float(m.group().replace(",", "")))
+
+    def hidden(el):
+        return any("displaynone" in (p.get("class") or []) or
+                   re.search(r"display\s*:\s*none", p.get("style") or "", re.I)
+                   for p in (el, *el.parents) if getattr(p, "get", None))
+
+    # 이 칸은 할인액도 자식 span 에 붙인다. 숫자를 모두 이어 붙이면 다른 값이 된다.
+    for el in soup.select("#span_product_price_sale, #span_product_price_sale_text"):
+        row = el.find_parent("tr") or el
+        if hidden(el) or re.search(r"회원|member", row.get_text(" "), re.I):
+            continue
+        value = amount(el.get_text(" ", strip=True))
+        if value and price and value < price:
+            return value
+
+    opt = soup.select_one("#span_optimum_discount_price")
+    member_price = amount(opt.get_text(" ", strip=True)) if opt and re.search(r"회원|member", opt.get_text(" "), re.I) else None
+    meta = soup.select_one('meta[property="product:sale_price:amount"]')
+    for raw in (_js_num(html_text, "product_sale_price"), meta.get("content") if meta else None):
+        try:
+            value = int(float(str(raw).replace(",", ""))) if raw not in (None, "") else 0
+        except ValueError:
+            continue
+        if value and price and 0 < value < price and value != member_price:
+            return value
+    return None
+
+
+def _respace_ld(description: str, body_text: str) -> str:
+    import product_desc
+    return product_desc.respace(description, body_text)
+
+
+def parse_detail(html_text: str, url: str, shop: Shop, http=None) -> dict | None:
+    html_text = _repair_size_html(strip_html_comments(html_text))
+    soup = BeautifulSoup(html_text, "lxml")
+    ld = parse_json_ld_product(html_text)
+    ld_offer = ld.get("offers") or {}
+    if isinstance(ld_offer, list):
+        ld_offer = ld_offer[0] if ld_offer else {}
+    no = None
+    m = re.search(r"iProductNo\s*=\s*(\d+)", html_text)
+    if m:
+        no = int(m.group(1))
+    if no is None:
+        no = product_no_of(url)
+    if no is None:
+        return None
+
+    # 이름 — JS 변수가 가장 믿을 만하다. og:title 은 매장 이름을 넣는 곳이 있다(9999archive).
+    name = _strip_tags(ld.get("name", "")) or None
+    if not name:
+        name = _js_str(html_text, "product_name")
+    if not name:
+        inp = soup.select_one('input[name="product_name"]')
+        name = inp.get("value") if inp else None
+    if not name:
+        h = soup.select_one(".headingArea h2, .infoArea h2, .xans-product-detail h2, h2.title")
+        name = h.get_text(" ", strip=True) if h else None
+    if not name:
+        t = soup.title.get_text(strip=True) if soup.title else ""
+        name = re.split(r"\s+[-|]\s+", t)[0] if t else None
+    if not name:
+        return None
+    name = _strip_tags(name)
+
+    # 판매가 — product_price(정가). product_sale_price(할인가)는 의도적으로 안 본다.
+    # 0 은 가격이 아니라 「여기 안 적었다」는 뜻이다. 0 을 값으로 받으면 뒤의 JSON-LD 갈래가
+    # 「price is None」 조건에 걸려 아예 안 돌고, 마지막에 0 이 거짓이라 상품이 통째로 버려진다.
+    # blr 은 JS 변수를 0 으로 두고 사이즈별 offers 배열에만 가격을 적는다 — 66벌이 그렇게
+    # 날아갔다(2026-09-06). 「Faded Layer Hoodie Zip-Up Jacket Ivory」 187,000원 · InStock.
+    def _won(sel):
+        el = soup.select_one(sel)
+        if not el:
+            return None
+        d = re.sub(r"[^\d]", "", el.get_text())
+        return int(d) if d and int(d) > 0 else None
+
+    price = None
+    p = _js_str(html_text, "product_price")
+    if p and p.strip().isdigit() and int(p) > 0:
+        price = int(p)
+    if price is None and str(ld_offer.get("price", "")).replace(".", "").isdigit():
+        price = int(float(ld_offer["price"]))
+    if price is None:
+        price = _won("#span_product_price_text") or _won("#span_product_price_custom")
+    # 원화가 아닌 몰(카페24 영문몰 en.… 은 USD) — 값이 원으로 읽혀 trunk-project 77벌이 124~43,240원으로 실렸다
+    # (2026-10-18, $257.82 → 25782 · 할인가 257). 값을 믿을 수 없으니 상품을 받지 않는다 — 시드를 한국몰로 고쳐야 한다.
+    _cur = re.search(r'getCurrency\s*:\s*function\(\)\s*\{\s*return\s*"([A-Z]{3})"', html_text) or \
+        re.search(r'"priceCurrency"\s*:\s*"([A-Z]{3})"', html_text)
+    if _cur and _cur.group(1) != "KRW":
+        print(f"  원화 아님({_cur.group(1)}) — 값 안 받음: {url}", flush=True)
+        return None
+    # 「값」은 어느 매장에서든 한 가지 뜻이어야 한다 — 지금 파는 값이다. 어제는 이 자리에서
+    # 정가를 먼저 골랐는데, 그러면 JSON-LD 에 할인가를 적어 두는 매장(거의 전부)과 아닌 매장의
+    # 뜻이 갈린다. 정가는 버리지 않고 옆칸에 따로 담아 앱이 고르게 한다.
+    # 할인가는 수시로 바뀌는데 우리는 매일 받지 못한다 — 2026-09-12 실측으로 40,880벌 가운데
+    # 21,272벌(52%)의 값이 열흘 묵어 있었다(사람 지적: 「우리가 업데이트를 매일 하는 게 아니잖아」).
+    # 정가 자리(#span_product_price_custom)가 파는 값보다 클 때만 정가로 본다.
+    listed = _won("#span_product_price_custom")
+    # 공개 할인판매가와 회원 최적 할인가를 따로 읽는다(9999archive 공개 50% · 회원 15%).
+    sale = cafe24_sale_price(html_text, soup, price)
+
+    soldout = False
+    m = re.search(r'''(?:is_)?soldout_icon\s*=\s*['"]([TF])['"]''', html_text)
+    if m:
+        soldout = m.group(1) == "T"
+    elif soup.select_one('img[alt="품절"], .ec-product-soldout:not(.displaynone)'):
+        soldout = True
+    availability = json_ld_availability(html_text)
+    if availability == "OutOfStock":
+        soldout = True
+
+    RAIL = re.compile(r"relat|recommend|recent|together|rolling|xans-product-list", re.I)
+
+    def _in_rail(tag) -> bool:
+        p = tag.parent
+        while p is not None and getattr(p, "get", None):
+            mark = " ".join(p.get("class") or []) + " " + (p.get("id") or "")
+            if RAIL.search(mark):
+                return True
+            p = p.parent
+        return False
+
+    # og:image 를 그대로 믿으면 안 된다 — 사이트 공용 공유 이미지(LINK_0831.jpg, logo.svg,
+    # share-image…)를 og:image 로 박아 둔 스킨이 다섯 곳(dunst 1,759건 전부 같은 그림).
+    # 1차 크롤에서 그 탓에 4,600행이 「같은 사진」으로 묶여 빠졌다(2026-09-02).
+    # /web/product/big/ 도 50px 원단 견본일 수 있다(heritagefloss). URL 만으로 믿지 않는다.
+    ogs = [_fix_url(m.get("content", ""), shop.base) for m in soup.select('meta[property="og:image"]')]
+    rejected = {_fix_url(im.get("src", ""), shop.base)
+                for im in soup.select("img[src]") if _color_swatch(im)}
+    image = next((u for u in ogs if "/web/product/" in u and u not in rejected), "")
+    # 추가 요청은 대표 OG 후보 한 장에만 한다. 부가 사진마다 재지 않는다.
+    if image and _og_too_small(soup, image, shop.base, http):
+        rejected.add(image)
+        image = ""
+    if not image:
+        for im in soup.select('img[src*="/web/product/big/"], .keyImg img, .bigImage img, '
+                              '.xans-product-image img, .prdImgView img, #big_img_box img, img.ThumbImage'):
+            src = _fix_url(im.get("src", ""), shop.base)
+            if src and src not in rejected and not _color_swatch(im) and not _in_rail(im):
+                image = src
+                break
+    if not image and not rejected:
+        candidate = ogs[0] if ogs else ""
+        if candidate and not _og_too_small(soup, candidate, shop.base, http):
+            image = candidate
+
+    def _big(u: str) -> str:
+        up = re.sub(r"/web/product/(extra/)?(small|medium|tiny)/",
+                    lambda mm: f"/web/product/{mm.group(1) or ''}big/", u)
+        if up in rejected:
+            return u                 # 버린 견본으로 다시 승격하지 않는다
+        if not _big_slot_ok(u):
+            return u
+        return up
+
+    # 갤러리는 **상품 사진 칸 안에서만** 줍는다. 페이지 전체를 훑으면 아래쪽 추천 레일
+    # (관련 상품·함께 본 상품·최근 본 상품)의 남의 상품 썸네일이 갤러리 꼬리에 붙는다 —
+    # 사람 제보 2026-09-21: annex-archive 「DISTRESSED MIX KNIT ZIP-UP」 갤러리 끝에
+    # 같은 매장의 다른 옷(UNBOUND CARPENTER PANTS) 사진 두 장이 들어가 있었다.
+    # 그 둘은 `span.thumb-box > div.swiper-container` 안에 있었고, 진짜 갤러리는
+    # 카페24 표준인 `.xans-product-image` / `.xans-product-addimage` 안에 있었다.
+    #
+    # 스킨이 그 표준을 안 쓰는 매장도 있으므로(9999archive 는 갤러리가 전부
+    # `/product/medium/` 이다), **칸에서 한 장도 못 얻었을 때만** 예전처럼 페이지를
+    # 훑는다. 레일은 사진 칸 안에서도 제외하고 스크립트 되돌림도 따로 제한한다.
+    IMGSEL = ('img[src*="/web/product/extra/"], img[src*="/web/product/medium/"],'
+              ' img[src*="/web/product/small/"], img[src*="/web/product/tiny/"]')
+    gallery = []
+    area = soup.select(".xans-product-image, .xans-product-addimage")
+    for box in area:
+        for img in box.select(IMGSEL):
+            if _in_rail(img) or _color_swatch(img):
+                continue
+            src = _big(_fix_url(img.get("src", ""), shop.base))
+            if src and src not in rejected and src != image and src not in gallery:
+                gallery.append(src)
+    if not gallery:
+        for img in soup.select(IMGSEL):
+            if _in_rail(img) or _color_swatch(img):
+                continue
+            src = _big(_fix_url(img.get("src", ""), shop.base))
+            if src and src not in rejected and src != image and src not in gallery:
+                gallery.append(src)
+    # img 태그가 아니라 스크립트 안에 사진 주소를 박아 두는 스킨이 있다 — coor 는 판매중 상품
+    # 페이지에도 선택자로 0장, 글에서 정규식으로 5장이 나왔다(932벌 중 781벌이 그래서 빈손,
+    # 오래된 상품일수록 심하다). img 태그로 못 얻었을 때만 글에서 줍는다(2026-09-04).
+    if not gallery and not area:
+        script_text = "\n".join(sc.get_text() for sc in soup.find_all("script") if not _in_rail(sc))
+        for m in re.finditer(r"""['"]((?:https?:)?//[^'"\s]*?/web/product/(?:extra/)?"""
+                             r"""(?:big|medium|small)/[^'"\s]+?\.(?:jpg|jpeg|png|webp))['"]""", script_text, re.I):
+            src = _big(_fix_url(m.group(1), shop.base))
+            if src and src not in rejected and src != image and src not in gallery:
+                gallery.append(src)
+    if not image and gallery:
+        image = gallery.pop(0)
+
+    # canonical 이 홈을 가리키는 스킨이 있다(anderssonbell.com → 664건 전부 홈, badblood, haleine).
+    # 상품 식별자가 없는 canonical 은 버리고 실제로 연 주소를 쓴다.
+    canon = soup.select_one('link[rel="canonical"]')
+    canon_href = htmlmod.unescape(canon.get("href")) if canon and canon.get("href") else ""
+    source_url = canon_href if product_no_of(canon_href) else url
+    # 열었던 주소에도 상품 번호가 없으면(매장 첫 화면으로 튕긴 경우) 번호로 다시 짓는다.
+    # 한 매장 일곱 벌이 source_url 로 매장 첫 화면을 갖고 있었다 — 일곱이 같은 주소라
+    # 사이즈·태그가 주소로 이어지질 못해 그 일곱 벌은 표가 있는데도 실측이 0이었다.
+    # 공용 DB 에 넣을 때도 같은 주소 일곱이 부딪힌다(2026-09-13).
+    if not product_no_of(source_url):
+        source_url = f"{shop.base}/product/detail.html?product_no={no}"
+
+    # ── 상세 설명 ──
+    # cafe24 상세는 대개 #prdDetail 에 「이미지」로 들어 있고 글은 거의 없다(matin-kim 1,170건 글 0자).
+    # 글이 있는 곳은 셋으로 갈린다:
+    #   · 기본정보 표(.xans-product-detaildesign table) — 상품명·판매가·상품요약정보·소재·제조국 같은
+    #     열쇠:값. 표로 따로 뽑는다(spec).
+    #   · 본문(#prdDetail, .xans-product-additional 의 desc/img-list 블록) — 있으면 글, 없으면 이미지.
+    #   · #prdInfo — 교환·반품 안내라 설명이 아니다. 뺀다.
+    # 이미지로만 설명하는 매장은 그 이미지 URL 을 detail_images 로 남긴다 — OCR 의 입력이다.
+    # 표(기본정보·사이즈표) → 열쇠:값. 폼 라벨(「[필수] 옵션을 선택」·「월 렌탈 금액」·「상품수」)과
+    # 가격·배송·결제 행은 설명이 아니라 뺀다. 남는 건 상품요약정보·description·소재·제조국·
+    # 사이즈 실측(총장·어깨·가슴…) 같은 사실이다.
+    NOISE_KEY = re.compile(r"판매가|할인|적립|수량|배송|결제|무이자|해외배송|상품코드|쿠폰|구매|SNS|PRICE|제휴|총 상품|최소주문|최대주문|"
+                           r"렌탈|옵션|\[필수\]|SIZE=|상품수|리뷰|문의|Q&A|REVIEW|배송비|국내", re.I)
+    NOISE_VAL = re.compile(r"\[필수\]|선택해 주세요|^상품수$|개월 기준|^-+$")
+    # 매장이 모든 상품에 똑같이 붙이는 「사이즈 환산표」(KOREA/US/JP/EU/UK…)는 상품 실측이 아니다.
+    # 두면 spec 이 「KOREA: 44 (85)」 같은 것으로 차고, size_table 에 엉뚱한 허리 21~32 가 들어간다
+    # (open-yy 742벌 중 204벌, 2026-09-04). 다만 같은 SIZE GUIDE 칸 안에 진짜 실측표가 함께 있으므로
+    # 칸 전체가 아니라 「환산표인 표」만 걷어낸다 — 나라 이름이 셋 이상 든 표.
+    _CONV = ("korea", "us", "uk", "eu", "jp", "cn", "asia", "inch")
+    for tb in soup.select("table"):
+        head = " ".join(c.get_text(" ", strip=True).lower() for c in tb.find_all(["th", "caption"])[:24])
+        if sum(1 for w in _CONV if re.search(rf"\b{w}\b", head)) >= 3:
+            tb.decompose()
+
+    spec: dict[str, str] = {}
+    for tr in soup.select(".xans-product-detaildesign tr, .xans-product-detail tr, .xans-product-additional tr, #prdDetail tr, #details tr"):
+        cells = tr.find_all(["th", "td"])
+        if len(cells) < 2:
+            continue
+        k = re.sub(r"\s+", " ", cells[0].get_text(" ", strip=True)).strip(" :：|")
+        v = re.sub(r"\s+", " ", cells[1].get_text(" ", strip=True))
+        # 열쇠가 16자를 넘으면 버리는데, coor 의 소재 칸 이름이 「Fabric Description」(18자)이라 177벌의
+        # 「COTTON 95% POLYURETHANE 5%」가 다 버려졌다(coor 3839 · 3793, 2026-10-01). 소재 칸 이름은 30자까지 받는다.
+        if not k or not v or (len(k) > 16 and not (len(k) <= 30 and _MAT_KEY.search(k))) or len(v) > 300 \
+                or NOISE_KEY.search(k) or NOISE_VAL.search(v) or k == v:
+            continue
+        spec.setdefault(k, v)
+
+    # 본문 글 — 표·스크립트·안내 블록을 뺀 나머지. 기본정보 표(.xans-product-detaildesign)는
+    # 글이 아니라 표라 spec 으로만 간다. 결제·배송·교환 안내(dunst 「고액결제의 경우…」 4,000자)와
+    # 탭 이름 나열(kirsh 「상품상세정보 상품구매안내 상품사용후기」)은 설명이 아니다.
+    # 「교환&반품 안내」「교환 / 반품의 경우」도 정책 글이다 — sinoon 상세 탭(.prdDescription)을 읽게 되자 반품 절차가
+    # 설명으로 들어왔고, nomanual 은 반품 안내가 아예 설명 자리를 차지하고 있었다(2026-10-01).
+    POLICY = re.compile(r"교환\s*및\s*반품|교환\s*[&/]\s*반품|반품\s*주소|환불|배송\s*(안내|기간|비|방법)|고액결제|무통장|카드사|주문\s*(취소|보류)|"
+                        r"상품구매안내|상품사용후기|상품Q&A|관련상품|RETURN|EXCHANGE|SHIPPING|DELIVERY|월 렌탈|게시물이 없습니다|View All|"
+                        r"리뷰 작성|글읽기 권한|성인인증|Related Items|Out of stock|게시글 신고|신고사유|상품결제정보|"
+                        # 배송 안내를 칸마다 나눠 적는 매장(dunst 「배송 방식」 · 「CJ대한통운 택배」 · 「1-3영업일 내 출고」 —
+                        # 판매중 2,721벌 중 2,662벌 설명이 이것뿐이었다, 2026-10-02). 예약 상품의 「순차 출고」는 상품 글이라 넣지 않는다.
+                        r"배송\s*방식|반품\s*[&/]\s*교환|\d\s*영업일|영업일\s*(이내|내|소요)|결제\s*완료일|택배|송장|착불|무료\s*배송|"
+                        r"출고가?\s*지연|당일\s*출고|품절\s*(로\s*인한\s*)?취소|취소가\s*불가|변경이\s*불가|고객센터|반품\s*접수|교환\s*접수|자동\s*수거|"
+                        r"문의\s*사항|법정\s*대리인|오배송|상품\s*불량")
+    # 탭 이름 줄(「REVIEW(1) Q&A(0) GUIDE」 · 「▪ Review (5) ▪ Q&A」 · 「Review write all 1」)은 둘 이상 이어질 때만 지운다 —
+    # 「SIZE GUIDE」 하나는 상품 글에도 쓰인다.
+    _TAB_RUN = re.compile(r"(?:[▪·|]?\s*\b(?:REVIEW|Review|리뷰|Q\s*&\s*A|GUIDE|WRITE|write|LIST|VIEW ALL|View all|See All|all|상품후기|상품문의)"
+                          r"(?![\w&])(?:\s*\(\s*\d+\s*\))?(?:\s+\d+(?![\w.]))?\s*){2,}")
+
+    # 상품 후기 · Q&A · 관련/추천 상품 · 카페24 공용 사이즈 환산 안내 · 게시글 신고 창은 설명이 아니다. 카페24 는 이것들을
+    # 설명 그릇(.xans-product-additional) 안에 함께 두어, 판매중 상품 설명 157,052벌 가운데 30,373벌에 남의 후기 · 문의
+    # 목록 · 다른 상품 이름과 값이 섞였다(satur 1,678 전부 · ronron 2,313 · etmon 1,227 — 코덱스 024 감사, 2026-10-02).
+    # 후기 글이 태거에 들어가면 「좀 긴듯한데」 같은 남의 말이 핏 · 품목 근거가 된다. 모듈 이름으로 걷는다.
+    # 사이즈가이드 모듈은 통째로 걷지 않는다 — 카페24 공용 나라별 환산표(.sizeFemale · .sizeMale …)만 걷고, 매장이 직접 적은
+    # .userGuide(satur 「XS - 총장 70 / 어깨 51 …」)는 남긴다(표본 대조 2026-10-02 satur 4723).
+    _BOARD_SEL = (".xans-product-review, .xans-product-qna, .xans-product-relation, "
+                  ".xans-product-sizeguide .sizeFemale, .xans-product-sizeguide .sizeMale, .xans-product-sizeguide .sizeChild, "
+                  ".xans-product-sizeguide .sizeInfant, .boardReport, #prdReview, #prd-review, #prd_review, #prdQnA, #prdQna, "
+                  "#prd-qna, #prd_qna, #prdRelated, .crema-product-reviews, [class*=vreview]")
+
+    def _clean_text(el) -> str:
+        el = BeautifulSoup(str(el), "lxml")
+        # 주문 상자(#totalProducts · #totalPrice · .guideArea)와 상품명·품번·값 머리(.headingArea 의 칸들)도 뺀다 —
+        # 설명 그릇 .detailArea 에 같이 들어 있어, 알리스 설명이 「이름 품번 품번 이름 87000 87000 … TOTAL (QUANTITY)
+        # 0 (0개)」로 시작했다(코덱스 검증 004, 2026-09-28). .headingArea 의 요약(.bottom)은 남긴다.
+        for t in el.select("table, script, style, select, button, .xans-product-detailinfo, .xans-product-action, "
+                           "#totalProducts, #totalPrice, .totalPrice, .guideArea, .productOption, .ec-base-help, "
+                           ".headingArea > .headingMobile, .headingArea > .headingPC, .headingArea > .right, " + _BOARD_SEL):
+            t.decompose()
+        _join_split_numbers(el)
+        return re.sub(r"\s+", " ", el.get_text(" ", strip=True))
+
+    def _add_part(out: list[str], t: str) -> None:
+        """같은 요약을 여러 그릇이 함께 든다(etmon 은 .simple_desc_top · .detaildesign · .detailArea 셋에 같은 글이 있어 설명이
+        세 번 되풀이됐다). 새 조각이 이미 받은 조각을 품으면 그 부분을 빼고 남은 것만 받는다."""
+        t = _TAB_RUN.sub(" ", t)
+        t = re.sub(r"\s+", " ", t).strip()
+        if not t or t in out or any(t in p for p in out):
+            return
+        for p in out:
+            if len(p) >= 30 and p in t:
+                t = t.replace(p, " ")
+        t = re.sub(r"\s+", " ", t).strip()
+        if len(t) >= 15 or (len(t) >= 5 and _MAT_LINE.search(t)):
+            out.append(t)
+
+    def _collect(el, out: list[str], depth: int = 0) -> None:
+        """정책 문단만 걷어낸다. 예전엔 정책 낱말이 하나라도 있으면 요소 전체를 버렸는데, badblood 의 Details·Size Guide·
+        Delivery 가 한 아코디언에, rough-side 의 제품 설명·사이즈 가이드·배송&반품이 #prdInfo 탭에 함께 있어 설명과
+        사이즈 표까지 통째로 사라졌다(2026-09-04 사람 발견). 정책이 섞인 요소는 자식으로 내려가 정책 없는 가지만 남긴다."""
+        t = _clean_text(el)
+        # 소재 한 줄은 15자가 안 된다 — vibrate 는 「· 100% poly」「· 100% cotton」을 DELIVERY 와 한 칸에 두어, 칸을
+        # 내려가 줄마다 보면 11자라 버려졌다(vibrate 4184 · 3228, 2026-10-01). 소재를 적은 짧은 줄은 받는다.
+        if len(t) < 15 and not (len(t) >= 5 and _MAT_LINE.search(t)):
+            return
+        if not POLICY.search(t):
+            _add_part(out, t)
+            return
+        # 정책 낱말이 섞인 칸에 상품 글이 요소 없이 <br> 줄로만 들어 있으면 자식으로 내려가도 글을 못 줍는다.
+        # nomanual 은 설명 칸에 「COTTON 100%」「16S 1-PLY FABRIC」과 「… 교환이나 환불 사유가 되지 않습니다」를
+        # <br> 로만 나눠 적어, 그 칸 전체가 버려지고 반품 안내만 설명으로 남았다(nomanual 4343 · 4420, 2026-10-01).
+        # 그런 맨 글 줄 가운데 **소재를 적은 줄**만 줍는다 — 다른 줄까지 주우면 반품 안내 칸의 맨 글이 새어 든다.
+        for ln in _bare_lines(el):
+            if 5 <= len(ln) <= 160 and _MAT_LINE.search(ln) and not POLICY.search(ln) \
+                    and ln not in out and not any(ln in p for p in out):
+                out.append(ln)
+        kids = [k for k in el.find_all(recursive=False) if k.name]
+        if depth >= 8 or not kids:
+            # 여덟 겹에서 멈출 때 그 아래 소재 줄만은 줍는다. badblood 상세는 .xans-product-additional 아래 div 가
+            # 서른 겹 넘게 하나씩 싸여 있어 「FABRIC COTTON 100%」에 닿지 못했다(badblood 14751 · 14630, 2026-10-01).
+            # 깊이 제한 자체를 풀면 펀딩 틀(「펀딩예정 D- 펀딩종료 원 목표금액 …」) 같은 숨은 껍데기까지 딸려 와서
+            # (받아 둔 205쪽 중 40쪽) 소재 줄로만 좁힌다.
+            if depth >= 8:
+                for ln in el.get_text("\n").split("\n"):
+                    ln = re.sub(r"\s+", " ", ln).strip()
+                    if 5 <= len(ln) <= 160 and _MAT_LINE.search(ln) and not POLICY.search(ln) \
+                            and ln not in out and not any(ln in p for p in out):
+                        out.append(ln)
+            return
+        for k in kids:
+            _collect(k, out, depth + 1)
+
+    def _bare_lines(el) -> list[str]:
+        """요소 바로 아래의 맨 글(과 그 사이의 인라인 요소)을 <br> · 블록 요소 자리에서 끊은 줄들."""
+        lines, cur = [], []
+        for c in el.children:
+            nm = getattr(c, "name", None)
+            if nm is None:
+                cur.append(str(c))
+            elif nm in ("span", "b", "strong", "em", "i", "u", "font", "a", "small", "sup", "sub"):
+                cur.append(c.get_text(" "))
+            else:
+                lines.append(" ".join(cur)); cur = []
+        lines.append(" ".join(cur))
+        return [re.sub(r"\s+", " ", x).strip() for x in lines if x.strip()]
+
+    parts: list[str] = []
+    # 긴 상품간략설명은 취급 안내보다 앞에 둬 4,000자 제한에서도 본문부터 남긴다.
+    # 기본정보 표의 「상품간략설명」 칸은 표가 아니라 글이다. coor 는 DETAIL·SIZE 를 통째로 여기에 넣는데,
+    # 표를 지우는 _clean_text 와 300자 넘는 값을 버리는 spec 사이에서 사라져 932벌 전부 본문 0자였다
+    # (2026-09-04 사람이 화면으로 확인해 줬다 — 페이지에는 DETAIL·SIZE 아코디언이 멀쩡히 보인다).
+    BRIEF = re.compile(r"상품\s*간략\s*설명|간략\s*설명|상품\s*요약|product\s*(summary|description)", re.I)
+    for tr in soup.select(".xans-product-detaildesign tr, .xans-product-detail tr"):
+        cells = tr.find_all(["th", "td"])
+        if len(cells) < 2 or not BRIEF.search(cells[0].get_text(" ", strip=True)):
+            continue
+        t = re.sub(r"\s+", " ", cells[1].get_text(" ", strip=True))
+        if len(t) >= 15 and not POLICY.search(t):
+            _add_part(parts, t)
+    # 매장마다 상세를 담는 그릇이 다르다. 아코디언·탭이라도 글은 HTML 에 이미 있어 브라우저가 필요 없다
+    # (사람이 화면으로 확인해 준 곳: open-yy·divein·rough-side·coor — 2026-09-04).
+    for sel in ("#prdDetail", "#details", ".xans-product-additional", ".product-detail-block", ".xans-product-detaildesign", "#prdInfo",
+                ".more-info-content", ".more-infos",          # open-yy: 아코디언 DETAILS(소재·핏·혼용률)
+                ".accordion-cont", ".md-info-accordion",      # divein: 디테일 + SIZE(cm) 표
+                ".accordion-desc", ".accordion-list",         # lecyto: PRODUCT INFO(혼용률) + SIZE GUIDE
+                ".prd-detail-desc-list", ".size-guide",       # rough-side: 제품 설명 탭 + 사이즈 가이드 탭
+                ".detailArea",                                # coor: 상품간략설명 + Detail 실측
+                "details.fa", ".ffw-simple-desc",             # far-from-what: 상품간략설명 안의 <details> 아코디언
+                ".Guide_wrap", ".tab_wrap",                   # kamien: Size·Details 아코디언 (&nbsp; 로 칸을 맞춘 글)
+                                                              #   (Size & Fit Guide 가 <table> 이 아니라 div 격자다)
+                ".prdDescription .tab-panel#tab1", ".prdDescription .tab-panel#tab2",
+                ".prdDescription .tab-panel#tab3"):           # sinoon: DETAIL · CARE(SHELL COTTON 100%) · SIZE 탭 (2026-10-01).
+                                                              #   넷째 탭은 SHIPPING & RETURN 이라 뺀다. .prdDescription 통째로는
+                                                              #   안 된다 — 흔한 스킨 이름이라 숨은 펀딩 틀(「펀딩예정 D- 펀딩종료 …」)
+                                                              #   까지 딸려 왔다(받아 둔 205쪽 중 40쪽)
+        for el in soup.select(sel):
+            _collect(el, parts)
+    # 본문 조각은 태그를 벗기지 않고 모아서 _strip_tags 를 안 탄다 — 여기서 제어문자를 걷는다.
+    body_text = _CTRL.sub("", " ".join(parts))
+    ld_text = _strip_tags(ld.get("description", "") or ("" if ld else json_ld_group_description(html_text)))
+    # 정책 글이 섞인 요약은 버리되, 정책 글이 **뒤에** 붙은 것이면 앞의 상품 글은 살린다. waviness 는 요약에
+    # 「DETAILS … OUTSHELL Cotton 100% … SIZE & FIT … DESCRIPTION [ 교환 / 환불 공통사항 ]」을 다 넣어, 끝의
+    # 환불 한 낱말 때문에 소재 · 실측이 든 앞 1,000자가 통째로 버려졌다(waviness 673 · 632, 2026-10-01).
+    _pm = POLICY.search(ld_text)
+    if _pm:
+        ld_text = ld_text[:_pm.start()].strip() if _pm.start() >= 100 else ""
+    # JSON-LD 설명이 100자 넘으면 그게 본문이다 — 매장이 상품마다 써 넣은 글이라서. HTML 본문은
+    # 매장 공용 안내(lmood 「제품관리… 캐시미어」 592자)가 섞여 더 길어도 본문이 아닐 수 있다.
+    # 2026-09-03 표본(12 브랜드): JSON-LD 가 100~280자 요약일 때 본문 글은 600~5,700자였다(dunst 209→5,713,
+    # 9999archive 는 소재·사이즈·디테일이 전부 본문 글). 그래서 본문이 요약의 2배 이상이고 300자 넘으면 본문을
+    # 설명으로 쓴다. 본문 글은 어느 쪽을 골랐든 detail_text 로 따로 남긴다 — 태거가 둘 다 읽는다.
+    if body_text and len(body_text) >= max(300, 2 * len(ld_text)):
+        description = body_text[:4000]
+    else:
+        description = (ld_text if len(ld_text) >= 100 or len(ld_text) >= len(body_text) else body_text)[:4000]
+    description_source = "json-ld" if description == ld_text[:4000] and ld_text else ("html" if body_text else "")
+    detail_text = body_text[:4000]
+    # 본문 글을 설명으로 골랐을 때 짧은 JSON-LD 요약이 어디에도 안 남았다. saintpain 은 본문 글이 결제 · 입금 안내
+    # (270자)이고 요약이 「• 드라이 저지 원단 … 면 100% 제조국 : 방글라데시」(90자)라, 100자에 못 미친 요약이 져서
+    # 소재가 사라졌다(판매중 의류 444벌 중 소재 84벌, 2026-10-01 — 4259 · 4319 받아 보고 확인). 요약이 본문에
+    # 없으면 상세 글 **앞**에 붙인다(태거는 상세 글 앞 200자가 설명과 다를 때만 상세 글을 읽는다).
+    if len(ld_text) >= 20 and description != ld_text[:4000] and ld_text not in body_text:
+        detail_text = (ld_text[:1000] + "\n" + body_text[:4000 - min(len(ld_text), 1000) - 1]).strip()
+    # 값 칸이 폭(「65~67」)인 실측표는 size_table 로 못 가고 본문에서도 지워진다 — 줄 그대로 상세 글 끝에
+    # 붙인다(size_tables_as_text 주석, horlisun). 4,000자에 잘리지 않게 본문 쪽을 줄인다.
+    rng_text = size_tables_as_text(soup)[:1500]
+    if rng_text:
+        detail_text = (body_text[:4000 - len(rng_text) - 1] + "\n" + rng_text).lstrip("\n")
+    mat_text = "\n".join(t for t in (material_tables_as_text(soup), labeled_material_text(soup)) if t)[:1500]
+    if mat_text and mat_text not in detail_text:
+        detail_text = (detail_text[:4000 - len(mat_text) - 1] + "\n" + mat_text).lstrip("\n")
+    # 표가 진짜 <table> 이면 칸 단위가 정확하다. 글자열 파서는 그 다음이다.
+    size_table = _extract_size_soup(soup, ld.get("description") or "")
+    # 원사이즈 한 줄 표 — 본문 · JSON-LD 설명 · meta description 가운데 어디든(extract_single_size_run 주석).
+    # diagonal 은 실측이 meta description 에만 글로 있다(「… SIZE(cm) 총장 46 어깨단면 45.5 …」, 2026-10-27).
+    # 표가 없거나 사이즈 이름 자리에 낱말이 앉은 표(「46」 · 「슬리브」)일 때만 갈아 낀다 — 제대로 읽힌 표는 안 건드린다.
+    if not size_table or _bogus_names(size_table):
+        _md = soup.select_one('meta[name="description"]')
+        # 마지막은 페이지 전체 글 — arend 는 「SIZE INFO」 문단이 설명 그릇 밖에 있어 본문 글에 안 든다(표 파서는 페이지
+        # 전체를 읽어 「33 · INFO」를 이름으로 만들었다). 머리말 바로 뒤 쌍이 셋 넘게 이어져야 받으므로 전체를 봐도 좁다.
+        for _src in (body_text, _strip_tags(ld.get("description") or ""),
+                     htmlmod.unescape(_md.get("content") or "") if _md else "", lambda: _block_text(soup)):
+            single = extract_single_size_run(_src() if callable(_src) else _src)
+            if single:
+                size_table = single
+                break
+    # 표와 품목이 어긋나는 남의 표는 **여기서 거르지 않는다** — 이름만으로 품목을 정하면 「N3B SHORT DOWN」이 바지,
+    # 「WASHED POCKET SWEAT BAGGY」가 상의가 되어 멀쩡한 표 수십 벌을 버린다(2026-10-27 창고 전수: 77벌 중 절반이 그랬다).
+    # 분류가 끝난 category_code 를 아는 size_from_ocr 가 table_category_conflict 로 거른다. size_reject 는 매장 틀(mark_template_tables)이 쓴다.
+    size_reject = None
+    from accessory_sizes import dimensions_from_html
+    dimension_table = dimensions_from_html(soup)
+
+    # 상세 이미지 — 이미지로만 설명하는 매장(matin-kim 1,170건 글 0자)의 설명은 여기 들어 있다.
+    # OCR(scripts/ocr_detail_images.py)의 입력. 대표컷·갤러리·아이콘·스킨 자산은 뺀다.
+    SKIP_IMG = re.compile(r"\.(gif|svg)(\?|$)|txt_naver|sizeguide|"
+                          r"img\.echosting\.cafe24\.com|/skin/|\.png\?v=", re.I)
+    detail_images: list[str] = []
+    for el in soup.select("#prdDetail, #prdDetailContent, #details, .xans-product-detaildesign, .xans-product-additional, .product-detail-block, .xans-product-detail, "
+                          ".more-info-content, .accordion-cont, .accordion-desc, .prd-detail-desc-list, .detailArea, "
+                          # 사이즈가이드를 접이식 칸에 그림으로 넣는 매장 — andersson-bell 은
+                          # 「SIZE INFO」 안의 .a_size_guide-contents 에 표 그림을 둔다. 위 선택자
+                          # 어디에도 안 걸려 상세 그림 목록에서 통째로 빠졌다(2026-09-05 사람 확인).
+                          '[class*="size_guide"], [class*="sizeguide"], [class*="size-guide"]'):
+        for img in el.select("img"):
+            if _in_rail(img) or _color_swatch(img):
+                continue
+            src = img.get("ec-data-src") or img.get("data-src") or img.get("data-original") or img.get("src") or ""
+            src = _fix_url(src.strip(), shop.base)
+            if not src or SKIP_IMG.search(src) or is_skin_asset(src):
+                continue
+            if "/web/product/" in src and re.search(r"/(medium|small|tiny)/", src):
+                continue  # 갤러리 축소본
+            if "/web/product/" in src and "/big/" in src and (src in gallery or src == image):
+                continue  # 대표컷·갤러리 — 이미 가진다. (frizmworks 처럼 /web/product/big/…_size.jpg 에 사이즈표를 두는 매장은 남긴다)
+            if src not in detail_images and src != image and src not in gallery:
+                detail_images.append(src)
+
+    # 사이즈 가이드 이미지 — 상세 영역 밖(팝업·숨긴 div)에 두는 매장(andersson-bell: /up/24ss1/size/24ss1_67.jpg). 문서 전체에서 경로에 size 가 든 그림을 앞에 넣는다.
+    SIZE_IMG = re.compile(r"(?:^|[/_\-])size(?:[/_.\-]|guide|chart|info|table)", re.I)
+    for img in soup.select("img"):
+        src = img.get("ec-data-src") or img.get("data-src") or img.get("data-original") or img.get("src") or ""
+        src = _fix_url(src.strip(), shop.base)
+        if not src or not SIZE_IMG.search(src) or re.search(r"btn_|icon|ico_|\.(gif|svg|png)(\?|$)", src, re.I):
+            continue
+        if src not in detail_images and src != image and src not in gallery:
+            detail_images.insert(0, src)
+
+    # 남의 상세 그림은 OCR 에 안 넘긴다(foreign_image_reason 주석). 버린 그림과 까닭은 따로 남긴다.
+    _codes = own_style_codes(spec, name)
+    _gcode = name_garment_code(name)
+    images_foreign = []
+    for _u in list(detail_images):
+        _w = foreign_image_reason(_u, name, _codes, _gcode)
+        if _w:
+            detail_images.remove(_u)
+            images_foreign.append([_u, _w])
+
+    # 크리마 핏 위젯 — 「고객님 사이즈를 찾아보세요」 칸이 실측표를 따로 들고 있다(fetch_cremafit 이 받는다). 위젯이 있는
+    # 상품만 표시해 두면 fetch_cremafit 이 매장을 손으로 고르지 않아도 된다(roem, 2026-10-27).
+    # 크리마 매장 코드는 위젯 스크립트 주소(「//widgets.cre.ma/roem.com/init.js」)에 있다 — 대개 매장 도메인이다.
+    _cf = soup.select_one(".crema-fit-product-combined-detail[data-product-code]")
+    crema_fit = None
+    if _cf is not None and (_cf.get("data-product-code") or "").strip():
+        _cb = [b for b in re.findall(r"cre\.ma/([A-Za-z0-9.\-]+)/init\.js", html_text) if b != "cafe24"]
+        crema_fit = {"code": _cf["data-product-code"].strip(),
+                     "brand": _cb[0] if _cb else urlparse(shop.base).netloc.replace("www.", "")}
+
+    # 세트 상품 — 카페24 세트는 구성품마다 「SIZE GUIDE」(.size_guide_info_layer)를 따로 걸고, 구성품 이름은
+    # set_option_data 에 있다. 실측은 구성품을 단품으로 파는 페이지에 있다(years-ago 5610 → 5599 재킷 · 5586 바지).
+    # 여기서는 구성품 이름과 같은 이름의 단품 링크만 적어 두고, 표는 crawl_brand 가 단품 기록에서 가져온다(fill_set_tables).
+    set_parts = set_components(html_text, soup, shop.base)
+    tab_empty = (not size_table and not size_reject and size_tab_empty(soup))
+
+    options, soldout_options = [], []
+    # 다른 매장 옵션은 유지하고, 해칭룸의 추가상품만 걷는다.
+    skip_addproduct = shop.slug == "hatching-room"
+    for opt in soup.select('select[id^="product_option_id"] option, select[name^="option"] option'):
+        if skip_addproduct and _is_addproduct_option(opt):
+            continue
+        v = opt.get_text(" ", strip=True)
+        if not v or v.startswith("*") or len(v) >= 60:
+            continue
+        if OPTION_PROMPT.match(v):
+            continue          # 「- [필수] SELECT SIZE -」 같은 안내 문구는 사이즈가 아니다
+        if OPTION_HEADER.match(v):
+            continue          # 선택창 제목 줄 — 제너럴아이디어 4,067벌이 「COLOR · BLUE · SIZE · S …」였다
+        v, dead = split_option(v)
+        if not v:
+            continue
+        if dead:
+            soldout_options.append(v)
+        options.append(v)
+
+    # cafe24 새 스킨은 사이즈를 드롭다운이 아니라 단추 목록으로 놓는다:
+    #   <ul option_title="SIZE" option_style="button"><li option_value="XS" title="XS">…
+    # 위의 select 만 보다가 이 꼴을 통째로 놓쳤다 — 판매중 상품 27,289벌 가운데 옵션이
+    # 아예 없는 것이 16,385벌(60%)이고, 그 때문에 사이즈 표에 이름을 붙일 수 없는 옷이
+    # 3,685벌이다(2026-09-07 실측). xlim 「ep7-01 shorts」는 XS·S·M·L·XL 이 HTML 안에
+    # 그대로 있는데 우리는 빈손이었다.
+    # option_value 는 매장에 따라 상품코드(insilence 「P0000CEB000A」)라서 title 을 읽는다.
+    # 「SIZE」 칸이 있으면 그 칸만 쓴다 — 「COLOR」 칸의 IVORY 가 사이즈 이름이 될 수는 없다.
+    if not options:
+        groups: list[tuple[str, list[tuple[str, bool]]]] = []
+        for ul in soup.select("ul[option_title]"):
+            if skip_addproduct and _is_addproduct_option(ul):
+                continue
+            vals = []
+            for li in ul.select("li[option_value]"):
+                lab = (li.get("title") or li.get_text(" ", strip=True) or "").strip()
+                if not lab or len(lab) >= 60 or OPTION_PROMPT.match(lab) or OPTION_HEADER.match(lab):
+                    continue
+                vals.append((lab, "ec-product-disabled" in (li.get("class") or [])))
+            if vals:
+                groups.append(((ul.get("option_title") or "").strip(), vals))
+        # 사이즈 칸을 앞에 세우고 색 칸도 함께 받는다 — 옵션은 사이즈 이름의 출처이면서
+        # pick_color 가 색을 읽는 자리이기도 하다(fabrega 「실버-FREE」). 둘 다 쓴다.
+        # 사이즈 이름을 붙일 때는 _SIZE_OPT 로 걸러 내므로 색 이름이 섞여도 되지만,
+        # 「옵션 수 = 표 칸 수」 조건이 있어 섞이면 이름을 안 붙이고 넘어간다(틀리지는 않는다).
+        groups.sort(key=lambda g: 0 if OPTION_SIZE_TITLE.search(g[0]) else 1)
+        for _title, vals in groups:
+            for lab, dead in vals:
+                lab, marked = split_option(lab)
+                if not lab or lab in options:
+                    continue
+                if dead or marked:
+                    soldout_options.append(lab)
+                options.append(lab)
+
+    stock = stock_state(html_text)
+    if stock == "all0" or _all_options_soldout({"options": options, "soldout_options": soldout_options}):
+        soldout = True
+
+    return {
+        "product_no": no,
+        "name": name,
+        "price": price,
+        **({"price_listed": listed} if listed and price and listed > price else {}),
+        **({"price_sale": sale} if sale and price and sale < price else {}),
+        "soldout": soldout,
+        "stock": stock,
+        **({"availability": availability} if availability else {}),
+        "image_url": image,
+        "gallery": gallery[:12],
+        **({"gallery_excluded": sorted(rejected)} if rejected else {}),
+        # 13장째부터는 앱 갤러리에 안 싣고 OCR 만 읽는다 — 상세 설명을 「추가 이미지」로 통째 올리는 매장은
+        # 실측표가 맨 끝 한두 장이다. 12장에서 잘라 알리스 164벌의 실측표가 한 장도 안 남았다(조사 2026-09-29).
+        **({"gallery_tail": _gallery_tail(gallery)} if len(gallery) > 12 else {}),
+        "source_url": source_url,
+        # JSON-LD 설명은 <br> 을 빈칸 없이 벗겨 낱말이 붙는다(coor 「… 원단 사용내부에 …」) — 같은 글이 본문(간략설명 칸)에
+        # 빈칸을 갖고 있으면 그 경계를 되살린다(product_desc.respace). 비교에 쓰는 description 은 위에서 이미 다 썼다.
+        "description": _respace_ld(description, body_text) if description_source == "json-ld" else description,
+        "description_source": description_source,
+        "detail_text": detail_text,
+        "size_table": size_table,
+        "dimension_table": dimension_table,
+        "spec": spec,
+        # 40장에서 자르면 상세가 60장 넘는 매장의 실측표(끝 쪽 50번째 언저리)가 통째로 빠진다 — gongdreen 22벌 중 18벌
+        # (조사 2026-09-29 · 창고 1,102벌이 40장에 닿았다). OCR 은 뒤에서부터 읽으니 끝 장이 남아야 한다.
+        "detail_images": detail_images[:80],
+        **({"detail_images_foreign": images_foreign[:20]} if images_foreign else {}),
+        **({"size_reject": size_reject} if size_reject else {}),
+        **({"crema_fit": crema_fit} if crema_fit else {}),
+        **({"set_parts": set_parts} if set_parts else {}),
+        **({"size_tab_empty": True} if tab_empty else {}),
+        "options": options[:30],
+        "soldout_options": soldout_options[:30],
+        **({"options_all": opts_all} if (opts_all := option_values_all(html_text)) else {}),
+    }
+
+
+# ─── 브랜드 하나 전체 ───
+
+def is_content_category(http: PoliteSession, shop: Shop, cate_no: int) -> str | None:
+    """룩북·연예인 칸이면 그 칸 이름을, 아니면 None 을 준다.
+
+    load_categories 는 첫 화면 메뉴만 읽는다. 그런데 룩북·연예인 칸은 메뉴에 안 걸어 두는
+    매장이 많아 이름을 모른 채 남는다. 값 없는 페이지를 만났을 때만 묻는다 —
+    칸 하나에 요청 한 번이고 답은 기억한다.
+
+    제목을 통째로 본다. 매장이 뒤쪽에 설명을 붙이기 때문이다:
+      siyazu  cate 50   「PRESS - PRESS」
+      dnsr    cate 187  「CELEBRITY - CELEBRITY - DNSR」
+      sinoon  cate 453  「시눈(SINOON) OUTFIT | 연예인·인플루언서 아웃핏」  ← 뒤쪽에만 단서가 있다
+      sinoon  cate 758  「시눈(SINOON) Top | 여성 탑 컬렉션」               ← 진짜 상품 칸
+    """
+    if cate_no in shop.content_cats:
+        return shop.content_cats[cate_no]
+    r = http.get(f"{shop.base}/product/list.html?cate_no={cate_no}", retries=1)
+    cands: list[str] = []
+    if r is not None and r.status_code == 200:
+        t = BeautifulSoup(r.text, "lxml")
+        # 어느 한 자리만 봐서는 안 된다. siyazu 는 제목이 늘 「Siyazu | 시야쥬 공식홈페이지」라
+        # 칸 이름이 메뉴의 켜진 항목에만 있고(PRESS), sinoon 은 반대로 메뉴엔 없고 제목 뒤쪽에만
+        # 있다(「… | 연예인·인플루언서 아웃핏」). 세 자리를 다 모아 놓고 본다.
+        for sel in (".xans-product-menupackage li.this a", ".xans-product-menupackage .this a",
+                    ".titleArea h2", "h2.title", ".path .cate"):
+            el = t.select_one(sel)
+            if el:
+                cands.append(el.get_text(" ", strip=True))
+        og = t.select_one('meta[property="og:title"]')
+        cands.append(og.get("content") if og else "")
+        cands.append(t.title.get_text(strip=True) if t.title else "")
+    cands = [c.strip() for c in cands if c and c.strip()]
+    verdict = None
+    for c in cands:
+        # 앞 토막도 따로 본다 — 매장이 「VWD - VWD」처럼 겹쳐 적으면 통짜로는 못 맞힌다.
+        head = re.split(r"\s*[-|｜]\s*", c)[0].strip()
+        if CONTENT_CAT.search(c) or (head and CONTENT_CAT.search(head)):
+            verdict = head or c
+            break
+    shop.content_cats[cate_no] = verdict
+    if cands and not shop.categories.get(cate_no):
+        shop.categories[cate_no] = re.split(r"\s*[-|｜]\s*", cands[0])[0].strip()
+    return verdict
+
+
+def crawl_brand(http: PoliteSession, shop: Shop, refresh: bool, log, refetch_ids: set[int] | None = None,
+                refetch_force: bool = False) -> dict:
+    out_path = CRAWL_DIR / f"{shop.slug}.jsonl"
+    done: dict[int, dict] = {}
+    if out_path.exists() and not refresh:
+        for line in out_path.read_text(encoding="utf-8").splitlines():
+            try:
+                d = json.loads(line)
+                done[d["product_no"]] = d
+            except Exception:
+                pass
+
+    load_robots(http, shop)
+    home = http.get(shop.base + "/", retries=1)
+    if home is None or home.status_code != 200:
+        shop.errors.append(f"home {getattr(home, 'status_code', 'ERR')}")
+        return {"slug": shop.slug, "ok": False, "errors": shop.errors}
+    # 리다이렉트로 정본 도메인이 바뀌면(badblood.co.kr → badbloodstores.com) 그쪽을 base 로.
+    final = urlparse(home.url)
+    shop.base = f"{final.scheme}://{final.netloc}"
+    home_soup = BeautifulSoup(home.text, "lxml")
+    # 매장 이름 모음 — parse_detail 은 이름을 못 찾으면 <title> 을 줍는다. 그러면 상품 이름
+    # 자리에 매장 이름이 앉는다(dnsr 의 안내 페이지 438건이 전부 이름 「DNSR」이었다).
+    shop_titles = {shop.slug.replace("-", " ").casefold(), shop.slug.casefold()}
+    _t = home_soup.title.get_text(strip=True) if home_soup.title else ""
+    _og = home_soup.select_one('meta[property="og:title"]')
+    for raw in (_t, _og.get("content") if _og else ""):
+        for piece in re.split(r"\s*[-|｜]\s*", raw or ""):
+            piece = piece.strip().casefold()
+            if piece:
+                shop_titles.add(piece)
+    load_categories(http, shop, home_soup, home.text)
+
+    # 회원 전용으로 이미 확인된 상품은 다시 열지 않는다(사람 결정 2026-09-04)
+    mo_path = CRAWL_DIR / "_members_only.json"
+    mo_all = json.loads(mo_path.read_text(encoding="utf-8")) if mo_path.exists() else {}
+    members_only: set[int] = set(mo_all.get(shop.slug, []))
+    if members_only:
+        log(f"[{shop.slug}] 회원 전용 {len(members_only)}건은 건너뛴다")
+
+    if refetch_ids is not None:
+        # 지정한 상품만 다시 받는다 — 설명·상세 이미지·주소를 새 파서로 채우는 용도(2026-09-02).
+        # 저장된 주소에 식별자가 있으면 그 주소, 없으면 cafe24 공통 주소(detail.html?product_no=).
+        todo = []
+        for no in sorted(refetch_ids):
+            # 이미 새 파서로 받은 행(size_table 필드가 있다)은 건너뛴다 — 중간에 멈춰도 이어서 간다.
+            # --refetch-force 는 그 판단을 무시한다: 파서를 고친 뒤 같은 상품을 다시 읽어야 할 때 쓴다
+            # (rough-side 843벌은 size_table 필드가 있지만 값이 한 칸씩 밀려 있었다, 2026-09-04).
+            if not refetch_force and "size_table" in done.get(no, {}):
+                continue
+            prev = done.get(no, {}).get("source_url", "")
+            todo.append((no, prev if product_no_of(prev) else f"{shop.base}/product/detail.html?product_no={no}"))
+        # 카테고리 소속은 옛 행에서 이어받는다(목록을 다시 훑지 않는다)
+        for no, d in done.items():
+            for c in d.get("category_nos", []):
+                shop.membership.setdefault(no, set()).add(c)
+                kept = (d.get("category_names") or [str(c)])[d["category_nos"].index(c)]
+                # 성별을 말하는 옛 이름은 홈에서 온 이름에 **안 진다.** 지난 전수 훑기에서
+                # 목록 페이지가 확인해 준 「MEN ALL」을 홈 메뉴의 「ALL」이 덮으면, 이 판에서
+                # 목록을 안 훑는 탓에 확인할 길이 없어 성별이 통째로 사라진다
+                # (goodlifeworks 298벌이 그 자리였다). 잃는 것만 막는다.
+                had = shop.categories.get(c)
+                if had is None or (says_gender(kept) and not says_gender(had)):
+                    shop.categories[c] = kept
+        shop.enumerated_by = "refetch"
+    else:
+        enumerate_by_sitemap(http, shop)
+        crawl_category_lists(http, shop)
+        enumerate_by_number(http, shop)      # 앞의 두 길이 빈손일 때만 돈다
+        todo = [(no, u) for no, u in shop.product_urls.items() if no not in done and no not in members_only]
+    # 칸 소속을 다 안 뒤라야 덩이 메뉴가 말한 성별을 검산할 수 있다
+    apply_menu_gender(shop)
+    log(f"[{shop.slug}] 카테고리 {len(shop.categories)} · 상품 URL {len(shop.product_urls)} ({shop.enumerated_by}) · 받을 것 {len(todo)} · 이미 {len(done)}")
+
+    fetched = 0
+    failed = 0
+    # --refresh 는 파일을 비우고 새로 쓴다. append 로 두면 옛 행이 남아 두 배가 된다
+    # (2026-09-02 실측 — dunst 1,759 + 2,452 = 4,133행, 옛 행은 사진이 공용 이미지).
+    with out_path.open("w" if refresh else "a", encoding="utf-8") as f:
+        for no, url in todo:
+            if not shop.allowed(url):
+                failed += 1
+                continue
+            r = http.get(url, retries=2)
+            if r is not None and r.status_code in (404, 410) and "product_no=" not in url:
+                # 사이트맵 주소가 죽었어도 번호로는 열리는 경우가 있다
+                url = f"{shop.base}/product/detail.html?product_no={no}"
+                r = http.get(url, retries=1)
+            # 매장이 제 상품 링크를 죽은 판(detail2.html)에 걸어 둔 곳이 있다 — 열면 칸 페이지가
+            # 나온다. 보통 주소로 한 번 더 연다(pog-service, 2026-09-12).
+            if (r is not None and r.status_code == 200 and is_category_page(r.text)
+                    and not re.search(r"/product/detail\.html\?product_no=", url)):
+                alt = f"{shop.base}/product/detail.html?product_no={no}"
+                r2 = http.get(alt, retries=1)
+                if r2 is not None and r2.status_code == 200 and not is_category_page(r2.text):
+                    url, r = alt, r2
+            if r is None or r.status_code != 200:
+                failed += 1
+                shop.failures.append({"product_no": no, "url": url, "reason": f"http {getattr(r, 'status_code', 'ERR')}"})
+                continue
+            if len(r.text) < 2000 and "member/login" in r.text:
+                # 회원 전용 상품 — badblood 104건. 받을 수 없는 게 맞고, 다음부터는 열지도 않는다
+                # (사람 결정 2026-09-04). _members_only.json 에 남겨 다음 실행이 건너뛴다.
+                failed += 1
+                members_only.add(no)
+                shop.failures.append({"product_no": no, "url": url, "reason": "members-only"})
+                continue
+            d = parse_detail(r.text, url, shop, http=http)
+            # 이름 자리에 매장 이름만 왔고 주소가 표준판이 아니면, 표준판으로 한 번 더 연다.
+            # 제 스킨(detail1.html·detail2.html)이 자바스크립트 껍데기라 서버 HTML 에 상품
+            # 이름이 아예 없는 매장이 있다 — 본문 글자가 9천 자인데 죄다 머리글·메뉴다.
+            # 표본으로 가른 결과(각 6벌):
+            #     aeae(detail2) 440건 · cpgn-studio(detail1) 1,255 · dnsr(detail2) 493
+            #         → 표준 주소로 열면 진짜 이름이 나온다(「WEB LOGO 5PANNEL CAP [BLACK]」)
+            #     akro·markm·recto(각 800건)는 **이미 표준 주소**인데도 매장 이름만 온다.
+            #         표준판까지 자바스크립트라 다른 병이다 — 여기서는 안 고쳐진다.
+            # 그래서 「주소가 표준판이 아닐 때만」 되연다. 헛걸음이 안 생긴다.
+            if (d and not_a_product(d["name"], shop_titles) == "매장이름뿐"
+                    and not re.search(r"/product/detail\.html\?product_no=", url)):
+                alt = f"{shop.base}/product/detail.html?product_no={no}"
+                r2 = http.get(alt, retries=1)
+                if r2 is not None and r2.status_code == 200:
+                    d2 = parse_detail(r2.text, alt, shop, http=http)
+                    if d2 and not_a_product(d2["name"], shop_titles) != "매장이름뿐":
+                        url, r, d = alt, r2, d2
+            if not d:
+                failed += 1
+                shop.failures.append({"product_no": no, "url": url, "reason": "no-name", "bytes": len(r.text)})
+                continue
+            if not d.get("price"):
+                # 값이 없다고 상품이 아닌 건 아니다 — 매장이 품절 상품의 값을 내려 버린다.
+                # 그러니 「값 없음」으로 버리지 말고 무엇인지 가려 낸다(사람 지시 2026-09-06:
+                # 「임직원 결제창 이런건 빼야지」·「연예인 착용 페이지·룩북은 버려야지」·
+                # 「품절 상품도 있어야 하긴하지」).
+                why = not_a_product(d["name"], shop_titles)
+                if not why:
+                    cats = sorted(shop.membership.get(no, set())) or ([c] if (c := cate_no_of(url)) else [])
+                    verdicts = [is_content_category(http, shop, c) for c in cats]
+                    if verdicts and all(verdicts):
+                        why = "룩북칸:" + str(verdicts[0])[:24]
+                if not why and not (d.get("gallery") or d.get("image_url")):
+                    why = "사진없음"
+                # 이름이 그 상품이 걸린 칸 이름과 똑같다 — 페이지를 못 읽었다는 뜻이다.
+                # parse_detail 은 이름을 못 찾으면 <title> 을 줍는데, 스킨이 다른 매장
+                # (pog-service 는 detail.html 이 아니라 detail2.html 이다)에서는 그 title 이
+                # 칸 이름이다. 그렇게 「jewerly」라는 이름에 값도 옵션도 표도 없는 상품
+                # 137벌이 창고에 들어왔다(2026-09-12). 값도 없고 이름도 칸 이름이면 안 담는다 —
+                # 못 읽은 페이지를 유령 상품으로 남기느니 없는 게 낫다.
+                if not why and not d.get("size_table") and not d.get("options"):
+                    cats = {shop.categories.get(c, "").strip().casefold()
+                            for c in (shop.membership.get(no) or set())}
+                    cats |= {(c := cate_no_of(url)) and shop.categories.get(c, "").strip().casefold()}
+                    if d["name"].strip().casefold() in (cats - {"", None}):
+                        why = "칸 이름이 상품 이름으로 왔다(페이지 못 읽음)"
+                if why:
+                    failed += 1
+                    shop.failures.append({"product_no": no, "url": url, "reason": why, "bytes": len(r.text)})
+                    continue
+                # 남은 것은 값만 내려놓은 진짜 품절 상품이다. 예전에 받아 둔 값이 있으면 그걸 쓴다.
+                d["price_missing"] = True
+                d["soldout"] = True
+            cates = sorted(shop.membership.get(no, set()))
+            d["category_nos"] = cates
+            d["category_names"] = [shop.categories.get(c, str(c)) for c in cates]
+            d["brand_slug"] = shop.slug
+            d["crawled_at"] = datetime.now(KST).strftime("%Y-%m-%dT%H:%M:%S")
+            # 마지막 줄이 이기므로, 새로 받은 값이 빈 채로 옛 값을 덮으면 데이터가 사라진다.
+            # 매장이 품절 상품의 사이즈 아코디언을 내리는 경우가 있어 실제로 일어난다(rough-side).
+            carry_over(done.get(no) or {}, d, d["crawled_at"])
+            f.write(jsonl_line(d) + "\n")
+            f.flush()
+            done[no] = d
+            fetched += 1
+            if fetched % 100 == 0:
+                log(f"[{shop.slug}] … {fetched}/{len(todo)}")
+
+        # 이미 받아 둔 상품은 다시 열지 않으니 칸 이름이 옛것으로 굳는다. 목록은 이번 판에도
+        # 훑었으므로 소속과 이름은 새로 알고 있다 — 달라진 줄만 여기서 다시 적는다(HTTP 0회).
+        # 미세키서울이 이 자리에 걸렸다: 남성 칸 211벌·여성 칸 737벌의 이름이 「SHOP」으로
+        # 굳어 있었고, 이름 떼는 규칙을 고쳐도 상품을 다시 안 여니 그대로였다(2026-09-18).
+        # 칸이 줄어드는 쪽으로는 안 적는다 — 목록을 덜 훑은 판이 소속을 깎으면 안 된다.
+        renamed = 0
+        for no, prev in list(done.items()):
+            cates = sorted(shop.membership.get(no, set()))
+            if not cates:
+                continue
+            old_cates = list(prev.get("category_nos") or [])
+            if not set(cates) >= set(old_cates):
+                continue
+            names = [shop.categories.get(c, str(c)) for c in cates]
+            if cates == old_cates and names == list(prev.get("category_names") or []):
+                continue
+            upd = dict(prev)
+            upd["category_nos"], upd["category_names"] = cates, names
+            f.write(jsonl_line(upd) + "\n")
+            done[no] = upd
+            renamed += 1
+        if renamed:
+            f.flush()
+            log(f"[{shop.slug}] 칸 이름만 고쳐 다시 적은 상품 {renamed}")
+
+    # 갤러리 빗장 — 저장이 끝난 뒤 한 번. 걸리는 매장이 아니면 맛보기 몇십 번으로 끝난다.
+    tall = drop_tall_gallery(http, shop.slug, list(done.values()), log)
+    # 매장 틀 표 · 세트 구성품 표 — 매장 전체를 다 받은 뒤라야 가릴 수 있다(HTTP 0회). 차례: 틀을 먼저 걷고 세트를 채운다.
+    tpl = mark_template_tables(done)
+    sets = fill_set_tables(done)
+    if tpl or sets:
+        log(f"[{shop.slug}] 매장 틀로 버린 표 {tpl} · 구성품 표를 붙인 세트 {sets}")
+    if tall or tpl or sets:
+        with out_path.open("a", encoding="utf-8") as f2:
+            for d in done.values():
+                f2.write(jsonl_line(d) + "\n")
+
+    if shop.failures:
+        (CRAWL_DIR / f"_failures_{shop.slug}.jsonl").write_text(
+            "\n".join(jsonl_line(x) for x in shop.failures) + "\n", encoding="utf-8")
+    if members_only:
+        mo_all[shop.slug] = sorted(members_only)
+        mo_path.write_text(json.dumps(mo_all, ensure_ascii=False, indent=1), encoding="utf-8")
+    summary = {
+        "slug": shop.slug, "ok": True, "base": shop.base, "enumerated_by": shop.enumerated_by,
+        "categories": len(shop.categories), "product_urls": len(shop.product_urls),
+        "fetched_now": fetched, "failed": failed, "total_saved": len(done),
+        "soldout": sum(1 for d in done.values() if d.get("soldout")),
+        "errors": shop.errors[:5],
+        "failure_reasons": dict(collections.Counter(x["reason"] for x in shop.failures)),
+    }
+    log(f"[{shop.slug}] 끝 — 저장 {len(done)} (품절 {summary['soldout']}) · 실패 {failed}")
+    return summary
+
+
+# ─── jsonl → CSV (products_seed.csv 와 같은 열 + 몇 개) ───
+
+CSV_FIELDS = [
+    "brand_slug", "category_code", "item_type", "name", "gender_target", "price",
+    "representative_color", "season", "status", "image_url", "source_url", "crawled_at",
+    "group", "category", "subtype", "sub_code",
+    # 이하 추가 열 — 기존 파이프라인은 무시한다
+    "product_no", "category_path", "gallery_count", "options",
+    # 주간 갱신(weekly_update.py)이 채운다 — 매장이 내린 상품(연속 2주 목록에서 사라지고 상세 404). 지난 상품에 두되 링크가 죽었다는 표시
+    "delisted", "last_seen",
+    # 상세가 아예 없는 상품 — 상세 그림 0 이고 설명도 50자 미만. 매장 페이지에 정말로 아무것도 없다
+    # (품절된 옛 상품이 대부분). 지우지 않고 표시만 한다: 앱 목록과 수집률 분모에서 빼고 레코드는 남긴다
+    # — 지워도 다음 주간 갱신이 목록에서 다시 주워 오고, 「지난 상품」 탭에는 이름·가격·대표컷이면 충분하다.
+    "detail_empty",
+    # 정가 · 할인가(price_pair 주석 — 사람 2026-10-02 「할인가도 따로 받자. 앱엔 정가 줄긋고 할인가 표시」).
+    # price 열은 예전 뜻(수집기가 적은 값) 그대로 둔다 — 1,000원 아래 · 자리표시 값 거르기가 그 열을 본다.
+    "list_price", "sale_price",
+]
+CATEGORY_LABEL = {"tops": "Tops", "outer": "Outerwear", "bottoms": "Pants", "dress": "Dresses", "skirt": "Skirts",
+                  "shoes": "Shoes", "bags": "Bags", "accessories": "Accessories", "suiting": "Suiting",
+                  "headwear": "Headwear", "jewelry": "Jewelry", "lifestyle": "Lifestyle", "pet": "Pet", "kids": "Kids", "other": ""}
+
+
+# 카페24가 매장을 만들 때 얹어 주는 견본 상점. 여기 상품은 「NYLON BACKPACK」·「REGULAR FIT
+# HOODIE」가 전부 28,000원인 카페24 기본 샘플이라 브랜드 상품이 아니다(2026-09-05 사람 지적:
+# low-classic 목록에 ecudemo199138.cafe24.com 9벌이 섞여 있었다).
+DEMO_HOST = re.compile(r"^(?:ecudemo\d*|sample\d*|demo\d*|test\d*)\.cafe24\.com$", re.I)
+
+
+def host_of(url: str) -> str:
+    return urlparse(url or "").netloc.lower()
+
+
+def registrable(host: str) -> str:
+    p = host.split(".")
+    return ".".join(p[-2:]) if len(p) >= 2 else host
+
+
+def shop_host(url_or_host: str) -> str:
+    """매장을 가리키는 주소 한 벌 — www·en·m 같은 앞머리만 떼고 나머지는 그대로 둔다.
+
+    registrable() 은 뒤 두 마디를 자르는데, 한국 매장은 거의 다 .co.kr 이라 그것만으로는
+    전부 「co.kr」 한 덩어리가 된다(씨앗 207곳 중 대부분). 매장을 가릴 잣대로는 못 쓴다.
+    """
+    h = url_or_host
+    if "//" in h:
+        h = host_of(h)
+    h = h.lower().strip()
+    for pre in ("www.", "en.", "m.", "kr."):
+        if h.startswith(pre):
+            h = h[len(pre):]
+    return h
+
+
+def seed_host_owner() -> dict[str, str]:
+    """씨앗 매장 주소 → 그 주소의 임자 slug. 별명 매장을 가려낼 때 쓴다."""
+    out: dict[str, str] = {}
+    if not BRANDS_CSV.exists():
+        return out
+    with BRANDS_CSV.open(encoding="utf-8-sig") as f:
+        for r in csv.DictReader(f):
+            h = shop_host(r.get("official_url") or "")
+            if h and h not in out:
+                out[h] = r["slug"]
+    return out
+
+
+SEED_HOST_OWNER = seed_host_owner()
+
+
+def seed_slugs() -> set[str]:
+    """씨앗에 적힌 매장 slug. **씨앗에서 뺀 매장은 상품표에도 안 넣는다.**
+
+    여태 상품표는 `crawl/*.jsonl` 을 통째로 훑었다. 그래서 씨앗에서 매장을 빼도 이미 받아 둔
+    수확이 그대로 남아 앱까지 나갔다 — 브랜드 이름도 무드도 없이 slug 만 뜬다. 씨앗이 「우리가
+    다루는 매장 목록」인 이상 그쪽을 따르는 게 맞다.
+
+    원본은 지우지 않는다. 씨앗에 줄을 되돌려 놓으면 다음 판에서 그대로 돌아온다.
+    """
+    if not BRANDS_CSV.exists():
+        return set()
+    with BRANDS_CSV.open(encoding="utf-8-sig") as f:
+        return {r["slug"] for r in csv.DictReader(f) if r.get("slug")}
+
+
+def load_manual_items() -> dict[tuple[str, str], dict]:
+    """data/manual_items.csv — 사람이 열어 보고 고친 분류.
+
+    이름만으로는 못 가리는 것이 있다. diafvine 「D-113 "F.S.H"」는 모자인데 이름 어디에도
+    모자라는 말이 없다(2026-09-05 사람 확인). 어휘에 브랜드별 암호를 넣는 대신 여기 적는다.
+
+      브랜드, 상품번호, 분류, 품목, 왜
+    """
+    p = DATA / "manual_items.csv"
+    if not p.exists():
+        return {}
+    out = {}
+    for r in csv.DictReader(p.open(encoding="utf-8-sig")):
+        b, no = (r.get("브랜드") or "").strip(), (r.get("상품번호") or "").strip()
+        if no.startswith(b + "-"):
+            no = no[len(b) + 1:]        # 「alyss-969」꼴로 적힌 줄
+        if b and no:
+            out[(b, no)] = {"분류": (r.get("분류") or "").strip(), "품목": (r.get("품목") or "").strip()}
+    return out
+
+
+def load_qa_fix() -> dict[str, tuple[str, str]]:
+    """data/llm/qa.jsonl 품목 바꿈 — data/llm/qa_apply.json 의 (지금, 새) 종류만(코덱스 2차 확인 90% 넘음)."""
+    ap, qp = DATA / "llm" / "qa_apply.json", DATA / "llm" / "qa.jsonl"
+    if not ap.exists() or not qp.exists():
+        return {}
+    ok = {tuple(x) for x in json.loads(ap.read_text(encoding="utf-8")).get("pairs") or []}
+    news = {n for _, n in ok}
+    out = {}
+    for l in qp.read_text(encoding="utf-8").splitlines():
+        o = json.loads(l) if l.strip() else {}
+        x = o.get("out") or {}
+        if x.get("sub_ok") is False and x.get("conf") == "high" and x.get("sub") in news:
+            out[o["u"]] = x["sub"]
+    return {u: n for u, n in out.items()}, ok
+
+
+def load_override(name: str, col: str) -> dict[tuple[str, str], str]:
+    """data/<name> — 브랜드, 상품번호, <col>, 왜. 검수에서 틀렸다고 확인한 값이라 늘 이긴다(color_fix · gender_fix)."""
+    p = DATA / name
+    if not p.exists():
+        return {}
+    return {((r.get("브랜드") or "").strip(), (r.get("상품번호") or "").strip()): (r.get(col) or "").strip()
+            for r in csv.DictReader(p.open(encoding="utf-8-sig")) if (r.get(col) or "").strip()}
+
+
+def load_manual_colors() -> dict[tuple[str, str], str]:
+    """data/manual_colors.csv — 브랜드, 상품번호, 색. 이름 · 설명으로 대표색을 못 정한 상품에만 쓴다."""
+    p = DATA / "manual_colors.csv"
+    if not p.exists():
+        return {}
+    return {((r.get("브랜드") or "").strip(), (r.get("상품번호") or "").strip()): (r.get("색") or "").strip()
+            for r in csv.DictReader(p.open(encoding="utf-8-sig")) if (r.get("색") or "").strip()}
+
+
+def load_dropped() -> set[tuple[str, str]]:
+    """목록에서 뺄 상품 — 열리지 않는 것과 사람이 빼라고 한 것.
+
+    dead_products.csv   probe_dead.py 가 실제로 페이지를 열어 보고 적는다(회원 전용·404).
+    excluded_products.csv  사람이 보고 판단한 것(매장 전용, 옷이 아닌 부자재).
+
+    브랜드 이름을 코드에 적지 않는다 — 매장은 바뀌고, 규칙을 박아 두면 썩는다.
+    """
+    out: set[tuple[str, str]] = set()
+    # dead/<i>.csv — probe-dead.yml 이 몫마다 따로 쓴 것(2026-10-10)
+    for p in [DATA / "dead_products.csv", DATA / "excluded_products.csv", *sorted((DATA / "dead").glob("*.csv"))]:
+        if not p.exists():
+            continue
+        with p.open(encoding="utf-8-sig") as f:
+            for row in csv.DictReader(f):
+                b, no = (row.get("브랜드") or "").strip(), (row.get("상품번호") or "").strip()
+                if b and no:
+                    out.add((b, no))
+    return out
+
+
+
+
+IMG_YM = re.compile(r"/(20[12]\d)(0[1-9]|1[0-2])/")
+
+
+def season_from_image_date(rows: list[dict]) -> int:
+    """대표 사진 주소에 박힌 업로드 연월로 시즌을 채운다 — 브랜드마다 먼저 맞혀 보고서.
+
+    cafe24 는 사진을 `/web/product/big/202408/…` 로 넣는다. 그 연월이 곧 등록 시점이다.
+    시즌을 아는 11,183벌에 대 보니 업로드 달이 뚜렷하게 갈렸다(2026-09-06 실측):
+      SS 는 2~5월이 68%, FW 는 8~10월이 71%. 7월은 둘 다 나와서 안 쓴다.
+
+    그런데 통째로 쓰면 78%밖에 안 맞는다. 옛 사진을 다시 쓰는 매장이 있기 때문이다
+    (kirsh 27.8% · margesherwood 29.6% · dnsr 41.9%). 시즌은 사람이 걸러 보는 값이라
+    다섯에 하나가 틀리면 안 쓰느니만 못하다.
+
+    그래서 브랜드마다 먼저 맞혀 본다. 이미 시즌을 아는 상품이 서른 벌 넘고 그 브랜드에서
+    95% 넘게 맞을 때만, 그 브랜드의 빈 시즌을 채운다. 지금 여섯 곳이 통과한다 —
+    grove 100% · easy-no-easy 100% · beslow 100% · sinoon 99.5% ·
+    the-coldest-moment 99.4% · rssc 99.0%. 1,549벌을 채운다.
+
+    스스로 재고 스스로 물러난다 — 어떤 매장이 옛 사진을 다시 쓰기 시작하면 그 브랜드는
+    다음 판에서 95% 아래로 떨어져 저절로 빠진다. 브랜드 이름을 코드에 적지 않는다.
+    """
+    def guess(url: str) -> str | None:
+        m = IMG_YM.search(url or "")
+        if not m:
+            return None
+        y, mo = int(m.group(1)), int(m.group(2))
+        if mo in (2, 3, 4, 5):
+            return f"{y % 100:02d}SS"
+        if mo in (8, 9, 10):
+            return f"{y % 100:02d}FW"
+        return None
+
+    score: dict[str, list[int]] = {}
+    for r in rows:
+        g = guess(r.get("image_url"))
+        if not g or not r.get("season"):
+            continue
+        sc = score.setdefault(r["brand_slug"], [0, 0])
+        sc[g == r["season"]] += 1
+    trusted = {b for b, (bad, ok) in score.items() if ok + bad >= 30 and ok / (ok + bad) >= 0.95}
+    filled = 0
+    for r in rows:
+        if r.get("season") or r["brand_slug"] not in trusted:
+            continue
+        g = guess(r.get("image_url"))
+        if g:
+            r["season"] = g
+            filled += 1
+    if trusted:
+        print("사진 날짜로 시즌을 채운 브랜드: "
+              + ", ".join(f"{b} {score[b][1]}/{sum(score[b])}" for b in sorted(trusted)), file=sys.stderr)
+    return filled
+
+
+def fill_season_gaps(rows: list[dict], extra_anchors: list[dict] | None = None) -> int:
+    """번호 사이를 메운다 — 위아래 기둥의 시즌이 같을 때만.
+
+    cafe24 는 상품을 등록 순서대로 번호 매긴다. 시즌을 아는 상품을 기둥 삼아 정렬해 보면
+    23개 브랜드 전부에서 번호가 커질수록 시즌이 최신이었다(뒤집힘 0~10.6%, 2026-09-06).
+    그래서 어떤 상품의 번호가 「24SS 기둥」과 「24SS 기둥」 사이에 있으면 그 사이에 등록된
+    것이므로 24SS 다. 위아래가 다른 시즌이면(경계) 비워 둔다.
+
+    홀드아웃(아는 것을 하나씩 빼고 맞히기): 맞음 8,564 · 틀림 168 = 98.1%.
+    틀린 것도 전부 이웃한 시즌이다(26SS→25FW 12 · 26FW→25FW 11). 2,519벌을 더 채운다.
+
+    매장이 적은 등록일은 우리가 안 받아 온다. crawled_at 은 우리가 긁은 날이라
+    (2026-09-02 25,903 · 09-05 12,423) 시즌으로 못 쓴다.
+    """
+    import bisect
+    by_brand: dict[str, list[dict]] = {}
+    for r in rows:
+        if str(r.get("product_no") or "").isdigit():
+            by_brand.setdefault(r["brand_slug"], []).append(r)
+    filled = 0
+    extra: dict[str, list[dict]] = {}
+    for r in extra_anchors or []:      # 목록에서 뺀 글의 시즌 — 기둥으로만 쓴다
+        extra.setdefault(r["brand_slug"], []).append(r)
+    for b, rs in by_brand.items():
+        anchors = sorted((int(r["product_no"]), r["season"]) for r in rs + extra.get(b, []) if r.get("season"))
+        if len(anchors) < 10:
+            continue
+        for r in rs:
+            if r.get("season"):
+                continue
+            no = int(r["product_no"])
+            i = bisect.bisect_left(anchors, (no, ""))
+            lo = anchors[i - 1] if i > 0 else None
+            hi = anchors[i] if i < len(anchors) else None
+            if lo and hi and lo[1] == hi[1]:
+                r["season"] = lo[1]
+                filled += 1
+    return filled
+
+
+def length_is_placeholder(rows: list[dict]) -> bool:
+    """이 매장의 총장이 실측인가, 매번 같은 수를 주워 온 것인가.
+
+    saintpain 은 실측표 499개가 **전부 똑같다** — `{"length": [50.0]}`. 파서가 페이지
+    어딘가의 「50」을 상품마다 주워 온 것이지 옷을 잰 값이 아니다. 옛 문턱(<50)은
+    50.0 을 안 집어서 우연히 조용했는데, 문턱을 57 로 올리자 391벌이 통째로 여성이 됐다.
+    「얻은 것을 한 벌씩 열어 봐야 한다」로 잡았다.
+
+    잣대는 **값의 가짓수**다. 스무 벌 넘게 쟀는데 값이 한 가지뿐이면 그건 잰 게 아니다.
+    전수로 이 잣대에 걸리는 매장은 saintpain 하나고, 절반 넘게 한 값에 몰린 다른 두 곳
+    (legacy 69% · helet 53%)은 값이 10~11가지라 안 걸린다 — 진짜 비슷한 옷을 파는 것이다.
+    """
+    seen = set()
+    for d in rows:
+        v = top_length(d.get("size_table"))
+        if v is not None:
+            seen.add(v)
+            if len(seen) > 1:
+                return False
+    return len(seen) == 1 and sum(
+        1 for d in rows if top_length(d.get("size_table")) is not None) >= 20
+
+
+# ─── 치수 조합으로 성별 가리기 — 매장 안에서만 배운다 ─────────────────────────────
+#
+# 「남녀 둘 다 파는」 브랜드 옷 18,147벌이 아무 층도 말하지 않아 브랜드 값(유니섹스)을 그대로 받는다.
+# 같은 브랜드에서 매장이 성별 칸에 넣어 둔 옷을 세면 남성 7,725 · 여성 7,479 · 유니섹스 849벌이라
+# 대부분 한쪽 옷이다(2026-09-27 전수). 남은 단서 가운데 **구매 옵션의 치수 조합**이 매장 안에서는 선다:
+#
+#     tonywack 하의가 「28·30·32·34」면 늘 남성 칸, 「S·M」이면 늘 여성 칸 … 처럼
+#
+# 잣대는 매장이 성별 칸에 넣어 둔 옷(이름·설명이 아무 말도 안 한 것만)이다. 같은 상품의 색 형제가
+# 양쪽에 갈리지 않게 상품 묶음(브랜드 + 이름 앞 네 낱말)으로 반을 갈라 한쪽에서 배우고 다른 쪽에서 쟀다:
+#
+#     매장 × 갈래 × 치수 조합   맞힘 99.63% · 99.77% (5,651벌 · 4,829벌 중 틀림 21 · 11)
+#     매장 공통 치수 조합       맞힘 93.8 ~ 99.7% — 매장을 반으로 갈라 재면 흔들린다. **안 쓴다**
+#
+# 공통 규칙이 무너지는 까닭: 「M·L·XL」이 한 매장에서는 늘 남성, 다른 매장에서는 여성이다.
+# 조건 — 한 칸(매장 × 갈래 × 치수 조합)에 정답지 10벌 이상 · 서로 다른 상품 5묶음 이상 · 한쪽 99% 이상.
+# 매장이 남녀 칸에 둘 다 넣은 공용 옷도 반례로 센다(공용이 1%만 넘어도 그 칸은 규칙이 안 된다).
+# 브랜드 값을 그대로 받은 옷에만 쓰고, 다른 층이 이미 말한 옷은 건드리지 않는다.
+#
+# 모르는 것 하나: 규칙을 쓰는 옷은 매장이 성별 칸에 **아예 안 넣은** 옷이다. 그런 옷에 공용이
+# 더 몰려 있다면 실제 맞힘은 위 숫자보다 낮다 — 지금 자료로는 못 잰다. 그래서 바뀐 옷 2,185벌에서
+# 매장별로 고르게 40벌을 뽑아 사진으로 봤다(2026-09-27): 착용 컷으로 가를 수 있던 26벌은 전부 규칙과
+# 같은 쪽이었고, 어긋난 옷은 0벌. 나머지 14벌은 착용 컷이 없거나 애매했다. 26벌에 0벌이면 잘못이
+# 11%를 넘지 않는다는 정도만 말해 준다 — 99%를 보인 것은 위의 가른 시험이다.
+_SIZESET_TOKEN = re.compile(
+    r"^(?:XXS|XS|S|M|L|XL|XXL|XXXL|2XL|3XL|FREE|F|OS|ONE ?SIZE|SMALL|MEDIUM|LARGE|X-?LARGE|"
+    r"[0-6]|2[2-9]|3[0-9]|40|44|55|66|77|88|8[05]|9[05]|10[05]|11[05])$", re.I)
+_SIZESET_NORM = {"SMALL": "S", "MEDIUM": "M", "LARGE": "L", "X-LARGE": "XL", "XLARGE": "XL", "2XL": "XXL",
+              "3XL": "XXXL", "F": "FREE", "OS": "FREE", "ONE SIZE": "FREE", "ONESIZE": "FREE"}
+SIZE_SET_MIN_ROWS = 10
+SIZE_SET_MIN_FAMILIES = 5
+SIZE_SET_MIN_SHARE = 0.99
+
+
+def size_signature(options) -> tuple[str, ...] | None:
+    """구매 옵션에서 치수만 뽑아 정렬한 묶음. 색 이름·안내 문구는 버린다. 치수가 없으면 None."""
+    toks = set()
+    for o in options or ():
+        t = re.sub(r"\s*\(.*?\)|\[.*?\]", "", str(o)).strip().upper()
+        t = re.sub(r"^SIZE\s*", "", t)
+        if _SIZESET_TOKEN.match(t):
+            toks.add(_SIZESET_NORM.get(t, t))
+    return tuple(sorted(toks, key=lambda z: (len(z), z))) or None
+
+
+def _size_family(slug: str, name: str) -> str:
+    n = re.sub(r"[\(\[].*?[\)\]]", "", name.lower())
+    return slug + "|" + " ".join(re.sub(r"[^a-z가-힣]+", " ", n).split()[:4])
+
+
+def size_set_gender(rows: list[dict], meta: dict[tuple[str, str], tuple[bool, str | None]]) -> int:
+    """브랜드 값을 그대로 받은 옷을 그 매장의 치수 조합 규칙으로 가른다. 바꾼 벌 수를 돌려준다."""
+    def key(r):
+        if r["category_code"] not in APPAREL_CODES:
+            return None
+        sig = size_signature([o for o in (r.get("options") or "").split(" | ") if o])
+        return (r["brand_slug"], r["category_code"], sig) if sig else None
+    count: dict = collections.defaultdict(collections.Counter)
+    fams: dict = collections.defaultdict(set)
+    for r in rows:
+        m = meta.get((r["brand_slug"], str(r["product_no"])))
+        k = key(r)
+        if not m or not m[1] or not k:
+            continue
+        count[k][m[1]] += 1
+        fams[k].add(_size_family(r["brand_slug"], r["name"]))
+    rules = {}
+    for k, c in count.items():
+        g, n = c.most_common(1)[0]
+        total = sum(c.values())
+        if (g != "UNISEX" and total >= SIZE_SET_MIN_ROWS and len(fams[k]) >= SIZE_SET_MIN_FAMILIES
+                and n / total >= SIZE_SET_MIN_SHARE):
+            rules[k] = g
+    changed = 0
+    for r in rows:
+        m = meta.get((r["brand_slug"], str(r["product_no"])))
+        if not m or not m[0]:
+            continue
+        g = rules.get(key(r))
+        if g and r["gender_target"] != g:
+            r["gender_target"] = g
+            changed += 1
+    return changed
+
+
+# ─── 남성복 실측의 큰 총장 차이 → 유니섹스 ───
+#
+# 사람이 짚어 준 잣대다(2026-10-04): 「남성복은 총장이 68 70 72 74 처럼 조금씩 일정하게 커진다 · S 58 → M 66 처럼 한 칸에
+# 크게 뛰면 여성 치수와 남성 치수를 한 표에 담은 남녀 공용이다」. 코덱스가 글 근거로만 판정했다(부탁 286~295, 2026-10-03):
+#     브랜드 기본값 남성인 후보 판정 8벌 → 유니섹스 6 · 남성 1 · 여성 1
+#     브랜드 기본값 여성인 후보 판정 23벌 → 유니섹스 10 · 여성 11 · 남성 2   ← 반반이라 안 쓴다
+# 그래서 **남성만** 바꾼다. 남성 → 유니섹스는 틀려도 남성 필터에 그대로 남아 잃는 것이 적다.
+# 조건: 이름 · 설명 · 매장 칸이 아무 말도 안 해 브랜드 값을 받은 상의 · 아우터, 이웃한 두 치수 사이에 총장 ≥ 5cm 이고
+# 같은 자리에서 가슴(없으면 어깨)도 ≥ 3cm. 실측은 앞선 판의 data/product_sizes.json 을 쓴다(사이즈 단계가 CSV 다음이다).
+JUMP_LEN_CM = 5.0
+JUMP_WIDTH_CM = 3.0
+_JUMP_LEN_KEYS = ("총장", "총길이")
+_JUMP_WIDTH_KEYS = ("가슴", "가슴단면", "가슴둘레", "chest", "어깨", "어깨단면", "어깨너비", "shoulder")
+_JUMP_LABELS = {"Tops", "Shirts", "Knitwear", "Outerwear"}
+
+
+def length_jump(sizes: dict) -> bool:
+    L = next((sizes[k] for k in _JUMP_LEN_KEYS if sizes.get(k)), None)
+    W = next((sizes[k] for k in _JUMP_WIDTH_KEYS if sizes.get(k)), None)
+    if not L or not W or len(L) < 2 or len(L) != len(W):
+        return False
+    if not all(isinstance(x, (int, float)) for x in L + W) or not all(30 <= x <= 120 for x in L):
+        return False
+    return any(abs(b - a) >= JUMP_LEN_CM and abs(d - c) >= JUMP_WIDTH_CM
+               for a, b, c, d in zip(L, L[1:], W, W[1:]))
+
+
+def length_jump_unisex(rows: list[dict], meta: dict[tuple[str, str], tuple[bool, str | None]]) -> int:
+    path = DATA / "product_sizes.json"
+    if not path.exists():
+        return 0
+    try:
+        sz = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return 0
+    changed = 0
+    for r in rows:
+        if r.get("gender_target") != "MENSWEAR" or r.get("category") not in _JUMP_LABELS:
+            continue
+        m = meta.get((r["brand_slug"], str(r["product_no"])))
+        if not m or not m[0]:
+            continue
+        p = sz.get(r.get("source_url") or "")
+        if p and length_jump(p.get("sizes") or {}):
+            r["gender_target"] = "UNISEX"
+            changed += 1
+    return changed
+
+
+def _mark_basis(rows: list[dict], before: dict, basis_of: dict, label: str) -> None:
+    for r in rows:
+        k = (r["brand_slug"], str(r["product_no"]))
+        if before.get(k) != r["gender_target"]:
+            basis_of[k] = label
+
+
+# ─── 신발 사이즈 폭 → 성별 ───
+#
+# 신발은 mm 로 사이즈를 판다. 매장이 MEN/WOMEN 칸에 직접 넣은 판매중 신발로 쟀다(2026-10-04):
+#     사이즈가 250 이하에서 끝나면 여성   105/105
+#     사이즈가 250 이상에서 시작하면 남성   72/72
+#     240 이하부터 270 이상까지 걸치면 유니섹스(매장 한쪽 칸 14벌 — 한 칸에 둔 공용 신발)
+# 아무 층도 말하지 않아 브랜드 값을 받은 신발에만 쓴다(158벌이 바뀐다 — 유니섹스 → 남성 95 등).
+_SHOE_MM = re.compile(r"(?<!\d)(2[1-9]\d|30\d)(?!\d)")
+
+
+def shoe_gender(options: str) -> str | None:
+    v = [int(x) for o in (options or "").split("|") for x in _SHOE_MM.findall(o) if int(x) % 5 == 0]
+    if len(v) < 2:
+        return None
+    lo, hi = min(v), max(v)
+    if hi <= 250:
+        return "WOMENSWEAR"
+    if lo >= 250:
+        return "MENSWEAR"
+    if lo <= 240 and hi >= 270:
+        return "UNISEX"
+    return None
+
+
+def shoe_size_gender(rows: list[dict], meta: dict[tuple[str, str], tuple[bool, str | None]]) -> int:
+    changed = 0
+    for r in rows:
+        if r.get("category_code") != "shoes":
+            continue
+        m = meta.get((r["brand_slug"], str(r["product_no"])))
+        if not m or not m[0]:
+            continue
+        g = shoe_gender(r.get("options") or "")
+        if g and g != r["gender_target"]:
+            r["gender_target"] = g
+            changed += 1
+    return changed
+
+
+# 세부품목 정리(사람 결정 2026-10-09, 앱 세션 전달 — 「모양이 품목, 소재 · 무늬 · 봉제는 태그」 노션 10/5 원칙).
+# 분류 규칙(ITEM_TYPE_VOCAB)의 이름은 그대로 두고 카탈로그에 쓰는 이름만 여기서 바꾼다 — 사람 고침(manual_items)의 옛 이름도 같이 바뀐다.
+#   케이블니트 · 아가일니트 → 니트(무늬는 태그) · 하프집업니트 · 하프집업 낱말 든 니트집업 → 하프집업 · 폴로니트 · 피케 → 폴로
+#   니트원피스 → 길이별 원피스 · 라글란 → 반팔 · 롱슬리브(봉제 태그 래글런) · 데님(하의) → 데님팬츠 · 버뮤다 → 버뮤다팬츠
+#   스웨트팬츠 · 조거팬츠 · 트랙팬츠 → 트레이닝팬츠(바지 종류 태그는 남는다) · 파티그팬츠 → 퍼티그팬츠 · 재킷 → 자켓 · 트랙재킷 → 트랙자켓
+SUBTYPE_RENAME = {"케이블니트": "니트", "아가일니트": "니트", "하프집업니트": "하프집업", "폴로니트": "폴로", "피케": "폴로",
+                  "데님": "데님팬츠", "버뮤다": "버뮤다팬츠", "스웨트팬츠": "트레이닝팬츠", "조거팬츠": "트레이닝팬츠",
+                  "트랙팬츠": "트레이닝팬츠", "파티그팬츠": "퍼티그팬츠", "재킷": "자켓", "트랙재킷": "트랙자켓",
+                  # 바시티는 앱 칩 이름 그대로 「바시티/스타디움」(스카잔 포함 — 사람 결정 2026-10-10)
+                  "바시티": "바시티/스타디움",
+                  # 웨스턴은 요크 · 스냅 · 뾰족 덮개 디테일이지 모양이 아니다(사람 결정 2026-10-09) — tag_items 가 요크로 남긴다
+                  "웨스턴셔츠": "셔츠"}
+_RG_SHORT = re.compile(r"(?i)반팔|반소매|short\s*-?\s*sleeve|half\s*sleeve|s/s|(?<![a-z])ss(?![a-z])|하프\s*슬리브")
+
+
+# 로브코트는 품목이 아니다(사람 결정 2026-10-09, 앱 세션 전달) — 로브는 벨트로 여미는 디테일이고 이름이 「발마칸 로브 코트」 ·
+# 「CASHMERE SINGLE ROBE COAT」처럼 다른 코트 모양과 겹쳐 그 모양에서 빠졌다. 이름의 모양으로 보내고(발마칸 > 트렌치 > 더블 > 싱글),
+# 단서가 없으면 코트. 여밈은 tag_items 가 봉제 「랩」으로 남긴다. 「double-faced」는 원단 이름이라 더블 여밈이 아니다.
+_ROBE_SHAPE = (("발마칸", r"발마칸|balmacaan"), ("트렌치", r"트렌치|trench"),
+               ("더블코트", r"더블(?!\s*페이스)|double(?!\s*-?\s*face)"), ("싱글코트", r"싱글|single"))
+
+
+def final_subtype(item: str, name: str, url: str) -> str:
+    if item == "로브코트":
+        for sub, rx in _ROBE_SHAPE:
+            if re.search(rx, name or "", re.I):
+                return sub
+        return "코트"
+    if item == "니트집업" and re.search(r"(?i)half\s*-?\s*zip|하프\s*집", name or ""):
+        return "하프집업"
+    if item == "라글란":
+        if _RG_SHORT.search(name or ""):
+            return "반팔"
+        sl = _prev_len_of(url, "소매길이")
+        return "반팔" if sl is not None and sl < 35 else "롱슬리브"
+    if item == "니트원피스":
+        n = (name or "").lower()
+        if re.search(r"미니|mini", n):
+            return "미니원피스"
+        if re.search(r"미디|midi", n):
+            return "미디원피스"
+        if re.search(r"롱|맥시|long|maxi", n):
+            return "롱원피스"
+        tl = _prev_total_len(url)
+        if tl is None:
+            return "원피스"
+        return "미니원피스" if tl < 90 else ("미디원피스" if tl < 115 else "롱원피스")
+    return SUBTYPE_RENAME.get(item, item)
+
+
+_PREV_LEN: dict | None = None
+
+
+_PREV_SZ: dict | None = None
+
+
+def _prev_len_of(url: str, label: str) -> float | None:
+    """지난 판 product_sizes 의 한 칸 가운데 값 — 없으면 None."""
+    global _PREV_SZ
+    if _PREV_SZ is None:
+        p = CRAWL_DIR.parent / "product_sizes.json"
+        try:
+            _PREV_SZ = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            _PREV_SZ = {}
+    v = sorted(x for x in (((_PREV_SZ.get(url) or {}).get("sizes") or {}).get(label) or []) if isinstance(x, (int, float)))
+    return v[len(v) // 2] if v else None
+
+
+_PREV_TAGS: dict | None = None
+_PR_TROUSER = re.compile(r"(?i)trouser|트라우저|slack")
+_PR_SUIT = re.compile(r"(?i)tailored|테일러드|(?<![a-z])suit(?![a-z])|수트|정장|dress\s*pants|드레스\s*팬츠|set[\s-]*up\s*pants|셋업\s*팬츠")
+_PR_DENIM = re.compile(r"(?i)denim|데님|jean|(?<![가-힣])진(?![가-힣])")
+_PR_DENIM_NOT = re.compile(r"(?i)denim[\s-]*(?:waist|look|like|effect)|faux|trompe|wool|울|mesh|메쉬|leather|레더")
+
+
+_JK_FLEECE = re.compile(r"(?i)fleece|플리스|후리스")
+_JK_FLEECE_NOT = re.compile(r"(?i)lin(?:ed|ing|er)|라이닝|안감")
+_JK_HOOD = re.compile(r"(?i)hood|후드|후디")
+_JK_ZIP = re.compile(r"(?i)zip|집업|지퍼")
+_JK_SWEAT = re.compile(r"(?i)sweat|스웻|스웨트|terry|테리|(?<![a-z])rib(?:bed)?(?![a-z])")
+_JK_KNIT = re.compile(r"(?i)knit|니트")
+_JK_KNIT_NOT = re.compile(r"(?i)twill|트윌|denim|데님|knit\s*collar|니트\s*(?:카라|배색)|panel|패널")
+
+
+_HOOD_HALF = re.compile(r"(?i)half\s*-?\s*zip|하프\s*집|반\s*집업|quarter\s*-?\s*zip|1/4\s*zip")
+_HOOD_ZIP = re.compile(r"(?i)zip|집업|지퍼")
+
+
+def _hood_refine(name: str) -> str | None:
+    """「후드」인데 이름에 지퍼 — 「코위찬 집업 니트 후디」 · 「HOOD ZIP SWEAT」처럼 낱말이 사이에 끼면 사전이 못 잡는다
+    (판매중 247벌, 2026-10-18 검수). 하프집업이면 하프집업, 아니면 후드집업."""
+    n = name or ""
+    if not _HOOD_ZIP.search(n):
+        return None
+    return "하프집업" if _HOOD_HALF.search(n) else "후드집업"
+
+
+def _jacket_refine(name: str) -> str | None:
+    """「재킷 · 점퍼」 가운데 조직이 분명한 것(앱 세션 2026-10-17).
+    - 플리스: 이름에 fleece · 플리스 · 후리스(안감 · 라이너 뜻은 뺀다).
+    - 후드집업: 스웻 · 테리 · 립 조직에 후드 + 집업 · 후디 자켓.
+    - 니트집업: 니트에 집업(트윌 · 데님 몸판에 니트 배색은 뺀다).
+    셰르파 · 저지는 안감 · 트랙탑일 수 있어 그대로 둔다."""
+    n = name or ""
+    if _JK_FLEECE.search(n):
+        return None if _JK_FLEECE_NOT.search(n) else "플리스"
+    if _JK_SWEAT.search(n) and _JK_HOOD.search(n) and (_JK_ZIP.search(n) or re.search(r"(?i)hoodie\s*jacket|후디\s*자켓", n)):
+        return "후드집업"
+    if _JK_KNIT.search(n) and _JK_ZIP.search(n) and not _JK_KNIT_NOT.search(n):
+        return "니트집업"
+    return None
+
+
+def _synthetic_body(tag: dict) -> bool:
+    """혼용률 겉감(또는 구분 없는 첫 줄)의 첫 섬유가 나일론 · 폴리에스터 50% 넘으면 데님이 아니다 — 데님은 면으로 짠다.
+    cayl 「EQ Wide Pants / Denim Blue」(나일론 100 · 색 이름이 데님 블루)가 데님팬츠였다(사진 대조 2026-10-27)."""
+    for part in tag.get("mat") or []:
+        if (part.get("p") or "") in ("", "겉감", "몸판", "본체"):
+            v = part.get("v") or []
+            return bool(v) and v[0][0] in ("나일론", "폴리에스터") and float(v[0][1] or 0) > 50
+    return False
+
+
+def _pants_refine(name: str, url: str) -> str | None:
+    """「팬츠」를 데님 · 슬랙스로 옮길 근거가 분명할 때만 그 품목. 판매중 6,508벌 중 약 480벌(2026-10-10 상품표로 잼).
+    - 데님: 대표 소재가 데님이고 이름에 데님 · 진 낱말(「DENIM-WAIST WOOL TROUSERS」 · faux denim 은 뺀다) — 「Denim Balloon Pants」.
+    - 슬랙스: 이름에 tailored · suit · 정장 · 셋업 팬츠, 또는 대표 소재가 울 · 캐시미어이고 이름에 trouser 거나 턱 봉제.
+      나일론 · 폴리 「Trousers」는 트랙 바지일 수 있어 옮기지 않는다."""
+    global _PREV_TAGS
+    if _PREV_TAGS is None:
+        try:
+            _PREV_TAGS = json.loads((CRAWL_DIR.parent / "product_tags_full.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            _PREV_TAGS = {}
+    t = ((_PREV_TAGS.get(url) or {}).get("tags")) or {}
+    ma = (t.get("material") or [""])[0]
+    cons = set(t.get("construction") or [])
+    if ma == "데님" and _PR_DENIM.search(name) and not _PR_DENIM_NOT.search(name) and not _CORD.search(name) \
+            and not _synthetic_body(_PREV_TAGS.get(url) or {}):
+        return "데님"
+    if _PR_SUIT.search(name):
+        return "슬랙스"
+    if ma in ("울", "캐시미어") and (_PR_TROUSER.search(name) or cons & {"원턱", "투턱", "핀턱"}):
+        return "슬랙스"
+    return None
+
+
+_SET_NAME = re.compile(r"(?i)\bset\b|set[\s-]*up|셋업|세트|\+")
+_SKIRT_PANTS = re.compile(r"(?i)skirt[\s-]*pants?|pants?[\s-]*skirt|스커트\s*팬츠|팬츠\s*스커트")
+
+
+def _prev_labels(url: str) -> set:
+    """지난 판 product_sizes 에서 이 상품 표의 칸 이름들."""
+    _prev_len_of(url, "총장")   # _PREV_SZ 를 채운다
+    return set(((_PREV_SZ or {}).get(url) or {}).get("sizes") or {})
+
+
+def _prev_total_len(url: str) -> float | None:
+    """지난 판 product_sizes 의 총장 가운데 값(사이즈 줄의 중간) — 없으면 None."""
+    global _PREV_LEN
+    if _PREV_LEN is None:
+        p = CRAWL_DIR.parent / "product_sizes.json"
+        _PREV_LEN = {}
+        try:
+            for u, e in json.loads(p.read_text(encoding="utf-8")).items():
+                v = sorted(x for x in ((e or {}).get("sizes") or {}).get("총장") or [] if isinstance(x, (int, float)))
+                if v:
+                    _PREV_LEN[u] = v[len(v) // 2]
+        except (OSError, ValueError):
+            pass
+    return _PREV_LEN.get(url)
+
+
+def _representative_image(d: dict, img_uses: Counter) -> str:
+    """브랜드 안에서 10벌 이상 쓰는 공용 그림은 갤러리로 대체한다(기존 CSV 규칙)."""
+    img = d.get("image_url", "")
+    if not img or img_uses[img] >= 10:
+        gal = [g for g in d.get("gallery", []) if img_uses.get(g, 0) < 10]
+        img = gal[0] if gal else ""
+        d["image_url"] = img
+    return img
+
+
+def build_csv(brand_gender: dict[str, str]) -> tuple[int, dict]:
+    import product_desc
+    rows = []
+    gender_meta: dict[tuple[str, str], tuple[bool, str | None]] = {}
+    basis_of: dict[tuple[str, str], str] = {}      # 성별을 정한 층 — gender_basis.json
+    per_brand: dict[str, int] = {}
+    seen_images: dict[str, list[tuple[str, set]]] = {}   # 대표컷 → [(매장, 이름 · 옵션의 색)]
+    dropped_dupe = 0
+    dropped_noimg = 0
+    dropped_junk = 0
+    season_anchors: list[dict] = []    # 목록에서 뺀 글의 시즌(fill_season_gaps 기둥으로만)
+    dropped_kidpet = 0
+    dropped_demo = 0
+    dropped_gone = 0
+    dropped_alias = 0
+    gal_of: dict[tuple, set] = {}
+    tbl_of: dict[tuple, str] = {}   # 같은 옷인지 가릴 때 실측표를 견준다
+    gone = load_dropped()
+    manual_items = load_manual_items()
+    qa_fix, qa_ok = load_qa_fix() or ({}, set())
+    qa_used = 0
+    manual_colors = load_manual_colors()
+    color_fix = load_override("color_fix.csv", "색")
+    gender_fix = {k: {"W": "WOMENSWEAR", "M": "MENSWEAR", "U": "UNISEX"}.get(v, v)
+                  for k, v in load_override("gender_fix.csv", "성별").items()}
+    _rf = DATA / "rep_image_fix.json"
+    rep_fix = json.loads(_rf.read_text(encoding="utf-8")) if _rf.exists() else {}   # 대표 사진이 색 칩이면 갤러리 사진(check_rep_images.py)
+    seeded = seed_slugs()
+    dropped_unseeded: dict[str, int] = {}
+    for path in sorted(CRAWL_DIR.glob("*.jsonl")):
+        if path.name.startswith("_"):
+            continue
+        slug = path.stem
+        if seeded and slug not in seeded:
+            dropped_unseeded[slug] = sum(1 for _ in path.open(encoding="utf-8"))
+            continue
+        # 같은 product_no 가 여러 줄이면 마지막 줄이 이긴다 — 다시 받은 행이 뒤에 붙는다.
+        latest: dict[int, dict] = {}
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                d = json.loads(line)
+            except Exception:
+                continue
+            latest[d["product_no"]] = d
+        # 사이트 공용 이미지 판정 — 한 브랜드 안에서 같은 그림을 여러 상품이 물면 그건 상품 사진이
+        # 아니다(dunst 의 LINK_0831.jpg 1,759건). 경로(/web/product/)로 가르면 depound 처럼
+        # 자기 CDN(depound.cafe24.com/img/…)을 쓰는 매장의 진짜 사진 107장이 빠진다(2026-09-02).
+        # 총장이 실측이 아니라 자리표시인 매장에서는 총장·어깨 규칙을 끈다
+        len_bad = length_is_placeholder(list(latest.values()))
+        # 그림에서 읽어 둔 상품 글 — 매장 글이 찌꺼기뿐일 때 이걸로 메운다
+        mined: dict[str, dict] = {}
+        mp = CRAWL_DIR / "detail" / f"{slug}.jsonl"
+        if mp.exists():
+            for ln in mp.read_text(encoding="utf-8").splitlines():
+                try:
+                    m = json.loads(ln)
+                except Exception:
+                    continue
+                mined[str(m.get("product_no"))] = m
+        img_uses = collections.Counter(d.get("image_url", "") for d in latest.values())
+        # 한 브랜드는 제 도메인 하나(또는 en.· /shopN/ 같은 같은 도메인의 변형)를 쓴다.
+        # 다른 도메인이 소수로 끼어 있으면 그건 훑다가 흘러든 남의 매장이다.
+        host_uses = collections.Counter(host_of(d.get("source_url") or "") for d in latest.values())
+        main_reg = registrable(host_uses.most_common(1)[0][0]) if host_uses else ""
+        stray = {h for h, n in host_uses.items()
+                 if h and (DEMO_HOST.match(h)
+                           or (registrable(h) != main_reg and n / max(1, len(latest)) < 0.05))}
+        if stray:
+            print(f"[{slug}] 남의 매장에서 온 행을 뺀다: "
+                  + ", ".join(f"{h} {host_uses[h]}건" for h in sorted(stray)), file=sys.stderr)
+        # 씨앗의 official_url 이 다른 씨앗 매장의 별명인 경우 — 그 매장 상품을 통째로 한 번 더
+        # 받아 온다. 두 slug 이 같은 source_url 을 갖게 되니 주소를 열쇠로 쓰는 곳이 전부
+        # 부딪힌다(사이즈·태그, 그리고 공용 DB). 한 매장이 제 도메인의 canonical·sitemap 으로
+        # 다른 매장을 가리키면 크롤은 그대로 따라갈 수밖에 없다 — 여기서 걸러야 한다.
+        # 도메인 임자가 이긴다. 임자가 씨앗에 없으면 손대지 않는다(제 매장을 딴 도메인에
+        # 올린 곳이 있어서, 모르면 지우지 않는다).
+        main_host = shop_host(host_uses.most_common(1)[0][0]) if host_uses else ""
+        owner = SEED_HOST_OWNER.get(main_host)
+        if owner and owner != slug:
+            print(f"[{slug}] official_url 이 {main_host}(씨앗의 {owner})의 별명이다 — "
+                  f"{len(latest)}건이 그 매장과 같은 주소라 이번 판에서 통째로 뺀다. "
+                  f"brands_seed 의 official_url 을 확인하라.", file=sys.stderr)
+            dropped_alias += len(latest)
+            continue
+        # 값이 통째로 1,000 아래면 그건 룩북이 아니라 외화 매장이다 — xlim 을 en.xlim.link
+        # (cafe24 shop6, USD)로 훑은 탓에 921건 중 902건이 「90원」으로 들어와 아래 룩북 문턱에
+        # 전멸했다(2026-09-04). 통화가 원이 아닌 매장은 걸러 낼 게 아니라 다시 받아야 한다.
+        cheap = sum(1 for d in latest.values()
+                    if int(d.get("price") or 0) <= 1000 and not d.get("price_missing"))
+        if len(latest) >= 20 and cheap / len(latest) > 0.8:
+            print(f"[{slug}] 가격 {cheap}/{len(latest)}건이 1,000 이하 — 외화 매장(en.*, /shopN/)을 "
+                  f"훑은 게 아닌지 brands_seed 의 official_url 을 확인하라. 이번 판에서는 통째로 뺀다.",
+                  file=sys.stderr)
+            continue
+        for d in latest.values():
+            # 상품이 아닌 행 — 룩북·캠페인 페이지가 가격 1원으로 /product/ 에 들어 있다
+            # (dunst 「19 SPRING 'Here We Are'」 = 1원). build_products_seed.py 와 같은 문턱.
+            if (slug, str(d["product_no"])) in gone:
+                dropped_gone += 1     # 안 열리는 페이지·사람이 뺀 것
+                continue
+            if host_of(d.get("source_url") or "") in stray:
+                dropped_demo += 1
+                continue
+            if int(d.get("price") or 0) <= 1000 and not d.get("price_missing"):
+                continue
+            # 상품 이름을 한 개인결제·룩북 페이지 — lecyto 「박민희 실장님 팀」 217건(가격 있음),
+            # insilence 「셀럽 테스트」, opus-0012 「2024 spring summer」. 이름만으로 갈린다.
+            if (PACKAGING.search(d["name"] or "")
+                    and 0 < int(d.get("price") or 0) <= PACKAGING_MAX):
+                dropped_junk += 1
+                continue
+            if JUNK_NAME.search(d["name"]) or not_a_product(d["name"]):
+                # not_a_product 는 값 없는 페이지를 가르려고 만든 것인데, 값이 있는 행에도
+                # 태워 둔다. 지금 38,341벌 가운데 셋만 걸리고 그 셋이 divein 의
+                # 「25 SUMMER」·「25 FALL」·「25 FALL 2ND」— 값이 「2025」인 룩북이다
+                # (연도를 값으로 읽었다). 앞으로 같은 게 새로 들어오면 여기서 막힌다.
+                dropped_junk += 1
+                continue
+            # 열 상품 넘게 같은 그림이면 매장 공용 이미지다. 그보다 적으면 색만 다른 같은 옷이
+            # 대표컷 한 장을 나눠 쓰는 것이라 아래에서 첫 행만 남긴다(컬러웨이는 대개 2~6개).
+            img = _representative_image(d, img_uses)
+            if not img:
+                # 사진이 하나도 없는 행은 앱이 보여줄 수 없다 — 상품이 아닌 행이 대부분이다
+                # (lecyto 「○○ 실장님 팀」 217건, insilence 「셀럽 테스트」 44건). jsonl 에는 남는다.
+                dropped_noimg += 1
+                continue
+            # 대표컷이 같아도 **매장이 이름에 서로 다른 색을 적었으면** 다른 상품이다 — rough-side
+            # 「24FW 울 필드 팬츠 차콜」 1150 과 「… 다크 네이비」 1149, 「24FW 인슐레이션 팬츠 블랙」 1200 과
+            # 「… 차콜」 1199 는 대표컷 한 장을 나눠 쓰는 두 색이라 뒤의 색이 목록에서 사라졌다
+            # (창고 전수 대표컷 중복 1,263행 가운데 색이 갈리는 것은 이 둘뿐, 2026-10-01). 색을 모르면
+            # (빈칸) 예전처럼 중복으로 본다. 여러 색(「블랙·차콜」)은 **하나라도 겹치면** 같은 옷으로 본다 —
+            # nilby-p 「[라스트피스] 23SN basic pullover [PK]」(핑크)는 「23SN basic pullover [3colors]」
+            # (옐로우·핑크·블랙)의 남은 한 벌이다. 글자로만 견줬더니 이런 마지막 한 벌 · B품 · 세트 판매
+            # 46행이 되살아나 같은 옷이 둘 섰다. 옵션에 적힌 색도 그 옷의 색으로 친다 — legacy 「풀밴딩 이지
+            # 팬츠 … 4 color 리퍼브 상품」 389 는 대표색이 설명에서 읽힌 베이지 하나지만 옵션으로 블랙도 팔아,
+            # 「S/S 풀밴딩 이지 팬츠 - 블랙」 395 와 같은 옷이다(표 · 사진이 같다). 다른 매장끼리는 색을 안
+            # 본다 — 겹치는 것은 imweb 의 「thumb_error.png」 같은 자리표시 그림이다.
+            c_img = {c for c in pick_color(d["name"], d.get("description", ""), d.get("spec"),
+                                           d.get("options")).split("·") if c}
+            c_img |= {c for c in (field_color(str(o)) for o in d.get("options") or [] if "선택" not in str(o)) if c}
+            prior = seen_images.get(img)
+            if prior is not None and any(ps != slug or not pc or not c_img or pc & c_img for ps, pc in prior):
+                dropped_dupe += 1     # 같은 옷이 같은 대표컷을 쓰는 경우 — 첫 행만(build_products_seed 와 같은 판단)
+                continue
+            seen_images.setdefault(img, []).append((slug, c_img))
+            # 옛 창고 줄에는 이름에 태그가 남아 있다 — 이름 파서에 _strip_tags 가 붙기 전에
+            # 받은 것이고, 상세 보정은 설명·사이즈만 갱신하고 이름은 손대지 않는다
+            # (lmood 「<span>화란 세미오버 가디건</span> <span>BLACK</span>」, 2026-09-07).
+            # 갈래를 정하기 전에 한 번 더 턴다 — 앱에 태그가 그대로 뜨고 있었다.
+            d["name"] = _strip_tags(d["name"])
+            code = classify_category(d["name"], d.get("category_names", []), d.get("description", ""),
+                                     d.get("options"))
+            fix = manual_items.get((slug, str(d["product_no"])))
+            if fix and fix.get("분류"):
+                code = fix["분류"]      # 사람이 열어 보고 고친 분류가 이긴다
+            # 잡화는 잡화 어휘로 품목을 매긴다 — 옷 어휘를 태우면 「니트 스카프」가 니트가 된다
+            # 이름 맨 뒤 괄호는 색·소재를 적는 자리다 — classify_category 는 이미 떼고 보는데
+            # 여기서는 안 떼서 두 칸이 어긋났다. osoi 「SHOULDER BROCLE_SMALL [DENIM SKY]」는
+            # category_code 가 bags 인데 category 라벨이 Denim 이었다 — 앱은 라벨로 거르므로
+            # 가방이 청바지 칸에 떴다(23벌, 2026-09-06).
+            head_name = strip_trailing_color(_TRAIL_PAREN.sub("", d["name"]))
+            acc = match_acc(head_name) if code in ACC_TO_CATEGORY.values() else ""
+            # 이름에 잡화 낱말이 없고 설명글이 못박은 것(안경 · 지갑 · 키링 …)은 그 칸으로 — 갈래만 서고 품목이 빈칸이면
+            # 앱의 「아이웨어」 같은 칸에서 안 보인다(satur 안경 32벌, 2026-10-01). 갈래가 같을 때만 받는다.
+            if not acc and code in ACC_TO_CATEGORY.values() and not match_head(head_name, ITEM_TYPE_VOCAB):
+                da = declared_acc(d.get("description") or "")
+                if da and ACC_TO_CATEGORY.get(da) == code:
+                    acc = da
+            # 「웨스턴 세미 부츠컷」은 바지다. 갈래는 SHOE_FALSE 가 이미 막는데 품목은 안 막혀
+            # 여섯 벌이 하의 통에서 「부츠」로 서 있었다(앱 쪽 지적 2026-09-20). 낱말을 지우고
+            # 다시 고른다 — 지우기만 하면 「데님」·「팬츠」가 제 차례에 걸린다.
+            item_name = SHOE_FALSE.sub(" ", head_name)
+            item = acc or garment_head(item_name)
+            if not item and code in APPAREL_CODES:
+                item = cate_item(d.get("category_names") or [])   # 「Product. 66」 · 칸 「커브드 핏 진」(ader-error)
+            item = material_outer(item_name, item)
+            if fix and fix.get("품목"):
+                item, acc = fix["품목"], fix["품목"]
+            if not item and code == "suiting":
+                item = "수트셋업"   # 슈트 갈래는 자켓 + 바지 한 벌뿐이다(2026-10-23 판 13벌 모두)
+            if not item and code == "tops" and re.search(r"스웻|스웨트|sweat", head_name, re.I):
+                item = "맨투맨"   # 「Toy Sweat」처럼 품목 단어 없이 스웻만 적은 상의 — 비니·백팩은 code 가 다르니 안 걸린다
+            # 이름에 **부츠컷밖에 없는** 바지가 있다 — 「LOOSE BOOTCUT」·「에센셜 부츠컷 블랙진」.
+            # SHOE_FALSE 가 그 낱말을 지우고 나면 고를 것이 남지 않아 품목이 빈칸이 됐고,
+            # 그래서 앱의 핏 묶음이 안 잡혔다(앱 제보 2026-09-21, 17벌). 부츠컷은 그 자체로
+            # 바지를 가리키니 갈래가 하의일 때만 채운다 — 청바지 낱말이 있으면 데님이다.
+            if not item and code == "bottoms" and SHOE_FALSE.search(head_name):
+                item = "데님" if re.search(r"데님|denim|jean|진(?![가-힣])", head_name, re.I) else "팬츠"
+            # 이름에 반바지 낱말이 없는데 실측 총장이 60 아래인 긴 바지 품목은 반바지다(grove 「STRIPE PANTS」 28 · rolarola
+            # 「PAJAMA PANTS」 38 — 판매중 239벌, 앱 세션이 범위표로 찾음 2026-10-09). 실측은 지난 판 product_sizes 를 본다
+            # (이 단계가 사이즈보다 먼저 돈다). 사람 고침(manual_items)이 있으면 그것이 이긴다.
+            if item in _LONG_BOTTOM and not (fix and fix.get("품목")):
+                tl = _prev_total_len(d.get("source_url") or "")
+                if tl is not None and tl < 60:
+                    item = "숏팬츠"
+            # 이름에 품목 낱말이 없어 매장 칸(하의)만 보고 하의에 선 상품 — 지난 판 실측에 어깨 · 소매 · 화장이 있고 허리 ·
+            # 엉덩이 · 허벅지 · 밑위가 하나도 없으면 상의 표다(ader-error 「Product. 82」 · pog-service 「LAYERED SLEEVE」 ·
+            # sinoon 「Balloon Puff Layered Sleeve」, 판매중 하의 칸 빈 품목 중 상의 표 30여 벌, 2026-10-09). 세트 이름은 두 표가
+            # 섞일 수 있어 건드리지 않는다. 품목은 모르니 비워 두고 갈래만 옮긴다.
+            if not item and code == "bottoms" and not (fix and fix.get("분류")) and not _SET_NAME.search(d.get("name") or ""):
+                labs = _prev_labels(d.get("source_url") or "")
+                if labs & {"어깨", "소매길이", "화장"} and not labs & {"허리", "엉덩이", "허벅지", "밑위"}:
+                    code = "tops"
+            # 「스커트 팬츠 · 팬츠스커트」는 두 가지다 — 총장 30cm 대는 스코트(치마처럼 보이는 반바지)라 스커트, 총장 90cm 넘는 것은 긴 바지에
+            # 치마 자락을 겹친 바지다(nick-nicole · lartisan · arend · kirsh 「LAYERED · WRAP SKIRT PANTS」 총장 99~110이 롱스커트, 사진 대조 2026-10-27).
+            if ITEM_TO_CATEGORY.get(item) == "skirt" and _SKIRT_PANTS.search(d.get("name") or "") and not (fix and fix.get("품목")):
+                tl = _prev_total_len(d.get("source_url") or "")
+                if tl is not None and tl >= 90:
+                    item = "팬츠"
+                    if not (fix and fix.get("분류")):
+                        code = "bottoms"
+            # 잡화 갈래(가방 · 신발 · 모자 · 주얼리)에 옷 품목이 붙지 않게 — 「시어링 볼링백」의 무스탕, 「PUFFER LOW」(패딩 신발)의 패딩(2026-10-27).
+            if code in ("bags", "shoes", "headwear", "jewelry") and ITEM_TO_CATEGORY.get(item) not in (None, "shoes") \
+                    and not acc and not (fix and fix.get("품목")):
+                item = ""
+            # 뭉뚱그린 「팬츠」 가운데 근거가 분명한 것만 기존 세부품목으로(앱 세션 · 사람 확인 2026-10-10 — 하의 30%가 「팬츠」였다).
+            # 근거는 이름 + 지난 판 대표 소재 · 봉제 태그. 애매하면 팬츠로 둔다.
+            if item == "팬츠" and not (fix and fix.get("품목")):
+                item = _pants_refine(d.get("name") or "", d.get("source_url") or "") or item
+            if item == "후드" and not (fix and fix.get("품목")):
+                item = _hood_refine(head_name) or item
+            if item in ("재킷", "점퍼") and not (fix and fix.get("품목")):
+                item = _jacket_refine(head_name) or item
+                if code == "outer" and ITEM_TO_CATEGORY.get(item) == "tops" and not (fix and fix.get("분류")):
+                    code = "tops"
+            if int(d.get("price") or 0) >= PLACEHOLDER_PRICE:
+                dropped_junk += 1     # 자리표시 값 — 룩북·이벤트 페이지다
+                continue
+            cats = [c.strip() for c in (d.get("category_names") or []) if c.strip()]
+            if cats and all(EDITORIAL_CAT.match(c) or EDITORIAL_WEAK.match(c) for c in cats) \
+                    and any(EDITORIAL_CAT.match(c) for c in cats):
+                dropped_junk += 1     # 칸이 통째로 룩북 칸이다(amomento 「Projects」)
+                continue
+            if SEASON_ONLY_NAME.match(d["name"]):
+                dropped_junk += 1     # 시즌 표기뿐인 이름 — 룩북 장면이다
+                continue
+            # 값도 옵션도 없고, 이름에 옷·잡화 낱말이 없거나 룩북 이름인 것 — 매장 글이다.
+            # shirter 「LIBRARY」·「SHIRTER × MIZUNO (21FW)」, dunst 「Behind the Scenes」,
+            # belier 「INTERVIEW 01.」, facade-pattern 데님 가이드 「허벅지 발달형」, 인플루언서 착용
+            # 글(ronron 「엔믹스 릴리」·crump 「산다라박」) — 창고 전수로 2,038벌이었고 그 가운데
+            # 사이즈표가 있는 진짜 옷은 오타 이름(「Mechanician Jackcet」) 하나라, 크롤에 사이즈표가
+            # 있으면 남긴다(2026-09-26 사람 지시 「분류 오류 고쳐」).
+            # 「누구 | 무엇」 제목(noirer 「차은우 - TVN 여신강림 14회 | 오버핏 후드 더플 코트」 연예인 착용
+            # 글 24벌, mischief 「… | PHOTO RECAP」)은 옷 낱말이 있어도 글이다 — 값·옵션이 없을 때만.
+            if not int(d.get("price") or 0) and not d.get("options") and not d.get("size_table") \
+                    and (not item or LOOKBOOK_NAME.search(d["name"]) or POST_TITLE.search(d["name"])):
+                dropped_junk += 1
+                continue
+            if not int(d.get("price") or 0) and priceless_post(d, item, slug):
+                dropped_junk += 1     # 값 없는 룩북 칸 · 착용 글 · 연재 장면(priceless_post)
+                # 글이라도 등록 번호와 이름의 시즌(「EWM_26FW_…」)은 옆 상품의 시즌 기둥이다 — 빼면 mmlg 「ROAM LITE DOWN」 등
+                # 26벌이 시즌을 잃었다(2026-10-27 전후 대조). 기둥으로만 쓰고 목록에는 안 넣는다.
+                sea = season_of(d["name"], d.get("detail_images"), d.get("category_names"))
+                if sea and str(d.get("product_no") or "").isdigit():
+                    season_anchors.append({"brand_slug": slug, "product_no": str(d["product_no"]), "season": sea})
+                continue
+            if LOOKBOOK_NAME.search(d["name"]) and code == "other" and not acc:
+                dropped_junk += 1     # 룩북·에디토리얼·시즌 캠페인 — 상품이 아니다
+                continue
+            if code in ("kids", "pet", "lifestyle"):
+                # 아동복·반려동물 옷, 그리고 살림살이(머그컵·캔들·러그·블랭킷)는 목록에서 뺀다.
+                # 패션과 거리가 멀다(사람 지시 2026-09-05).
+                dropped_kidpet += 1
+                continue
+            # 데님은 category 라벨을 따로 둔다(기존 데이터 관례: category=Denim)
+            label = ("Denim" if item == "데님"
+                     else "Knitwear" if item in ("니트", "가디건", "케이블니트", "아가일니트")
+                     else "Shirts" if item in ("셔츠", "웨스턴셔츠")
+                     else CATEGORY_LABEL.get(code, ""))
+            # categories_seed.csv 의 depth-2 코드 — 앱이 「가방 > 숄더백」으로 훑을 자리다
+            sub_code = ACC_SUB_CODE.get(acc, "") if acc else ""
+            g_args = (d["name"], item,
+                      None if len_bad else top_length(d.get("size_table")),
+                      shoulder_width(d.get("size_table")), code,
+                      waist_span(d.get("size_table")),
+                      d.get("description") or "",
+                      d.get("detail_text") or "",
+                      d.get("options_all") or d.get("options") or [])
+            cats = d.get("category_names", [])
+            # 치수 조합 규칙(size_set_gender)이 쓸 두 가지: 이 옷이 브랜드 값을 그대로 받았나(「?」가 그대로
+            # 나오면 어느 층도 말하지 않은 것), 그리고 매장 칸이 정답지로 쓸 만한가(이름·설명이 말이 없을 때만).
+            gender_meta[(slug, str(d["product_no"]))] = (
+                classify_gender(cats, "?", *g_args) == "?",
+                cate_gender(cats) if classify_gender([], "?", d["name"], "", None, None, "", None,
+                                                     d.get("description") or "", d.get("detail_text") or "") == "?" else None)
+            _gb: list = []
+            # 사진 판정(qa) 품목 바꿈 — 코덱스 2차 확인을 통과한 종류만, 사람 고침이 있으면 그것이 이긴다(2026-10-18)
+            sub_final = final_subtype(item, d.get("name") or "", d.get("source_url") or "")
+            _q = qa_fix.get(d.get("source_url") or "")
+            if _q and (sub_final, _q) in qa_ok and not (fix and fix.get("품목")):
+                sub_final = _q
+                qa_used += 1
+            rows.append({
+                "brand_slug": slug,
+                "category_code": code,
+                "item_type": item,
+                "name": d["name"],
+                "gender_target": gender_fix.get((slug, str(d["product_no"])))
+                                 or classify_gender(cats, brand_gender.get(slug, "UNISEX"), *g_args, why=_gb),
+                "price": d["price"],
+                "representative_color": color_fix.get((slug, str(d["product_no"])))
+                                        or pick_color(d["name"], d.get("description", ""), d.get("spec"), d.get("options"))
+                                        or manual_colors.get((slug, str(d["product_no"])), ""),
+                "season": season_of(d["name"], d.get("detail_images"), d.get("category_names")),
+                "status": "SOLD_OUT" if (is_soldout(d) or d.get("delisted")) else "ON_SALE",
+                "image_url": rep_fix.get(d.get("source_url", ""), d["image_url"]),
+                # 회원 전용·리다이렉트로 홈 주소만 남은 건(badblood 208, haleine 14)은 cafe24 표준 상세 주소로 복원.
+                # 카페24 가 아닌 매장(platform 칸이 있는 줄)은 수집기가 적은 주소가 곧 상품 주소다 — 여기에 카페24
+                # 꼴을 붙여 렉토·Hyein Seo·PAF 710벌이 「…/products/x/product/detail.html?product_no=…」가 됐다(2026-09-23).
+                "source_url": d["source_url"] if (d.get("platform") or product_no_of(d["source_url"])) else f"{d['source_url'].rstrip('/')}/product/detail.html?product_no={d['product_no']}",
+                "crawled_at": d.get("crawled_at", ""),
+                "group": GROUP_OF.get(label, ""),
+                "category": label,
+                "subtype": sub_final,
+                "sub_code": sub_code,
+                "product_no": d["product_no"],
+                "category_path": " | ".join(d.get("category_names", [])),
+                "gallery_count": len(d.get("gallery", [])),
+                "options": " | ".join(dict.fromkeys(l for l in (split_option(o)[0] for o in d.get("options", [])) if l)),
+                "delisted": "1" if d.get("delisted") else "",
+                "last_seen": d.get("last_seen", ""),
+                # 「보여 줄 설명이 없다」 — 글자 수가 아니라 **옷 이야기가 있나**로 센다.
+                # 앞서는 길이로만 봤는데, cpgn-studio 처럼 매장 푸터가 1,000자씩 들어오는
+                # 곳이 전부 「설명 있음」이었다(2026-09-20).
+                "list_price": price_pair(d)[0] or "",
+                "sale_price": price_pair(d)[2] or "",
+                "detail_empty": "" if product_desc.best(d.get("description") or "",
+                                                        mined.get(str(d["product_no"])))[0] else "1",
+            })
+            # 상세 그림도 증거에 넣는다 — 매장이 갤러리는 다시 찍어 올리고 상세 그림은
+            # 그대로 쓰는 경우가 있다(2026-09-07: 중복 175묶음 중 51묶음이 그랬다).
+            gal_of[(slug, str(d["product_no"]))] = {
+                x for x in (d.get("gallery") or []) + (d.get("detail_images") or []) + [d.get("image_url")] if x}
+            tbl_of[(slug, str(d["product_no"]))] = json.dumps(d.get("size_table"), ensure_ascii=False, sort_keys=True) if d.get("size_table") else ""
+            per_brand[slug] = per_brand.get(slug, 0) + 1
+            basis_of[(slug, str(d["product_no"]))] = _gb[-1] if _gb else ""
+    url_of = {(r["brand_slug"], str(r["product_no"])): _url_stem(r.get("source_url") or "") for r in rows}
+    opt_of = {(r["brand_slug"], str(r["product_no"])): tuple(o.strip() for o in (r.get("options") or "").split("|") if o.strip())
+              for r in rows}
+    dropped_kidline = drop_kids_line(rows)
+    dropped_rerun = fold_reruns(rows, gal_of, tbl_of, url_of, opt_of, meas=_measurer(tbl_of))
+    _g0 = {(r["brand_slug"], str(r["product_no"])): r["gender_target"] for r in rows}
+    n_size = size_set_gender(rows, gender_meta)
+    _mark_basis(rows, _g0, basis_of, "치수 조합(매장 안)")
+    if n_size:
+        print(f"치수 조합(매장 안에서 배운 것)으로 성별 {n_size}벌을 정했다", file=sys.stderr)
+    _g0 = {(r["brand_slug"], str(r["product_no"])): r["gender_target"] for r in rows}
+    n_jump = length_jump_unisex(rows, gender_meta)
+    _mark_basis(rows, _g0, basis_of, "실측(총장 점프)")
+    if n_jump:
+        print(f"남성복 실측의 큰 총장 차이로 유니섹스 {n_jump}벌", file=sys.stderr)
+    _g0 = {(r["brand_slug"], str(r["product_no"])): r["gender_target"] for r in rows}
+    n_shoe = shoe_size_gender(rows, gender_meta)
+    _mark_basis(rows, _g0, basis_of, "신발 사이즈(mm)")
+    if n_shoe:
+        print(f"신발 사이즈 폭으로 성별 {n_shoe}벌", file=sys.stderr)
+    fill_season_gaps(rows, season_anchors)
+    # 번호 보간으로도 안 채워진 것은 사진 날짜로 한 번 더 — 브랜드마다 먼저 맞혀 보고서만.
+    n_img = season_from_image_date(rows)
+    if n_img:
+        print(f"사진 날짜로 시즌 {n_img}벌을 더 채웠다", file=sys.stderr)
+    if dropped_unseeded:
+        s = " · ".join(f"{k} {v:,}" for k, v in sorted(dropped_unseeded.items(), key=lambda x: -x[1]))
+        print(f"씨앗에 없는 매장 {len(dropped_unseeded)}곳을 상품표에서 뺀다 — {s} "
+              f"(원본은 그대로 둔다. 씨앗에 줄을 되돌리면 다음 판에 돌아온다)", file=sys.stderr)
+    # 옵션 칸은 다 쓴 뒤 파일에 쓰기 직전에 씻는다 — 위의 fold_reruns · size_set_gender 는 색까지 든 원래 옵션을
+    # 봐야 한다(app_options 주석).
+    for r in rows:
+        r["options"] = app_options(r.get("options") or "")
+    with OUT_CSV.open("w", encoding="utf-8-sig", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=CSV_FIELDS)
+        w.writeheader()
+        w.writerows(rows)
+    # 성별을 어느 층이 정했나 — 상품표 칸을 늘리지 않고 곁 파일로 둔다(앱 · 코파일럿 적재가 칸 수에 묶여 있다)
+    (DATA / "gender_basis.json").write_text(json.dumps(
+        {r["source_url"]: basis_of.get((r["brand_slug"], str(r["product_no"])), "") for r in rows if r.get("source_url")},
+        ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    print(f"사진 판정 품목 바꿈 {qa_used}벌", flush=True)
+    return len(rows), {"per_brand": per_brand, "dropped_dupe_image": dropped_dupe, "dropped_no_image": dropped_noimg, "dropped_junk_name": dropped_junk, "dropped_kids_pet": dropped_kidpet, "dropped_demo_shop": dropped_demo, "dropped_gone": dropped_gone, "dropped_rerun": dropped_rerun,
+            "dropped_alias_shop": dropped_alias}
+
+
+def _measurer(tbl: dict):
+    """fold_reruns 의 meas — 크롤 표가 있으면 그것을, 없으면 그 상품 그림의 OCR 글을 size_from_ocr 로 읽는다.
+
+    OCR 글은 묶음 후보에 든 매장 것만, 처음 물을 때 한 번 읽는다(창고 전체는 500MB 가 넘는다).
+    읽다 넘어지면 None — 실측을 모르면 접기를 막지 않는 쪽(지금까지와 같은 판단)으로 간다.
+    """
+    cache: dict[str, dict[str, str]] = {}
+
+    def get(key):
+        slug, no = key
+        try:
+            import size_from_ocr as so
+            t = tbl.get(key)
+            if t:
+                st = json.loads(t)
+                out: dict[str, list] = {}
+                for lab, vs in st.items():
+                    c = so.canon_label(str(lab)) if not str(lab).startswith("_") else None
+                    if c and isinstance(vs, list) and c not in out:
+                        out[c] = [x if isinstance(x, (int, float)) else None for x in vs]
+                return out or None
+            if slug not in cache:
+                # 한 매장 것만 들고 있는다 — 묶음은 매장 안에서만 서므로 앞 매장 글은 다시 안 묻는다. 매장마다 쌓아 두면
+                # 후보가 많은 판에서 OCR 글 수백 MB 가 끝까지 남는다(코덱스 025 리뷰). 파일도 줄 단위로 흘려 읽는다.
+                cache.clear()
+                cache[slug] = {}
+                p = CRAWL_DIR / "ocr" / f"{slug}.jsonl"
+                if p.exists():
+                    for ln in p.open(encoding="utf-8"):
+                        try:
+                            d = json.loads(ln)
+                        except Exception:
+                            continue
+                        cache[slug][str(d.get("product_no"))] = d.get("ocr_text") or ""
+            text = cache[slug].get(no)
+            if not text:
+                return None
+            return so.from_ocr(so.halve_girth_lines(text))[1] or None
+        except Exception:
+            return None
+    return get
+
+
+_URL_STEM = re.compile(r"^https?://[^/]+(/.*?)/?(\d+)/?$")
+
+
+_OPT_STOCK_TAIL = re.compile(r"\s*[\[\(]?\s*(?:품절|sold\s?out|out\s*of\s*stock|일시\s?품절|재입고\s?예정|"
+                            r"only\s*\d+\s*left|low\s*stock|품절\s*임박|재고\s*\d+\s*개?|\d+\s*개?\s*남음)"
+                            r"\s*[\]\)]?\s*$", re.I)
+
+
+def _size_option_set(opts) -> frozenset:
+    """구매 옵션 목록을 견줄 수 있는 꼴로 만든다 — 안내 문구를 버리고 재고 표시를 뗀다.
+
+    같은 옷인데 목록이 달라 보이는 까닭이 셋 있었고 셋 다 상품이 다른 것과 무관하다(2026-09-07):
+      · 재고 표시     「XXS [Sold out]」 대 「XXS」   — 크롤 시점의 재고 상태
+      · 안내 문구     「- [필수] Choose your size -」가 한쪽에만 남는다
+      · 품절 사이즈   매장이 다 팔린 치수를 목록에서 내린다
+    이걸 안 씻고 견주면 같은 티셔츠 두 줄이 「다른 상품」으로 갈려 62묶음이 잘못 남았다.
+    """
+    out = set()
+    for o in opts or ():
+        o = str(o).strip()
+        if not o or OPTION_PROMPT.match(o):
+            continue
+        o = _OPT_STOCK_TAIL.sub("", o).strip()
+        if o:
+            out.add(o.upper())
+    return frozenset(out)
+
+
+def _tables_conflict(tables: list[str], tol: float = 1.0) -> bool:
+    """실측표 둘 이상이 tol 넘게 다른가. 한 칸짜리 표만 숫자로 견주고, 그 밖에는 글자로 견준다."""
+    if len(tables) < 2:
+        return False
+    if len({*tables}) == 1:
+        return False
+    try:
+        ds = [json.loads(t) for t in tables]
+    except Exception:
+        return True
+    if not all(isinstance(d, dict) and d and all(isinstance(v, list) and len(v) == 1 for v in d.values())
+               for d in ds):
+        return True                       # 칸 수가 여럿이거나 모양이 다르면 다른 옷으로 본다
+    labs = set(ds[0])
+    if any(set(d) != labs for d in ds):
+        return True
+    for lab in labs:
+        vals = [d[lab][0] for d in ds if isinstance(d[lab][0], (int, float))]
+        if len(vals) >= 2 and max(vals) - min(vals) > tol:
+            return True
+    return False
+
+
+# ── 접기 전에 「다른 색 · 다른 옷」을 가르는 두 증거 (2026-10-01) ──────────────────────
+#
+# 이름 · 대표색 · 값이 같은 두 줄을 접는 잣대(fold_reruns)는 대표색을 이름에서 읽는다. 그런데
+# 매장이 이름에 색을 안 적거나 같은 색 낱말로 뭉뚱그리면(「DARK BLUE」·「BLUE」 둘 다 블루)
+# **옵션에 적힌 색이 다른 두 상품**이 한 벌로 접혔다. 창고 전수(접힌 1,720행)에서 21행이 걸렸고,
+# 색끼리 다시 모아 접으면 20행이 되살아난다(generalidea BROWN 두 줄은 서로 접힌다):
+#   bmuette  「사운즈 크롭 배색 후드」        옵션 BLACK/LIME 대 BLACK          (넷)
+#   diagonal 「WAIST CONSECUTIVE BOOTSCUT DENIM」 DARK BLUE 대 BLUE · MIX1 대 MIX2 …  (여덟)
+#   generalidea 「UNISEX 보스턴백 [BLACK]」 BLACK 대 BROWN — 이름의 색은 첫 벌 것이다 (여섯)
+#   xlim     「EP.7 04 TROUSERS」            MATTE BLACK 대 GLOSSY BLACK · 컵 맛 셋 (셋)
+# 옵션의 색 칸은 매장이 그 상품으로 파는 것을 적은 자리라, 서로 상대에게 없는 색을 팔면 다른 상품이다.
+# 한쪽이 다른 쪽을 품기만 하면(CHARCOAL 대 CHARCOAL · MELANGE GREY) 다른 상품이라 하지 않는다 —
+# 같은 옷을 남성 · 여성 칸에 따로 올리며 색을 하나 덜 적은 것이고(generalidea 5054 · 5050),
+# 품절된 색을 목록에서 내린 것과도 못 가른다.
+# 「S 44(28)」(legacy)처럼 사이즈 뒤에 호수를 붙여 쓰는 곳이 있어 뒤의 숫자 하나는 받는다.
+_SIZE_PART = re.compile(
+    r"^(?:SIZE\s*)?(?:\d{1,3}(?:\.5)?|X{0,3}S|X{0,4}L|M|[2-6]X?L|[2-6]XS|FREE|F|OS|O\.S|ONE\s?SIZE|SMALL|MEDIUM|LARGE|"
+    r"XSMALL|XLARGE|(?:WOMEN|MEN|UNISEX)\s*(?:FREE|F)?|FREE\s*SIZE|SIZE|프리)(?:\s*SIZE)?(?:\s+\d{2,3})?$", re.I)
+_OPT_HEAD_PART = re.compile(r"^(?:COLOU?RS?|SIZES?|색상?|컬러|사이즈|OPTIONS?|옵션|DELIVERY|배송)$", re.I)
+
+
+def _option_parts(o: str) -> tuple[list[str], list[str]]:
+    """옵션 한 줄을 (사이즈 조각, 그 밖의 조각)으로 가른다. 「BLACK-S」·「네이비_M」·「DARK BLUE-SMALL」."""
+    o = str(o or "").strip()
+    if not o or OPTION_PROMPT.match(o) or OPTION_HEADER.match(o):
+        return [], []
+    o = OPTION_PRICE.sub("", _OPT_STOCK_TAIL.sub("", o)).strip()
+    o = re.sub(r"(?i)\bX-(LARGE|SMALL)\b", lambda g: "X" + g.group(1), o)
+    sizes, other = [], []
+    for p in re.split(r"\s*[-_]\s*", o):
+        q = re.sub(r"\s*[\(\[][^)\]]*[\)\]]", "", p).strip()
+        if not q or _OPT_HEAD_PART.match(q):
+            continue
+        (sizes if _SIZE_PART.match(q) else other).append(q.upper())
+    return sizes, other
+
+
+def _variant_set(opts) -> frozenset:
+    """옵션에서 사이즈 · 머리말을 뺀 나머지(대개 색) — 「BLACK/LIME」은 한 덩이로 둔다."""
+    out = set()
+    for o in opts or ():
+        _, other = _option_parts(o)
+        if other:
+            out.add("-".join(other))
+    return frozenset(out)
+
+
+def _variants_differ(a: frozenset, b: frozenset) -> bool:
+    return bool(a and b and (a - b) and (b - a))
+
+
+# 실측이 그림에만 있는 매장에서는 크롤 표(size_table)가 비어 「실측이 다르면 안 접는다」 거부권이
+# 서지 못했다. drawfit 「미니멀 푸퍼 다운 점퍼 [BLACK]」 2473(여성 · S M) 과 2498(남성 · M L XL)은
+# 주소 조각만 같아 접혔는데, 그림 속 표를 읽으면 총장 58 · 59.5 대 67.5 · 69 · 70.5,
+# 어깨 56 · 57.5 대 63 · 65 · 67 로 다른 옷이다(2026-10-01).
+# 반대로 andersson-bell · dnsr 는 **같은 옷을 사이즈 범위만 나눠** 두 번 올린다(여성 칸 S M,
+# 남성 칸 S~XL). 그때는 한쪽 값이 다른 쪽 값의 이어진 토막이다 — 같은 표를 나눠 쓰거나
+# (andersson-bell 「HEART MESSAGE T-SHIRT」 두 줄이 일곱 칸 표 하나), 이어진다
+# (dnsr 「커브드 데님 팬츠」 허리 36.5 · 39 대 39 · 41.5 · 44). 그래서 값 줄을 밀어 가며 겹치는 자리가
+# **하나의 밀기에서 모두** 1cm 안으로 맞는 때가 있는지를 본다. 사이즈 이름으로 맞추지는 않는다 — 옵션
+# 이름과 표의 칸이 어긋나는 매장이 있다(dnsr 「울 피코트 네이비」 3246 은 옵션이 M 하나인데 그 표 한 칸은
+# 남성판 3153 의 S 칸과 글자까지 같다. 이름으로 맞추면 다른 옷이 되어 같은 코트가 둘 선다).
+# 글자 읽기(OCR)가 한두 칸을 틀리는 일이 흔해서, 견준 치수 가운데 **둘 이상 · 절반 이상**이 어긋날
+# 때만 다른 옷으로 본다.
+_MEAS_TOL = 1.0
+
+
+def _label_agrees(a: list, b: list) -> bool | None:
+    """한 치수(총장 등)의 두 값 줄이 같은 옷의 것일 수 있나. 견줄 값이 없으면 None."""
+    seen = False
+    for off in range(-(len(a) - 1), len(b)):
+        pairs = [(a[i], b[i + off]) for i in range(len(a)) if 0 <= i + off < len(b)
+                 and a[i] is not None and b[i + off] is not None]
+        if not pairs:
+            continue
+        seen = True
+        if all(abs(x - y) <= _MEAS_TOL for x, y in pairs):
+            return True
+    return False if seen else None
+
+
+def _measures_conflict(ma: dict | None, mb: dict | None) -> bool:
+    """{치수: 값 줄} 둘이 다른 옷인가. 모르면 False(접기를 막지 않는다).
+
+    두 잣대가 **모두** 다르다고 할 때만 다른 옷이다. ① 치수마다 따로 밀어 맞춰 보기(_label_agrees),
+    ② 모든 치수를 **같은 칸만큼** 밀어 맞춰 보기 — 사이즈 범위만 나눈 같은 표라면 총장 · 허리 · 밑위가
+    한꺼번에 같은 칸만큼 밀린다. ①만 쓰면 OCR 이 한 칸을 틀린 치수 둘(dnsr 「커브드 데님 팬츠」 여성판의
+    엉덩이 「50.5 · 빈칸」, 허벅지 「34.5 · 33.9」)에 표가 뒤집힐 수 있었다. ②로 보면 한 칸 밀었을 때
+    허리 · 밑위 · 밑단 · 총장이 다 맞는다.
+    """
+    if not ma or not mb:
+        return False
+    common = [k for k in ma if k in mb and ma[k] and mb[k]]
+
+    def _bad(votes) -> bool:
+        votes = [v for v in votes if v is not None]
+        bad = votes.count(False)
+        return bad >= 2 and bad * 2 >= len(votes)
+
+    if not _bad([_label_agrees(ma[k], mb[k]) for k in common]):
+        return False
+    span = max((len(ma[k]) for k in common), default=0)
+    width = max((len(mb[k]) for k in common), default=0)
+    for off in range(-(span - 1), width):
+        votes = []
+        for k in common:
+            a, b = ma[k], mb[k]
+            pairs = [(a[i], b[i + off]) for i in range(len(a)) if 0 <= i + off < len(b)
+                     and a[i] is not None and b[i + off] is not None]
+            votes.append(all(abs(x - y) <= _MEAS_TOL for x, y in pairs) if pairs else None)
+        if any(v is not None for v in votes) and not _bad(votes):
+            return False
+    return True
+
+
+def _url_stem(u: str) -> str:
+    """주소에서 상품 번호를 뗀 조각. 매장이 상품 이름으로 주소를 만들면 같은 옷은 같은 조각이다.
+
+      .../product/f-zip-up-sweater-french-navy-cream/3782/   → /product/f-zip-up-sweater-…
+      .../product/f-zip-up-sweater-french-navy-cream/3994/   → 같은 조각
+
+    「detail.html?product_no=」 꼴은 조각이 모든 상품에 같으므로 증거가 못 된다. 짧은 조각도
+    버린다(/product/detail 같은 것). 그래서 andersson-bell 처럼 번호로만 주소를 쓰는 매장에서는
+    이 증거가 아예 서지 않는다 — 그 매장은 사진 겹침으로 가린다.
+    """
+    m = _URL_STEM.match(u or "")
+    if not m:
+        return ""
+    stem = m.group(1)
+    if "detail.html" in stem or len(stem) < 14:
+        return ""
+    return stem
+
+
+# ── 아동 라인을 뺀다 ────────────────────────────────────────────────────────
+#
+# 사람 결정(2026-09-20): 「키즈는 아동용 옷이니까 시드에서 아예 빼도 될듯.」
+# 그런데 이름으로만 가리면 **어른 옷이 잘린다.** 처음 잣대로 104벌을 잡았는데 그중
+# 60벌이 멀쩡한 어른 옷이었다:
+#
+#     Nea Kid Mohair Cardigan          「키드 모헤어」는 새끼 염소 털 — **소재**다
+#     UNAFFECTED SKID MARK T-SHIRT     s-KID
+#     베이비퍼플 · 베이비 블루            색 이름
+#     lekim 「COOL KIDS CAP」           어른 모자다(옵션 FREE · HEADWEAR 칸, 매장에서 확인)
+#
+# `classify_category` 는 이름 **맨 앞**의 아동 낱말과 매장 칸만 본다. 그래서 가운데 낀
+# 영문 「KIDS」를 놓친다(「BEADED CAP KIDS BLACK」). 그것까지 이름만으로 받으면 lekim 이
+# 같이 걸린다 — 생김새가 똑같다.
+#
+# 가르는 것은 **매장이 어른 짝을 같이 파는가**이다. 진짜 아동 라인은 같은 이름의 어른
+# 판이 옆에 있다(「BEADED CAP KIDS BLACK」 ↔ 「BEADED CAP BLUE」). 문구로 쓴 곳은 없다.
+# 실측(2026-09-20): 이 잣대로 30벌이 갈리고 lekim 둘은 안 갈린다.
+_KID_MID = re.compile(r"(?<![A-Za-z])kids(?![A-Za-z])", re.I)
+# 앞 낱말에 **붙은** 「…KIDS」는 그 자체로 아동 라인 이름이다(「VIBRATEKIDS - CIRCLE BUCKET
+# HAT」). 홀로 선 「KIDS」와 달리 문구로 쓸 수가 없다 — 어른 상품을 「무엇무엇KIDS」라고
+# 이름 붙이는 매장은 없다. 그래서 짝도 증명도 안 보고 바로 뺀다.
+# 오른쪽은 열지 않는다 — 「kidskin」은 새끼 염소 가죽이라 소재다.
+# 창고 전수(130,499벌)로 재니 걸리는 것은 vibrate 둘뿐이다(사람 지시 2026-09-21).
+_KID_GLUED = re.compile(r"[A-Za-z]kids(?![A-Za-z])", re.I)
+
+
+def _kid_key(name: str) -> str:
+    n = re.sub(r"\[[^\]]*\]", " ", name or "")
+    return re.sub(r"\s+", " ", re.sub(r"[^0-9A-Za-z가-힣]+", " ", n)).strip().lower()
+
+
+def drop_kids_line(rows: list[dict]) -> int:
+    """이름 가운데 「KIDS」가 있는 아동 라인을 뺀다. 두 갈래로 고른다.
+
+    ① **같은 매장에 어른 짝이 있는 것.** 「BEADED CAP KIDS BLUE」 옆에 「BEADED CAP BLUE」가
+       있으면 앞의 것은 그 옷의 아동판이다.
+
+    ② ①로 이미 **아동 라인이 있다고 드러난 매장**의 나머지. ①은 짝을 이름까지 똑같이 맞춰야
+       해서 색이 어긋나면 줄줄이 샌다 — misu-a-barbe 는 30벌 중 26벌이 ①에 걸렸는데
+       「BEADED CAP KIDS WHITE」(어른은 BLUE·BLACK 뿐) 와 「NEW FURRY HAT KIDS」 셋이
+       색 짝이 없다는 이유로 남았다(사람 지적 2026-09-21: 「키즈 모자 셋도 빼」).
+       한 매장에서 ①이 한 번이라도 걸렸다면 그 매장이 아동 라인을 판다는 것은 이미 증명된
+       것이고, 같은 이름표가 붙은 나머지를 어른 옷으로 볼 까닭이 없다.
+
+    ②가 없으면 곤란하지만 ②만으로도 안 된다 — 증명 없이 낱말만 보면 lekim 「COOL KIDS
+    CAP」(옵션 FREE · 어른 모자)과 ronron 「COLLAR KIDS HALF T-SHIRT」가 함께 잘린다.
+    두 매장 모두 ①에 걸린 상품이 하나도 없어 ②의 문이 안 열린다.
+    """
+    have = collections.defaultdict(set)
+    for r in rows:
+        have[r["brand_slug"]].add(_kid_key(r["name"]))
+    mid = [i for i, r in enumerate(rows)
+           if _KID_MID.search(r["name"] or "") and not KIDS_FALSE.search(r["name"] or "")]
+    glued = [i for i, r in enumerate(rows)
+             if _KID_GLUED.search(r["name"] or "") and not KIDS_FALSE.search(r["name"] or "")]
+    paired = []
+    for i in mid:
+        k = _kid_key(rows[i]["name"])
+        bare = " ".join(t for t in k.split() if t != "kids")
+        if bare and bare != k and bare in have[rows[i]["brand_slug"]]:
+            paired.append(i)
+    proven = {rows[i]["brand_slug"] for i in paired}
+    keep_paired = set(paired)
+    drop = sorted({i for i in mid if i in keep_paired or rows[i]["brand_slug"] in proven}
+                  | set(glued))
+    # 통계는 지우기 **전에** 센다 — 지운 뒤 옛 번호로 rows[i] 를 읽으면 IndexError 로 상품표 만들기가 통째로 멈춘다
+    # (코덱스 050 리뷰: 같은 매장의 「BEADED CAP」 · 「BEADED CAP KIDS」 두 줄이면 재현).
+    n_glue = len(set(glued) - keep_paired - {i for i in mid if rows[i]["brand_slug"] in proven})
+    for i in reversed(drop):
+        rows.pop(i)
+    if drop:
+        print(f"아동 라인 제외 {len(drop)}벌 — 어른 짝 {len(paired)} + "
+              f"증명된 매장({', '.join(sorted(proven)) or '없음'})의 나머지 "
+              f"{len(drop) - len(paired) - n_glue} + 붙은 이름 {n_glue}")
+    return len(drop)
+
+
+def fold_reruns(rows: list[dict], gal: dict, tbl: dict | None = None, url: dict | None = None,
+                opt: dict | None = None, meas=None, log: list | None = None) -> int:
+    """매장이 같은 옷을 두 번 올린 것을 접는다.
+
+    dunst 는 2022~23년 옷을 통째로 다시 등록해 두었다 — 이름·색·값이 같고 갤러리 열두 장이
+    그대로 겹치는데 상품 번호만 다르다(1846 대 1906). 옵션도 칸도 같다. 앱에서는 같은 옷이
+    두 번 뜬다. 607묶음 1,231행, 접으면 624행이 준다(그중 판매중 중복 430).
+
+      unisex cupid campus sweatshirt salt pink   no=1846 · no=1906   둘 다 69,000원
+      unisex suede half jacket camel             no=2807 · no=2809   둘 다 549,000원
+
+    잣대는 「브랜드·이름·색·값이 같고 사진을 나눠 쓴다」 넷을 다 만족할 때뿐이다. 색을 빼면
+    안 된다 — 재 보니 이름·값만으로는 395묶음이 걸리는데 그건 색만 다른 같은 옷이다
+    (wkndrs 「draggy work pants」가 여섯 색인데 갤러리를 공유한다). 그건 접으면 안 된다.
+
+    남길 쪽: 판매중을 품절보다, 그다음 번호가 큰 쪽(새로 올린 것)을 남긴다.
+
+    meas: (slug, product_no) → {정식 치수: 값 줄} | None. 크롤 표가 없는 줄의
+    실측(그림 OCR)을 꺼내 준다 — build_csv 가 만든다. log 를 주면 접은 묶음마다
+    (근거, slug, 남긴 번호, [접힌 번호]) 를 적는다(전후 대조용).
+    """
+    groups: dict[tuple, list[dict]] = {}
+    # Shopify 매장(platforms.py)은 접지 않는다. 그쪽은 상품 주소(handle) 하나가 곧 상품 하나이고,
+    # **상품명에 색을 안 쓴다** — PAF 「SOUVENIR TEE 8」이 grey-green·white 두 벌, Hyein Seo 는
+    # 사진 이름에만 색 부호(TS4W·TS4K)가 있다. 이름·값이 같고 표가 같다는 이유로 색만 다른 옷
+    # 92벌이 접혀 사라졌다(2026-09-23 첫 수집).
+    import platforms
+    for r in rows:
+        if r["brand_slug"] in platforms.NOT_CAFE24:
+            continue
+        k = (r["brand_slug"], (r["name"] or "").strip().casefold(),
+             (r["representative_color"] or "").strip().casefold(), r["price"])
+        groups.setdefault(k, []).append(r)
+    # 옵션의 색이 서로 다른 줄은 같은 묶음에 두지 않는다(위 _variant_set 주석). 묶음을 통째로
+    # 거부하지 않고 색끼리 다시 모은다 — generalidea 「UNISEX 보스턴백 [BLACK]」 네 줄은 BLACK 둘 ·
+    # BROWN 둘(남성 칸 · 여성 칸)이라, 색으로 갈라도 BROWN 둘은 여전히 한 벌로 접혀야 한다.
+    split: list[tuple[tuple, list[dict]]] = []
+    for k, v in groups.items():
+        if len(v) < 2:
+            continue
+        subs: list[list[tuple[frozenset, dict]]] = []
+        for r in v:
+            vs = _variant_set((opt or {}).get((k[0], str(r["product_no"])), ()))
+            for sub in subs:
+                if not any(_variants_differ(vs, w) for w, _ in sub):
+                    sub.append((vs, r))
+                    break
+            else:
+                subs.append([(vs, r)])
+        split.extend((k, [r for _, r in sub]) for sub in subs)
+    drop: set[int] = set()
+
+    def _fold(k, v, why):
+        keep = max(v, key=lambda r: (r["status"] == "ON_SALE", int(r["product_no"] or 0)))
+        for r in v:
+            if r is not keep:
+                drop.add(id(r))
+        if log is not None:
+            log.append((why, k[0], str(keep["product_no"]), [str(r["product_no"]) for r in v if r is not keep]))
+
+    for k, v in split:
+        if len(v) < 2:
+            continue
+        sets = [gal.get((k[0], str(r["product_no"])), set()) for r in v]
+        shared = any(sets[i] & sets[j] for i in range(len(v)) for j in range(i + 1, len(v)))
+        # 사진을 안 나눠 써도 실측표가 글자 하나까지 같으면 같은 옷이다 — 매장이 다시 찍어
+        # 올린 것뿐이다(dunst 「panda sweatshirt black」 no=3709·3921, 주소 조각까지 같다).
+        # 표가 서로 다르면 접지 않는다. 같은 이름·색·값으로 사이즈를 따로 올린 매장이 있어서다:
+        #   coor 「머드 다잉 패디드 데님 자켓 (워시드인디고)」  어깨 54.0 대 50.0 · 총장 65.5 대 64.0
+        # 4cm 차이는 재는 사람의 손떨림이 아니라 다른 치수다. 접으면 한 벌을 잃는다.
+        ts = [(tbl or {}).get((k[0], str(r["product_no"])), "") for r in v]
+        same_table = len(set(ts)) == 1 and ts[0] != ""
+        # 구매 옵션은 매장이 스스로 하는 말이라 어떤 짐작보다 세다.
+        # coor 「머드 다잉 패디드 데님 자켓 (워시드인디고)」 288,000원 두 벌을 열어 보니
+        #   no=2453 → S · M · L · XL      no=2610 → WOMEN FREE
+        # 이름·색·값이 같은 남성 사이즈와 여성 프리 사이즈였다. 접었으면 여성용을 잃는다.
+        # 반대로 옵션이 글자까지 같으면 같은 사이즈를 파는 같은 옷이다 — 실측이 1~2cm
+        # 달라도 매장이 다시 잰 것이다(coor 「페이크 레더 카 코트 (블랙)」 총장 81.5 대 80.0,
+        # 둘 다 WOMEN FREE). 2026-09-07 실측: 남은 100묶음이 72(다름) 대 28(같음)로 갈렸다.
+        os_ = [_size_option_set((opt or {}).get((k[0], str(r["product_no"])), ())) for r in v]
+        have_opt = [o for o in os_ if o]
+        if len(have_opt) >= 2:
+            # 사이즈 갈래가 아예 안 겹치면 다른 옷이다 — 가장 센 증거다.
+            #   같은 자켓 두 줄: {S,M,L,XL} 과 {WOMEN FREE} (남성 사이즈와 여성 프리 사이즈)
+            if any(not (a & b) for a in have_opt for b in have_opt):
+                continue
+            # 글자까지 같으면 같은 사이즈를 파는 같은 옷이다 — 실측 차이는 매장이 다시 잰 것이다.
+            if len(set(have_opt)) == 1:
+                _fold(k, v, "opt_equal")
+                continue
+            # 겹치기는 하는데 같지는 않다 — 재고가 빠지고 들어오며 목록이 흔들린 것일 수도,
+            #   {S,M,L,XL,XXL} 대 {XXS,XS,S,M,L} 처럼 사이즈 갈래가 다른 것일 수도 있다.
+            # 옵션만으로는 못 가린다. 아래의 사진·주소·실측 증거에 맡긴다(실측이 다르면 안 접는다).
+        # 주소 조각이 같으면 같은 옷이다 — 매장이 이름으로 주소를 만드는 곳에서만 선다.
+        us = {(url or {}).get((k[0], str(r["product_no"])), "") for r in v}
+        same_url = len(us) == 1 and "" not in us
+        if not shared and not same_table and not same_url:
+            continue
+        # 거부권: 표가 둘 이상 있고 서로 1cm 넘게 다르면 접지 않는다. 사진이 겹쳐도 마찬가지다.
+        # 예전에는 사진만 겹치면 접었는데, 같은 이름·색·값으로 사이즈를 따로 올린 매장이 있다:
+        #   coor 「머드 다잉 패디드 데님 자켓 (워시드인디고)」 어깨 54.0 대 50.0 · 총장 65.5 대 64.0
+        #   coor 「버진 울 크롭 점퍼 (다크네이비)」            최대차 4.5cm
+        # 접으면 한 벌의 치수를 잃는다. 1cm 이하는 매장이 다시 잰 것으로 보고 접는다
+        # (dunst 「essential cashmere turtleneck sweater」 네 묶음이 그렇다).
+        # 2026-09-07 실측: 값이 같은 중복 175묶음 중 접을 수 있는 것 82 · 거부 93.
+        if _tables_conflict([t for t in ts if t]):
+            continue
+        # 거부권 둘: 크롤 표가 없는 줄은 그림에서 읽은 실측으로 견준다(위 _measures_conflict 주석,
+        # drawfit 2473 · 2498). 옵션이 글자까지 같은 묶음은 위에서 이미 접었다 — 그쪽은 매장이 다시
+        # 잰 것으로 보는 판단을 그대로 둔다.
+        if meas is not None and not all(ts):
+            ms = [meas((k[0], str(r["product_no"]))) for r in v]
+            if any(_measures_conflict(ms[i], ms[j]) for i in range(len(v)) for j in range(i + 1, len(v))):
+                continue
+        why = "+".join(n for n, b in (("photo", shared), ("table", same_table), ("url", same_url)) if b)
+        _fold(k, v, ("opt_overlap:" if len(have_opt) >= 2 else "") + why)
+    if drop:
+        rows[:] = [r for r in rows if id(r) not in drop]
+    return len(drop)
+
+
+# ─── main ───
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--brands", nargs="*", help="slug 목록. 없으면 products_seed.csv 에 상품이 있는 브랜드 전부")
+    ap.add_argument("--workers", type=int, default=8, help="동시에 볼 호스트 수(호스트 안에서는 늘 순차)")
+    ap.add_argument("--delay", type=float, default=1.0, help="같은 호스트 요청 간격(초)")
+    ap.add_argument("--refresh", action="store_true", help="이미 받은 상품도 다시 받는다")
+    ap.add_argument("--build-csv", action="store_true", help="크롤 없이 jsonl → CSV 만")
+    ap.add_argument("--refetch-ids", help="slug<TAB>product_no 목록 파일 — 그 상품만 새 파서로 다시 받는다")
+    ap.add_argument("--refetch-force", action="store_true", help="이미 size_table 필드가 있어도 다시 받는다(파서를 고친 뒤)")
+    args = ap.parse_args()
+
+    CRAWL_DIR.mkdir(parents=True, exist_ok=True)
+    with BRANDS_CSV.open(encoding="utf-8-sig") as f:
+        brands = {r["slug"]: r for r in csv.DictReader(f)}
+    brand_gender = {s: BRAND_GENDER.get(r.get("gender", ""), "UNISEX") for s, r in brands.items()}
+
+    if args.build_csv:
+        n, info = build_csv(brand_gender)
+        print(f"{n}행 → {OUT_CSV}  (사진 중복 제외 {info['dropped_dupe_image']} · 사진 없음 제외 {info['dropped_no_image']} · 상품 아닌 이름 제외 {info['dropped_junk_name']} · 아동·반려동물 제외 {info['dropped_kids_pet']})")
+        for s, c in sorted(info["per_brand"].items(), key=lambda x: -x[1]):
+            print(f"{c:5d} {s}")
+        return
+
+    refetch: dict[str, set[int]] = {}
+    if args.refetch_ids:
+        for line in Path(args.refetch_ids).read_text(encoding="utf-8").splitlines():
+            if "\t" in line:
+                slug, no = line.split("\t")[:2]
+                refetch.setdefault(slug, set()).add(int(no))
+        slugs = sorted(refetch)
+    elif args.brands:
+        slugs = args.brands
+    else:
+        with PRODUCTS_SEED.open(encoding="utf-8-sig") as f:
+            slugs = sorted({r["brand_slug"] for r in csv.DictReader(f)})
+    # 카페24 가 아닌 매장은 제 수집기로 넘긴다(platforms.py). 이 수집기로 훑으면 0벌이 나온다 —
+    # 렉토는 씨앗에 있는데 줄이 0이었다. 상세 다시 받기(--refetch-ids)는 그쪽에 뜻이 없어 뺀다.
+    import platforms
+    other = [s for s in slugs if s in platforms.NOT_CAFE24]
+    if other:
+        slugs = [s for s in slugs if s not in platforms.NOT_CAFE24]
+        if not args.refetch_ids:
+            http_s = PoliteSession(delay=max(args.delay, 2.0))
+            for s in other:
+                platforms.crawl_other(http_s, s)
+    shops = []
+    for s in slugs:
+        b = brands.get(s)
+        if not b or not b.get("official_url"):
+            print(f"[{s}] brands_seed 에 없거나 official_url 없음 — 건너뜀", file=sys.stderr)
+            continue
+        u = urlparse(b["official_url"].strip())
+        shops.append(Shop(slug=s, base=f"{u.scheme or 'https'}://{u.netloc}",
+                          brand_gender=brand_gender.get(s, "UNISEX"),
+                          names=tuple(x for x in (b.get("name"), b.get("name_en"),
+                                                  s.replace("-", " ")) if x)))
+
+    http = PoliteSession(delay=args.delay)
+    lock = threading.Lock()
+    started = time.time()
+
+    def log(msg):
+        with lock:
+            print(f"{time.strftime('%H:%M:%S')} {msg}", flush=True)
+
+    summaries = []
+    with ThreadPoolExecutor(max_workers=args.workers) as ex:
+        futs = {ex.submit(crawl_brand, http, shop, args.refresh, log, refetch.get(shop.slug) if refetch else None, args.refetch_force): shop for shop in shops}
+        for fut in as_completed(futs):
+            shop = futs[fut]
+            try:
+                summaries.append(fut.result())
+            except Exception as e:  # 한 매장이 죽어도 나머지는 계속
+                log(f"[{shop.slug}] 예외: {e!r}")
+                summaries.append({"slug": shop.slug, "ok": False, "errors": [repr(e)], "crashed": True})
+
+    n, info = build_csv(brand_gender)
+    SUMMARY_JSON.write_text(json.dumps({
+        "finished_at": datetime.now(KST).isoformat(timespec="seconds"),
+        "elapsed_sec": round(time.time() - started),
+        "requests": http.requests_made,
+        "csv_rows": n,
+        "dropped_dupe_image": info["dropped_dupe_image"],
+        "brands": sorted(summaries, key=lambda x: x["slug"]),
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    log(f"전부 끝 — 요청 {http.requests_made} · {round(time.time() - started)}s · CSV {n}행 → {OUT_CSV}")
+    # 예외로 죽은 매장이 있으면 요약 · CSV 는 다 쓰고 1로 끝낸다 — 앞서는 기록만 하고 성공으로 끝나 묻혔다
+    crashed = sorted(s["slug"] for s in summaries if s.get("crashed"))
+    if crashed:
+        print(f"::error title=수집::예외로 죽은 매장 {len(crashed)}곳: {', '.join(crashed)}", flush=True)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,46 @@
+# 색상마다 한 줄인 상품을 같은 옷(스타일)으로 묶어 data/styles.csv · data/styles_stats.json 을 만든다.
+# 주간 갱신(weekly.yml)도 마지막에 같은 스크립트를 돌린다 — 이 워크플로는 주간 판을 기다리지 않고 바로 만들 때 쓴다.
+# products_full.csv 처럼 생성물이라 로컬에서 만들어 밀지 않는다(2026-10-03 코파일럿 세션 부탁).
+name: styles
+
+on:
+  workflow_dispatch:
+
+jobs:
+  styles:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: work
+    steps:
+      - uses: actions/checkout@v4
+      - name: 데이터 저장소(비공개) 받기
+        uses: ./.github/actions/data-repo
+        with: {token: "${{ secrets.DATA_TOKEN }}"}
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: pip install -q requests beautifulsoup4 lxml
+      - name: 스타일 묶기
+        run: python scripts/build_styles.py
+      - name: commit & push (rebase 후, 3회 재시도)
+        shell: bash
+        run: |
+          git add data/styles.csv data/styles_stats.json
+          git diff --cached --quiet && { echo "변화 없음"; exit 0; }
+          msg=$(python3 -c 'import json; d = json.load(open("data/styles_stats.json")); print("행 %d → 스타일 %d · 둘 이상 %d" % (d["rows"], d["styles"], d["multi_color_styles"]))')
+          git commit -m "스타일 묶기 — $msg (Actions)"
+          for i in 1 2 3; do
+            git pull --rebase --autostash origin "crawl/cafe24-full-catalog" && git push && exit 0
+            if [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ]; then
+              for f in $(git diff --name-only --diff-filter=U | grep -E '^data/styles(\.csv|_stats\.json)$' || true); do
+                git checkout --ours -- "$f" && git add "$f"
+              done
+              if [ -z "$(git diff --name-only --diff-filter=U)" ]; then
+                git -c core.editor=true rebase --continue && git push && exit 0
+              fi
+              git rebase --abort 2>/dev/null || true
+            fi
+            echo "푸시 실패, 재시도 $i"; sleep 10
+          done
+          exit 1

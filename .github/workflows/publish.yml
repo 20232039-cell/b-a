@@ -1,0 +1,111 @@
+# 앱이 읽을 조각을 만들어 **슈퍼베이스 Storage 비공개 버킷 layer** 에 올린다(앱은 서버 함수 layer-data 로 열쇠를 붙여 받는다).
+#
+# 왜 저장소가 아니라 따로 올리나(사람 결정 2026-09-20): 데이터 저장소의 app/ 폴더에 두고
+# 앱이 빌드 때 가져가면 **데이터 갱신이 앱 배포에 묶인다.** 코드를 한 줄도 안 고쳤는데
+# 매일 새 배포가 나가고, 배포를 미루면 데이터가 낡는다. layer-web 저장소에 직접 넣는 것은
+# 더 나쁘다 — git 히스토리에 200MB 가 영구히 남아 나중에 클론이 계속 무거워진다.
+#
+# 필요한 것: Settings → Secrets 에 DATA_TOKEN · SUPABASE_SERVICE_KEY
+name: publish-app-data
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry:
+        description: "true 면 만들기만 하고 안 올린다"
+        required: false
+        default: "false"
+  workflow_call:
+    secrets:
+      DATA_TOKEN: {required: true}
+      SUPABASE_SERVICE_KEY: {required: true}
+
+env:
+  SUPABASE_URL: https://bwppqohyxparuiigiziu.supabase.co
+  SUPABASE_BUCKET: layer
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: 데이터 저장소(비공개) 받기
+        uses: ./.github/actions/data-repo
+        with: {token: "${{ secrets.DATA_TOKEN }}"}
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: pip install -q requests beautifulsoup4 lxml   # 대표색 고르기(crawl_cafe24.pick_color)가 수집기를 불러온다
+
+      - name: 앱 조각 만들기
+        working-directory: work
+        shell: bash
+        run: python scripts/export_app_data.py --out /tmp/app | tail -20   # bash 기본이 pipefail — 내보내기가 죽으면 여기서 멈춘다
+
+      - name: 크기 확인 — 한 파일이 50MB 를 넘으면 버킷이 안 받는다
+        run: |
+          echo "합계 $(du -sh /tmp/app | cut -f1) · 파일 $(find /tmp/app -name '*.json' | wc -l)개"
+          echo "제일 큰 것 다섯:"
+          find /tmp/app -name '*.json' -printf '%s %p\n' | sort -rn \
+            | awk 'NR<=5 {printf "  %6.2f MB  %s\n", $1/1048576, $2}'
+          big=$(find /tmp/app -name '*.json' -size +50M | wc -l)
+          [ "$big" -eq 0 ] || { echo "::error::50MB 넘는 파일이 $big 개 있다"; exit 1; }
+
+      - name: 슈퍼베이스에 올리기
+        if: ${{ inputs.dry != 'true' }}
+        working-directory: work
+        env:
+          # 이름이 무엇으로 들어갔는지 확실치 않아 몇 가지를 다 넘긴다 — 스크립트가 먼저
+          # 찾은 것을 쓰고 **어느 이름이었는지** 로그에 찍는다(값은 안 찍는다).
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          LAYER: ${{ secrets.LAYER }}
+        run: python scripts/upload_supabase.py --dir /tmp/app
+
+      # 올린 것을 **되받아** 확인한다. 이게 없으면 「올렸다」만 믿게 된다.
+      # 버킷 layer 는 비공개(2026-10-26) — 앱은 서버 함수 layer-data 에 열쇠(x-layer-key)를 붙여 받는다.
+      # 여기서는 서비스 키로 파일이 읽히는지, 함수가 열쇠 없이 막히는지, 옛 공개 주소가 닫혀 있는지 본다.
+      # 비밀값 LAYER_DATA_KEY 가 있으면 함수로 받아 압축 · CORS 까지 본다(없으면 그 칸만 건너뛴다).
+      - name: 되받아 확인 — 잠금 · 내용 · 압축
+        if: ${{ inputs.dry != 'true' }}
+        env:
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          LAYER: ${{ secrets.LAYER }}
+          LAYER_DATA_KEY: ${{ secrets.LAYER_DATA_KEY }}
+        run: |
+          set -e
+          SK="${SUPABASE_SERVICE_KEY:-${SUPABASE_KEY:-${LAYER:-$SUPABASE_SERVICE_ROLE_KEY}}}"
+          FN="$SUPABASE_URL/functions/v1/layer-data"
+          get() { curl -sS --fail --compressed -H "apikey: $SK" -H "Authorization: Bearer $SK" \
+                  "$SUPABASE_URL/storage/v1/object/authenticated/$SUPABASE_BUCKET/$1" -o "$2"; }
+          echo "■ 잠금 — 옛 공개 주소와 열쇠 없는 함수는 막혀야 한다"
+          pub=$(curl -s -o /dev/null -w '%{http_code}' "$SUPABASE_URL/storage/v1/object/public/$SUPABASE_BUCKET/catalog.json")
+          fn=$(curl -s -o /dev/null -w '%{http_code}' "$FN/catalog.json")
+          echo "  공개 주소 $pub · 열쇠 없는 함수 $fn"
+          [ "$pub" != 200 ] || { echo "::error::버킷이 다시 공개로 열려 있다"; exit 1; }
+          [ "$fn" = 401 ] || { echo "::error::함수가 열쇠 없이 $fn 을 돌려준다"; exit 1; }
+          echo "■ 도장"
+          get catalog.json /tmp/catalog.json
+          python -c "
+          import json,sys
+          d=json.load(open('/tmp/catalog.json',encoding='utf-8'))
+          print('  v =',d['v'],'· 상품',f\"{d['count']:,}\",'· 매장',len(d['brands']),'· 갈래',len(d['cats']),'· 파일',len(d['files']))
+          assert d['count']>1000 and d['brands'] and d['cats'], '도장이 비었다'
+          "
+          echo "■ 갈래 조각 하나"
+          get index/outer.json /tmp/outer.json
+          python -c "
+          import json
+          x=json.load(open('/tmp/outer.json',encoding='utf-8'))
+          print('  아우터',f'{len(x):,}벌 · 첫 줄',json.dumps(x[0],ensure_ascii=False)[:120])
+          "
+          if [ -z "$LAYER_DATA_KEY" ]; then echo "■ 함수로 받기 — 비밀값 LAYER_DATA_KEY 가 없어 건너뜀"; exit 0; fi
+          echo "■ 함수로 받기 — 앱과 같은 길"
+          hdr=$(curl -sS -D - -o /dev/null --compressed -H "x-layer-key: $LAYER_DATA_KEY" -H 'Origin: https://layer.example' "$FN/index/tops.json" | tr -d '\r')
+          echo "$hdr" | grep -iE '^(HTTP/2|content-encoding|content-type|access-control-allow-origin)' || true
+          enc=$(echo "$hdr" | grep -i '^content-encoding:' | tr -d ' \n' | cut -d: -f2)
+          case "$enc" in br|gzip|deflate|zstd) echo "  압축 $enc — 좋다" ;;
+            *) echo "::error::목록이 압축 없이 온다 (content-encoding='$enc')"; exit 1 ;; esac

@@ -1,0 +1,71 @@
+# 사진 임베딩 — 아직 안 한 상품만(대표 사진 통째 siglip · 옷만 자른 siglip_crop), 그 뒤 사진 무늬 · 색(photo_attrs), 비슷한 옷 다시 계산.
+# 주간 수집이 끝나면 저절로 돈다. CPU.
+name: embed
+on:
+  workflow_run:
+    workflows: [weekly-update]
+    types: [completed]
+  workflow_dispatch:
+concurrency:
+  group: data-generated
+  cancel-in-progress: false
+jobs:
+  embed:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    defaults:
+      run: {working-directory: work}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 데이터 저장소(비공개) 받기
+        uses: ./.github/actions/data-repo
+        with: {token: "${{ secrets.DATA_TOKEN }}"}
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-siglip-segformer-v1
+      - run: |
+          pip install -q torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          pip install -q open_clip_torch transformers pillow numpy scipy requests beautifulsoup4 lxml
+      - name: 대표 사진 통째
+        timeout-minutes: 120
+        shell: bash
+        run: set +e; python -u scripts/embed_photos.py --model siglip --all > /tmp/p.log 2>&1; r=$?; tail -20 /tmp/p.log; tail -2 /tmp/p.log | sed 's/^/::notice title=통째::/'; exit $r
+      - name: 저장 (통째)
+        if: always()
+        shell: bash
+        run: bash $GITHUB_WORKSPACE/.github/save_data.sh "사진 임베딩 (Actions)" data/emb/siglip
+      - name: 착용컷 점수
+        run: python scripts/worn_zs.py
+      - name: 저장 (착용컷)
+        run: bash $GITHUB_WORKSPACE/.github/save_data.sh "착용컷 점수 (Actions)" data/worn_zs.json
+      - name: 옷만 자른 사진
+        if: always()
+        timeout-minutes: 200
+        shell: bash
+        run: set +e; python -u scripts/embed_crops.py --all > /tmp/c.log 2>&1; r=$?; tail -20 /tmp/c.log; tail -2 /tmp/c.log | sed 's/^/::notice title=자른 것::/'; exit $r
+      - name: 저장 (자른 것)
+        if: always()
+        shell: bash
+        run: bash $GITHUB_WORKSPACE/.github/save_data.sh "옷만 자른 사진 임베딩 (Actions)" data/emb/siglip_crop
+      # 사진이 말하는 무늬 · 색(photo_attrs.json) — 앱 pt · co 와 비슷한 옷의 무늬 묶기가 읽는다. 임베딩 다음, 비슷한 옷 전에.
+      - name: 사진 무늬 · 색
+        if: always()
+        timeout-minutes: 20
+        shell: bash
+        run: set +e; python -u scripts/photo_attrs.py > /tmp/a.log 2>&1; r=$?; tail -5 /tmp/a.log; tail -1 /tmp/a.log | sed 's/^/::notice title=사진 무늬 · 색::/'; exit $r
+      - name: 저장 (사진 무늬 · 색)
+        if: always()
+        shell: bash
+        run: bash $GITHUB_WORKSPACE/.github/save_data.sh "사진 무늬 · 색 (Actions)" data/photo_attrs.json
+      - name: 비슷한 옷
+        if: always()
+        shell: bash
+        run: set +e; python scripts/similar_items.py > /tmp/s.log 2>&1; r=$?; tail -5 /tmp/s.log; tail -2 /tmp/s.log | sed 's/^/::notice title=비슷한 옷::/'; exit $r
+      - name: 저장 (비슷한 옷)
+        if: always()
+        shell: bash
+        run: bash $GITHUB_WORKSPACE/.github/save_data.sh "비슷한 옷 (Actions)" data/similar_items.json data/similar_axes.json

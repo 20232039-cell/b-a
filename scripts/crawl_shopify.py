@@ -1,0 +1,453 @@
+"""Shopify 매장 수집 — `products.json` 한 주소로 상품 전부를 받는다.
+
+    python scripts/crawl_shopify.py --brands recto hyein-seo
+    python scripts/crawl_shopify.py              # platforms.SHOPIFY 전부
+
+카페24 매장과 **같은 모양의 줄**을 data/crawl/<slug>.jsonl 에 쓴다. 그래야 뒤 단계
+(build-csv · size_from_ocr · tag_items · OCR · export)가 매장 종류를 몰라도 된다.
+
+한 판이 첫 수집이자 주간 점검이다. Shopify 의 공개 목록은 품절까지 포함한 게시 상품 전부라
+(`variants[].available` 로 품절을 가른다) 카페24 처럼 목록·상세를 따로 훑을 필요가 없다.
+그래서 weekly_update 가 이 매장들을 만나면 여기로 넘긴다(platforms.NOT_CAFE24).
+
+판단은 카페24 쪽과 같게 둔다:
+- 값·재고 자국은 cc.carry_over 로 — 한 곳에서만 판단한다.
+- 목록에서 사라진 상품은 지우지 않는다. 연속 두 판 없으면 delisted(weekly_update 와 같은 수).
+- 받은 목록이 알던 판매중의 절반도 안 되면 상태를 바꾸지 않는다(같은 가드레일) —
+  목록 한 쪽이 실패했을 때 멀쩡한 상품이 전부 품절로 넘어가는 것을 막는다.
+
+값은 원화로 **청해서** 받는다(`currency=KRW`). 안 그러면 요청한 곳의 나라 돈으로 온다 —
+fetch_all 주석. 원화 값은 센트 단위가 아니라 그대로라 100 으로 나누지 않는다
+(원화 매장은 `"price": "395000"` 꼴).
+USD만 제공하는 매장은 상품·재고와 source_prices를 보관하고 price는 0으로 둔다.
+원화 가격이 없으면 CSV의 기존 가격 문턱에서 빠지며, 외화를 원화로 내보내지 않는다.
+"""
+import argparse
+import html
+import json
+import re
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+import crawl_cafe24 as cc
+import kiwi_sizing
+from platforms import SHOPIFY, SHOPIFY_CURRENCY, SHOPIFY_META_DESC, SHOPIFY_OWN_TAG, SHOPIFY_PAGES
+
+CRAWL_DIR = cc.CRAWL_DIR
+PAGE_LIMIT = 250          # Shopify 가 한 쪽에 주는 최대
+GUARD_RATIO = 0.5         # weekly_update 와 같다
+DELIST_AFTER = 2          # 연속 이만큼 목록에 없으면 delisted
+# 수집기가 매 판 새로 정하는 칸 중 「없음」이 뜻이 있는 것 — merge_rows 가 지난 판에서 이어받지 않는다
+OWN_KEYS = {"soldout_unknown", "source_prices", "price_unavailable"}
+# 상품 페이지 간격(초). 목록은 매장당 몇 번이지만 페이지는 수백 번이라 더 천천히 — 봇 이름으로
+# 연 상품 페이지에 매장이 429 를 준 적이 있다(get_patient 주석).
+PAGE_DELAY = 4.0
+
+
+def _text(body_html: str) -> str:
+    # 주석을 먼저 걷는다 — 「<!-- <p>SIZE …</p> -->」를 태그 지우기(<[^>]+>)에 맡기면 「<!-- <p>」만 지워지고 막아 둔
+    # 글이 살아난다(매장이 주석으로 막아 둔 옛 사이즈 틀 · 다른 상품 설명, 2026-10-27 사이즈 판독).
+    t = re.sub(r"(?s)<!--.*?-->", " ", body_html or "")
+    t = re.sub(r"(?i)<br\s*/?>|</(p|div|tr|li|h\d)>", "\n", t)
+    t = html.unescape(re.sub(r"<[^>]+>", " ", t))
+    return "\n".join(re.sub(r"[ \t\xa0]+", " ", ln).strip() for ln in t.splitlines() if ln.strip())
+
+
+def _img(u: str) -> str:
+    """Shopify 그림 주소의 `?v=` 는 캐시 깨기일 뿐이다 — 떼야 같은 그림이 같은 주소가 된다."""
+    return (u or "").split("?")[0]
+
+
+def get_patient(http: cc.PoliteSession, url: str, log=print, tries: int = 4):
+    """429 를 받으면 매장이 말한 만큼(Retry-After, 없으면 30·60·120초) 쉬고 다시 받는다.
+
+    PoliteSession 은 429 에 2·4초만 물러나고 포기한다. Shopify 는 IP 하나에 짧은 시간 요청이 몰리면
+    429 를 주는데, 상품 페이지를 한 벌씩 여는 이 수집기는 매장당 수백 번을 부른다. 같은 날 여러 판을
+    돌리다 렉토·PAF 가 목록부터 429 로 막았다(2026-09-23, 가드레일이 걸려 데이터는 안 바뀌었다).
+    """
+    r = None
+    for i in range(tries):
+        r = http.get(url, retries=0)
+        if r is None or r.status_code != 429:
+            return r
+        try:
+            wait = float(r.headers.get("Retry-After") or 0)
+        except ValueError:
+            wait = 0
+        wait = max(wait, 30 * (2 ** i))
+        log(f"  429 — {wait:.0f}초 쉬고 다시 ({i + 1}/{tries}) {url[:70]}")
+        time.sleep(wait)
+    return r
+
+
+def fetch_page(http: cc.PoliteSession, base: str, page: int, log=print,
+               currency: str = "KRW", limit: int = PAGE_LIMIT) -> list[dict] | None:
+    """목록 한 쪽. 통화가 다르거나 실패한 응답을 빈 목록으로 바꾸지 않는다."""
+    r = get_patient(http, f"{base}/products.json?limit={limit}&page={page}&currency={currency}", log)
+    if r is None or r.status_code != 200:
+        log(f"  {base} {page}쪽 받기 실패({getattr(r, 'status_code', '없음')}) — 이 판은 상태를 안 바꾼다")
+        return None
+    cur = r.cookies.get("cart_currency")
+    if cur and cur != currency:
+        log(f"  {base} 가 {cur} 로 답했다 — 요청 통화 {currency} 와 달라 이 판은 상태를 안 바꾼다")
+        return None
+    try:
+        got = r.json().get("products")
+        if not isinstance(got, list):
+            raise ValueError("상품 목록 없음")
+    except (ValueError, AttributeError):
+        log(f"  {base} {page}쪽이 상품 JSON 이 아니다 — 이 판은 상태를 안 바꾼다")
+        return None
+    return got
+
+
+def fetch_all(http: cc.PoliteSession, base: str, log=print, currency: str = "KRW") -> list[dict] | None:
+    out: list[dict] = []
+    for page in range(1, 200):
+        # KRW 요청을 무시하는 매장은 platforms.SHOPIFY_CURRENCY에 따로 적는다.
+        got = fetch_page(http, base, page, log, currency=currency, limit=PAGE_LIMIT)
+        if got is None:
+            return None
+        if not got:
+            break
+        out.extend(got)
+    return out
+
+
+def to_row(p: dict, slug: str, base: str, now: str, currency: str = "KRW") -> dict:
+    body = p.get("body_html") or ""
+    text = _text(body)
+    vs = p.get("variants") or []
+    prices = [int(float(v["price"])) for v in vs if v.get("price")] if currency == "KRW" else []
+    # Shopify 는 원화를 「395000」으로, 달러를 「315.00」으로 준다. 소수점이 있으면 원화가 아니다 —
+    # 위(fetch_all)에서 못 걸렀어도 여기서 멈춘다. 틀린 값을 쓰느니 판을 버린다.
+    if currency == "KRW" and any("." in str(v.get("price") or "") for v in vs):
+        raise ValueError(f"원화가 아닌 값: {p.get('title')} {[v.get('price') for v in vs][:3]}")
+    listed = [int(float(v["compare_at_price"])) for v in vs if v.get("compare_at_price")] if currency == "KRW" else []
+    imgs = [_img(i.get("src")) for i in (p.get("images") or []) if i.get("src")]
+    names = [str(t) for t in ([p.get("product_type")] + list(p.get("tags") or [])) if t]
+    d = {
+        "product_no": int(p["id"]),
+        "name": p.get("title") or "",
+        "price": min(prices) if prices else 0,
+        "soldout": not any(v.get("available") for v in vs),
+        "image_url": imgs[0] if imgs else "",
+        "gallery": imgs,
+        "source_url": f"{base}/products/{p['handle']}",
+        "description": text,
+        "description_source": "shopify",
+        "detail_text": text,
+        "size_table": cc.extract_size_any(body),
+        "spec": {"상품명": p.get("title") or "", "product_type": p.get("product_type") or ""},
+        "detail_images": [_img(u) for u in re.findall(r'<img[^>]+src="([^"]+)"', body)],
+        # 옵션 이름은 카페24 줄과 같게 「값/값」으로 잇는다 — 사이즈 이름을 옵션에서 채우는 단계가 읽는다
+        "options": [v.get("title") or "" for v in vs],
+        # 사이즈마다 품절을 따로 준다. 이게 없으면 카페24 규칙(cc.is_soldout)이 「옵션은 있는데
+        # 품절 표시가 없다」며 다 판 옷을 판매중으로 읽는다 — 첫 판에서 품절 62벌이 전부 판매중이었다.
+        "soldout_options": [v.get("title") or "" for v in vs if not v.get("available")],
+        "category_nos": [],
+        "category_names": names,
+        "brand_slug": slug,
+        "crawled_at": now,
+        "platform": "shopify",
+    }
+    if listed and max(listed) > d["price"]:
+        d["price_listed"] = max(listed)
+    d["source_currency"] = currency
+    if currency != "KRW":
+        # price는 원화 전용이다. 외화의 소수점·옵션별 값을 그대로 남긴다.
+        d["source_prices"] = [{"variant_id": v.get("id"), "price": v.get("price"),
+                               "compare_at_price": v.get("compare_at_price")} for v in vs]
+        d["price_unavailable"] = "원화 미제공"
+    return d
+
+
+_META_DESC = re.compile(r'(?is)<meta\s+(?:property="og:description"|name="description")\s+content="([^"]*)"')
+_TAB = re.compile(r'(?is)<details[^>]*>\s*<summary[^>]*>(.*?)</summary>(.*?)</details>')
+_RICH = re.compile(r'(?is)<div class="metafield-rich_text_field">(.*?)</div>')
+# 테마가 실측표를 메타필드 글이 아니라 **틀로 그리는** 매장(2026-10-01 새로 걷는 두 곳). 둘 다 목록 API 에는 없다.
+# - thug-club: 「Size Guide」 탭 안의 <table class="size-table"> — Size/cm · Length · Shoulder · Chest · Under · Arm
+#   (tc-subliminal-shirt 1~4 Size). 탭 글이 아니라 _RICH 로는 안 잡혔다.
+# - sansan-gear: 「size guide」 창의 <div class="sz__guide"> — 머리 칸(.label)과 사이즈 줄(<li>)이 <span> 칸이다
+#   (insulated-vest-black: Chest/Shoulder/Length × 1~4). 표가 아니라 extract_size_any 가 그대로는 한 줄로
+#   이어 읽어(「length 59.5, 41.5, 77.5 …」) 표로 바꿔 넘긴다. 바로 옆의 모델 정보(182cm 62kg)는 이 틀 밖이다.
+_SIZE_TABLE = re.compile(r'(?is)<table[^>]*class="[^"]*\bsize-table\b[^"]*"[^>]*>.*?</table>')
+_SZ_GUIDE = re.compile(r'(?is)<div class="sz__guide[^"]*">(.*?)</ul>')
+# 한 창에 머리 칸 + 줄 묶음이 둘 서는 옷 — 위 · 아래가 한 벌인 수트(intra-suit-black: Chest/Shoulder/Sleeve/Length 다음에
+# Waist/Crotch/Thigh/Bottom Width/Length). 첫 묶음만 읽어 하의 표를 버렸다(코덱스 018). 둘째 묶음은 size_html_parts 로.
+_SZ_GUIDE_ALL = re.compile(r'(?is)<div class="sz__guide[^"]*">(.*?)<div class="sz__model')
+_SZ_PAIR = re.compile(r'(?is)(<div class="label"[^>]*>.*?</div>\s*<ul[^>]*>.*?</ul>)')
+# 받아 둔 page_extras 의 꼴 — 바뀌면 지난 판 것을 쓰지 않고 페이지를 다시 연다(enrich)
+PAGE_EXTRAS_V = 2
+_SZ_CELLS = re.compile(r'(?is)<span[^>]*>(.*?)</span>')
+
+
+def _sz_guide_table(block: str) -> str:
+    # 바지 쪽은 머리 칸에 style 이 붙는다(<div class="label" style="margin-top: 16px;"> — sweatpants-black)
+    head = re.search(r'(?is)<div class="label"[^>]*>(.*?)</div>', block)
+    rows = re.findall(r'(?is)<li[^>]*>(.*?)</li>', block)
+    if not head or not rows:
+        return ""
+    heads = [_text(c) or "Size" for c in _SZ_CELLS.findall(head.group(1))]
+    body = [[_text(c) for c in _SZ_CELLS.findall(r)] for r in rows]
+    # 래글런은 어깨 칸에 값 대신 「RAG」를 적는다 — 그때 sleeve 는 어깨 솔기가 없어 뒷목에서 잰 화장이다
+    # (paneled-t-shirt 반팔 sleeve 50/52/54 · chest 53 — 어깨~소매끝이면 반팔이 50 일 수 없다). 소매길이로 두면
+    # sleeve_to_hwajang(80 넘을 때만 고친다)도 못 잡는다.
+    sh = [i for i, h in enumerate(heads) if re.fullmatch(r"(?i)shoulder", h)]
+    if sh and body and all(len(r) > sh[0] and re.fullmatch(r"(?i)rag(?:lan)?", r[sh[0]]) for r in body):
+        heads = ["화장" if re.fullmatch(r"(?i)sleeve", h) else h for h in heads]
+    e = html.escape
+    out = "<tr>" + "".join(f"<th>{e(h)}</th>" for h in heads) + "</tr>"
+    out += "".join("<tr>" + "".join(f"<td>{e(c)}</td>" for c in r) + "</tr>" for r in body)
+    return f"<table>{out}</table>"
+
+
+def _height_is_length(size_html: str) -> str:
+    """옷 표의 「Height」는 총장이다 — thug-club 은 Length 대신 Height 를 쓰는 표가 있다(alpha-cwu-45 · 코덱스 018).
+    가방 표(Width · Height · Depth)의 높이와 가르려고, Length 칸이 없고 몸 치수 칸(어깨 · 가슴 · 허리 …)이 같이
+    있을 때만 바꾼다. 오타 「Lengh」도 Length 로."""
+    heads = [h.strip().lower() for h in re.findall(r"(?is)<th[^>]*>(.*?)</th>", size_html)]
+    size_html = re.sub(r"(?i)(<th[^>]*>\s*)lengh(\s*</th>)", r"\1Length\2", size_html)
+    body = {"shoulder", "chest", "waist", "sleeve", "arm", "thigh", "hip"}
+    if "height" in heads and not {"length", "lengh"} & set(heads) and body & set(heads):
+        size_html = re.sub(r"(?i)(<th[^>]*>\s*)height(\s*</th>)", r"\1Length\2", size_html)
+    return size_html
+
+
+def page_size_html(html_text: str) -> str:
+    """상품 페이지에 틀로 그린 실측표 — 위 두 꼴. 없으면 빈 글. 줄의 page_extras 에 남으므로 빈칸을 접는다."""
+    m = _SIZE_TABLE.search(html_text or "")
+    if m:
+        return re.sub(r"\s+", " ", re.sub(r"(?s)<!--.*?-->", "", m.group(0)))
+    m = _SZ_GUIDE.search(html_text or "")
+    return _sz_guide_table(m.group(1)) if m else ""
+
+
+def page_extras(html_text: str) -> dict:
+    """상품 페이지에만 있는 것 — 목록 API(products.json)에는 안 온다.
+
+    - meta description: 렉토는 진짜 상품 설명이 여기에만 있다(body_html 은 실측표뿐).
+      「플레어 핏 실루엣의 수트 팬츠 … 고밀도 울 소재 MADE IN KOREA」
+    - 접이식 탭의 메타필드: PAF 는 「Composition / Cotton 100%」, 「Size Guide / Size(Length/
+      Chest/Arm/Shoulder) S : 69.5cm/54cm/…」가 여기에만 있다.
+    메타필드가 든 탭만 받는다 — 테마의 탭에는 배송·반품 같은 매장 공용 안내도 있고, 그건 상품 글이 아니다.
+    """
+    meta = ""
+    m = _META_DESC.search(html_text or "")
+    if m:
+        meta = html.unescape(m.group(1)).strip()
+    tabs: list[tuple[str, str]] = []
+    for head, body in _TAB.findall(html_text or ""):
+        rich = _RICH.findall(body)
+        if not rich:
+            continue
+        h = _text(head).splitlines()[-1] if _text(head) else ""
+        tabs.append((h, "\n".join(_text(x) for x in rich)))
+    out = {"meta": meta, "tabs": tabs, "v": PAGE_EXTRAS_V}
+    size_html = page_size_html(html_text)
+    if size_html:
+        out["size_html"] = size_html
+    m = _SZ_GUIDE_ALL.search(html_text or "")
+    pairs = _SZ_PAIR.findall(m.group(1)) if m else []
+    if len(pairs) >= 2:
+        out["size_html_parts"] = [_sz_guide_table(x) for x in pairs[1:] if _sz_guide_table(x)]
+    return out
+
+
+def enrich(d: dict, old: dict | None, updated_at: str, http: cc.PoliteSession) -> None:
+    """상품 페이지를 읽어 설명·스펙·실측을 채운다. 상품이 안 바뀌었으면 지난 판 것을 쓴다."""
+    ex = None
+    if (old and old.get("page_updated_at") == updated_at and isinstance(old.get("page_extras"), dict)
+            and old["page_extras"].get("v", 1) >= PAGE_EXTRAS_V):
+        ex = old["page_extras"]
+    else:
+        r = get_patient(http, d["source_url"])
+        if r is not None and r.status_code == 200:
+            ex = page_extras(r.text)
+            d["page_updated_at"] = updated_at
+    if not ex:
+        return
+    d["page_extras"] = ex
+    parts = [d.get("description") or ""]
+    # meta 설명은 그것이 진짜 상품 설명인 매장에서만 쓴다(platforms.SHOPIFY_META_DESC 주석).
+    meta = (ex.get("meta") or "") if d["brand_slug"] in SHOPIFY_META_DESC else ""
+    flat = re.sub(r"\s+", " ", d.get("description") or "")
+    if meta and re.sub(r"\s+", " ", meta)[:40] not in flat:
+        parts.insert(0, meta)
+    tab_text = "\n".join(f"{h}\n{b}" for h, b in ex.get("tabs") or [])
+    d["description"] = "\n".join(x for x in parts if x).strip()
+    d["detail_text"] = "\n".join(x for x in (d["description"], tab_text) if x).strip()
+    spec = dict(d.get("spec") or {})
+    for h, b in ex.get("tabs") or []:
+        if h and b:
+            spec[h] = b
+            if re.search(r"(?i)composition|material|fabric|소재|혼용", h):
+                spec["소재"] = b
+    d["spec"] = spec
+    # 탭의 실측은 「Size(Length/Chest/Arm/Shoulder) / S : 69.5cm/54cm/…」 꼴이다. HTML 표 추출기
+    # (extract_size_any)로는 첫 줄 S 하나만 잡혔다 — 글 표를 읽는 from_ocr 는 네 줄을 다 읽는다.
+    import size_from_ocr
+    width = max((len(v) for k, v in (d.get("size_table") or {}).items()
+                 if not k.startswith("_") and isinstance(v, list)), default=0)
+    for h, b in ex.get("tabs") or []:
+        if not re.search(r"(?i)size|사이즈|실측", h):
+            continue
+        # 머리줄에 「Size(」가 없는 꼴(「Length/Chest/Sleeve/Shoulder / S: 62.5cm/52cm/…」)은 from_ocr 가
+        # 사이즈 이름 줄로 보지 않는다 — 감싸 주면 읽힌다(PAF 옷 66벌이 이 꼴이었다).
+        b = re.sub(r"^\s*([A-Za-z][A-Za-z ]*(?:/\s*[A-Za-z][A-Za-z ]*)+)\s*$", r"Size(\1)", b, count=1, flags=re.M)
+        names, cols = size_from_ocr.from_ocr(b)
+        n = max((len(v) for v in cols.values()), default=0)
+        if len(cols) >= 2 and n > width:
+            d["size_table"] = {**cols, **({"_names": names} if names else {})}
+            break
+    # 틀로 그린 실측표(page_size_html) — 탭 글 표보다 사이즈가 많을 때만 갈아탄다(같은 잣대)
+    if ex.get("size_html"):
+        width = max((len(v) for k, v in (d.get("size_table") or {}).items()
+                     if not k.startswith("_") and isinstance(v, list)), default=0)
+        t = cc.extract_size_any(_height_is_length(ex["size_html"]))
+        n = max((len(v) for k, v in t.items() if not k.startswith("_") and isinstance(v, list)), default=0)
+        if len([k for k in t if not k.startswith("_")]) >= 2 and n > width:
+            d["size_table"] = t
+    # 둘째 표 — 하의 라벨이면 size_table 의 「_parts」로(size_from_ocr.html_low_part 가 하의 탭으로 낸다)
+    low_keys = {"waist", "thigh", "rise", "crotch", "hip", "hem", "inseam"}
+    for h2 in ex.get("size_html_parts") or []:
+        t2 = cc.extract_size_any(_height_is_length(h2))
+        cols = [k for k in t2 if not k.startswith("_")]
+        if len(cols) >= 2 and d.get("size_table") and any(any(x in k.lower() for x in low_keys) for k in cols):
+            d["size_table"] = {**d["size_table"], "_parts": [{"part": "하의", **t2}]}
+            break
+
+
+def load_prev(slug: str) -> dict[int, dict]:
+    p = CRAWL_DIR / f"{slug}.jsonl"
+    rows: dict[int, dict] = {}
+    if p.exists():
+        for ln in p.read_text(encoding="utf-8").splitlines():
+            try:
+                d = json.loads(ln)
+            except ValueError:
+                continue
+            rows[int(d["product_no"])] = d
+    return rows
+
+
+def merge_rows(slug: str, prev: dict[int, dict], got: list[dict], now_ts: str, rep: dict, log=print) -> dict:
+    """이번 판에 받은 줄(got)을 지난 판(prev)에 합쳐 쓴다 — 식스샵 수집기도 이것을 쓴다.
+
+    가드레일 · 첫 등장 · 품절/재입고 · 값 자국(cc.carry_over) · 연속 두 판 없으면 delisted.
+    판단이 매장 종류마다 갈리지 않게 한 곳에 둔다.
+    """
+    today = now_ts[:10]
+    active = {no for no, d in prev.items() if not d.get("soldout") and not d.get("delisted")}
+    if len(active) > 20 and len(got) < GUARD_RATIO * len(active):
+        rep["guard"] = f"목록 {len(got)} < 판매중 {len(active)}×{GUARD_RATIO} — 상태 변경 보류"
+        log(f"[{slug}] 가드레일: {rep['guard']}")
+        return rep
+    rows = dict(prev)
+    seen: set[int] = set()
+    for d in got:
+        no = d["product_no"]
+        seen.add(no)
+        old = prev.get(no)
+        if old:
+            for k in ("first_seen", "soldout_since"):
+                if k in old:
+                    d[k] = old[k]
+            # 다른 단계가 붙여 둔 것(상세 보정 시각 등)은 잃지 않는다. 다만 수집기가 **없어서 안 쓴**
+            # 칸(OWN_KEYS)은 이어받지 않는다 — 품절 표시를 찾은 식스샵 상품에 지난 판의
+            # soldout_unknown 이 남았다(샌드박스 두 번째 판, 2026-09-23). 정가는 여기서 다루지 않는다 —
+            # cc.carry_over 가 「한 번 본 정가는 잇고, 파는 값이 정가 이상이면 뗀다」로 따로 판단한다.
+            for k, v in old.items():
+                if k not in OWN_KEYS:
+                    d.setdefault(k, v)
+            if not old.get("soldout") and d["soldout"]:
+                d["soldout_since"] = today; rep["soldout"] += 1
+            elif old.get("soldout") and not d["soldout"]:
+                d.pop("soldout_since", None); rep["restock"] += 1
+        else:
+            d["first_seen"] = today; rep["new"] += 1
+            if d["soldout"]:
+                d["soldout_since"] = today
+        cc.carry_over(old or {}, d, now_ts)
+        d["last_seen"] = today
+        d["missing_weeks"] = 0
+        d.pop("delisted", None)
+        rows[no] = d
+    for no, d in rows.items():
+        if no in seen or d.get("delisted"):
+            continue
+        d["missing_weeks"] = int(d.get("missing_weeks", 0)) + 1
+        if d["missing_weeks"] >= DELIST_AFTER:
+            d["delisted"] = True; d["soldout"] = True
+            d.setdefault("soldout_since", today); rep["delisted"] += 1
+    # 한 상품 한 줄로 다시 쓴다 — 창고의 다른 매장 파일도 합치기 단계가 그렇게 접는다
+    out = CRAWL_DIR / f"{slug}.jsonl"
+    tmp = out.with_suffix(".jsonl.part")
+    with tmp.open("w", encoding="utf-8") as f:
+        for no in sorted(rows):
+            f.write(json.dumps(rows[no], ensure_ascii=False) + "\n")
+    tmp.replace(out)
+    log(f"[{slug}] 목록 {rep['listed']} · 신상 {rep['new']} · 품절 {rep['soldout']} · 재입고 {rep['restock']} · 삭제 {rep['delisted']}")
+    return rep
+
+
+def crawl_one(http: cc.PoliteSession, slug: str, log=print) -> dict:
+    base = SHOPIFY[slug]
+    now_ts = datetime.now(cc.KST).strftime("%Y-%m-%dT%H:%M:%S")
+    rep = {"slug": slug, "listed": 0, "new": 0, "soldout": 0, "restock": 0, "delisted": 0, "guard": ""}
+    currency = SHOPIFY_CURRENCY.get(slug, "KRW")
+    got = fetch_all(http, base, log, currency=currency)
+    prev = load_prev(slug)
+    if got is None:
+        rep["guard"] = "목록 받기 실패"
+        return rep
+    own = SHOPIFY_OWN_TAG.get(slug)
+    if own:
+        # 남의 브랜드도 파는 매장은 자체 상품 태그가 붙은 것만(platforms.SHOPIFY_OWN_TAG 주석)
+        keep = [p for p in got if own in {str(t).strip().casefold() for t in p.get("tags") or []}]
+        rep["skipped"] = len(got) - len(keep)
+        got = keep
+    rep["listed"] = len(got)
+    active = {no for no, d in prev.items() if not d.get("soldout") and not d.get("delisted")}
+    if len(active) > 20 and len(got) < GUARD_RATIO * len(active):
+        # 상품 페이지를 열기 전에 멈춘다 — 목록이 반쪽이면 수백 쪽을 열 까닭이 없다
+        rep["guard"] = f"목록 {len(got)} < 판매중 {len(active)}×{GUARD_RATIO} — 상태 변경 보류"
+        log(f"[{slug}] 가드레일: {rep['guard']}")
+        return rep
+    page_http = cc.PoliteSession(delay=max(http.delay, PAGE_DELAY)) if slug in SHOPIFY_PAGES else None
+    # 실측표를 Kiwi Sizing 에만 둔 매장(고엔제이) — 그 밖의 매장은 None 이라 아무 것도 안 부른다(kiwi_sizing 머리말)
+    kiwi = kiwi_sizing.client(slug, log)
+    rows = []
+    for p in got:
+        d = to_row(p, slug, base, now_ts, currency=currency)
+        if page_http:
+            enrich(d, prev.get(d["product_no"]), p.get("updated_at") or "", page_http)
+        # enrich 뒤에 붙인다 — enrich 가 detail_text 를 새로 짜므로 모델 안내가 그 뒤에 이어져야 산다
+        if kiwi:
+            kiwi.enrich(d, prev.get(d["product_no"]), p)
+        rows.append(d)
+    if kiwi:
+        log(f"[{slug}] Kiwi Sizing {kiwi.calls}번 받음 · 실측표 {sum(1 for d in rows if (d.get('kiwi') or {}).get('table'))}벌")
+    return merge_rows(slug, prev, rows, now_ts, rep, log)
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--brands", nargs="*", help="slug 목록. 없으면 platforms.SHOPIFY 전부")
+    ap.add_argument("--delay", type=float, default=2.0, help="같은 호스트 요청 간격(초)")
+    args = ap.parse_args()
+    slugs = args.brands or sorted(SHOPIFY)
+    bad = [s for s in slugs if s not in SHOPIFY]
+    if bad:
+        sys.exit(f"Shopify 매장이 아니다: {' '.join(bad)} (platforms.SHOPIFY 에 없음)")
+    CRAWL_DIR.mkdir(parents=True, exist_ok=True)
+    http = cc.PoliteSession(delay=args.delay)
+    reps = [crawl_one(http, s) for s in slugs]
+    if any(r["guard"] for r in reps):
+        print("가드레일에 걸린 매장: " + ", ".join(r["slug"] for r in reps if r["guard"]), file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()
