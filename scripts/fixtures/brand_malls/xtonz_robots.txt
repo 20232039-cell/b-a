@@ -1,0 +1,61 @@
+User-agent: Googlebot
+Disallow:
+Disallow: /admin
+Disallow: /exec/front/
+Disallow: /api
+Disallow: /member/
+Disallow: /myshop/
+Disallow: /protected/
+Disallow: /skin-*/
+Disallow: /board/*/modify.html
+Disallow: /board/*/reply.html
+Disallow: /board/*/write.html
+Disallow: /amp/board/
+Disallow: /*board*page=
+Disallow: /*article*page=
+Disallow: /*board*category_no=
+Disallow: /*article*category_no=
+Disallow: /*page_4=
+Disallow: /*page_6=
+
+User-agent: Googlebot-image
+Disallow:
+
+User-agent: bingbot
+Disallow: /admin
+Disallow: /exec/front/
+Disallow: /api
+Disallow: /member/
+Disallow: /myshop/
+Disallow: /protected/
+Disallow: /skin-*/
+Disallow: /board/*/modify.html
+Disallow: /board/*/reply.html
+Disallow: /board/*/write.html
+Disallow: /amp/board/
+Disallow: /*board*page=
+Disallow: /*article*page=
+Disallow: /*board*category_no=
+Disallow: /*article*category_no=
+Disallow: /*page_4=
+Disallow: /*page_6=
+Crawl-delay: 10
+
+User-agent: *
+Disallow: /admin
+Disallow: /exec/front/
+Disallow: /api
+Disallow: /member/
+Disallow: /myshop/
+Disallow: /protected/
+Disallow: /skin-*/
+Disallow: /board/*/modify.html
+Disallow: /board/*/reply.html
+Disallow: /board/*/write.html
+Disallow: /amp/board/
+Disallow: /*board*page=
+Disallow: /*article*page=
+Disallow: /*board*category_no=
+Disallow: /*article*category_no=
+Disallow: /*page_4=
+Disallow: /*page_6=

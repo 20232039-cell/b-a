@@ -1,0 +1,35 @@
+# API 키가 들어 있고 통하는지만 본다(2026-11-20). 모델 목록을 받아 보는 것이라 비용이 들지 않는다.
+# 키 값은 찍지 않는다 — 응답 코드와 모델 이름 몇 개만.
+name: api-check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Claude
+        env:
+          K: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          [ -n "$K" ] || { echo "::error::ANTHROPIC_API_KEY 없음"; exit 1; }
+          code=$(curl -s -o /tmp/a.json -w "%{http_code}" https://api.anthropic.com/v1/models \
+            -H "x-api-key: $K" -H "anthropic-version: 2023-06-01")
+          echo "Claude 응답 $code"
+          [ "$code" = 200 ] && jq -r '.data[].id' /tmp/a.json | head -8 || jq -r '.error.type? // .' /tmp/a.json | head -3
+          [ "$code" = 200 ]
+      - name: OpenAI
+        if: always()
+        env:
+          K: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          [ -n "$K" ] || { echo "::error::OPENAI_API_KEY 없음"; exit 1; }
+          code=$(curl -s -o /tmp/o.json -w "%{http_code}" https://api.openai.com/v1/models -H "Authorization: Bearer $K")
+          echo "OpenAI 응답 $code"
+          [ "$code" = 200 ] && jq -r '.data[].id' /tmp/o.json | sort | grep -E '^(gpt|o[0-9])' | grep -v -E 'realtime|audio|transcribe|tts|search|image|whisper|translate' | tr '\n' ' ' || jq -r '.error.code? // .error.message? // .' /tmp/o.json | head -3
+          [ "$code" = 200 ]

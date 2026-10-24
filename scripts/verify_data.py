@@ -1,0 +1,245 @@
+#!/usr/bin/env python3
+"""수집한 데이터가 스스로 모순되지 않는지 본다 — 상품 ↔ 카테고리 ↔ 사이즈 ↔ 설명.
+
+왜 따로 두나: 커버리지(coverage.py)는 「얼마나 모았나」를 재고, 이 파일은 「모은 게
+맞나」를 잰다. xlim 을 영문몰(USD)로 훑어 921건이 통째로 사라진 걸 두 주 동안 못 봤다
+— 퍼센트만 보면 안 보이는 종류의 고장이라 검사를 따로 박아 둔다(2026-09-05).
+
+각 검사는 「이건 확실히 틀렸다」만 센다. 애매한 건 안 센다 — 거짓 경보가 쌓이면
+아무도 안 본다.
+
+    py scripts/verify_data.py            # 요약
+    py scripts/verify_data.py --show 8   # 검사마다 예시 8개
+"""
+from __future__ import annotations
+
+import argparse
+import collections
+import glob
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA = ROOT / "data"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from crawl_cafe24 import classify_category, acc_of         # noqa: E402
+from crawl_cafe24 import JUNK_NAME as CRAWL_JUNK, not_a_product   # noqa: E402
+from coverage import is_apparel                            # noqa: E402
+
+# 카테고리마다 「이 라벨이 있어야 말이 된다」 — 하의 표에 어깨, 상의 표에 밑위는 서로 다른
+# 옷의 표를 붙인 것이다(사이즈 표를 상품이 아니라 매장 안내에서 긁어 온 경우).
+EXPECT = {
+    "tops":    ({"가슴", "어깨", "총장", "소매길이", "암홀", "화장"}, {"밑위", "허벅지"}),
+    "outer":   ({"가슴", "어깨", "총장", "소매길이", "암홀", "화장"}, {"밑위", "허벅지"}),
+    "bottoms": ({"허리", "밑위", "허벅지", "총장", "밑단", "엉덩이"}, {"어깨", "가슴", "암홀"}),
+    "skirt":   ({"허리", "총장", "밑단", "엉덩이"}, {"어깨", "암홀", "밑위"}),
+}
+# 값이 이 밖이면 단위를 잘못 읽었거나 남의 표다(cm 기준, 사람 몸 치수의 바깥 테두리).
+SANE = {"총장": (20, 175), "어깨": (25, 85), "가슴": (25, 100), "허리": (20, 80),
+        "밑위": (10, 55), "허벅지": (12, 60), "엉덩이": (25, 90), "밑단": (6, 65),
+        "소매길이": (5, 90), "암홀": (10, 50),
+        # 화장의 아래쪽을 40 → 25 로 넓힌다. 40 아래 472개를 열어 보니 전부 **반팔
+        # 래글런**이었다 — covernat 「우먼 스트라이프 하프 니트」 28~29.5 ·
+        # afterpray 링거 티셔츠 34.5~36.5 · etmon Raglan String Dress 31~31.5.
+        # 뒷목 중심에서 잰 반팔은 실제로 그만큼이다(2026-09-15 전수 확인).
+        "화장": (25, 110)}
+# 「test」를 낱말 경계 없이 찾고 있었다 — passer 「NMPD SHIELD - USED IN PRO**TEST**」와
+# ronron 「SOF**TEST** DREAM CAT LONG SLEEVE」가 상품이 아닌 행으로 섰다(2026-09-15).
+# 「sample」도 뺀다: ava-molli 의 [SAMPLE] 35벌은 9만~22만원에 실제로 파는 옷이다
+# (샘플 세일). 이름에 sample 이 들었다고 상품이 아닌 게 아니다.
+JUNK_NAME = re.compile(r"개인\s*결제|결제창|\btest\b|테스트|배송비|추가금|적립금|"
+                       r"^[¥₩\W]{2,}$|documentation|campaign film|스탭스냅", re.I)
+
+
+def latest_rows():
+    for f in sorted(glob.glob(str(DATA / "crawl" / "*.jsonl"))):
+        slug = os.path.basename(f)[:-6]
+        if slug.startswith("_"):
+            continue
+        seen = {}
+        for line in open(f, encoding="utf-8"):
+            try:
+                d = json.loads(line)
+            except Exception:
+                continue
+            seen[d["product_no"]] = d
+        for d in seen.values():
+            yield slug, d
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--show", type=int, default=5)
+    args = ap.parse_args()
+
+    sizes = json.loads((DATA / "product_sizes.json").read_text(encoding="utf-8"))
+    tags = json.loads((DATA / "product_tags_full.json").read_text(encoding="utf-8"))
+    fails: dict[str, list] = collections.defaultdict(list)
+    per_brand_price: dict[str, list] = collections.defaultdict(list)
+    n_live = 0
+
+    # 0. 창고 파일이 스스로 안 읽힌다 — 상품 기록이 조각나 사라진 것
+    # str.splitlines() 는 U+0085(NEL)·U+2028·U+2029 도 줄바꿈으로 세는데 json.dumps 는
+    # 그것들을 그대로 흘린다. 우리 코드는 두 가지 읽기(줄 순회 · splitlines)를 섞어 쓰므로,
+    # 그런 글자가 든 줄은 쪽에 따라 보이기도 하고 사라지기도 한다 — 가장 나쁜 종류의 고장이다.
+    # 2026-09-15 wiggle-wiggle 에서 잡았다(그림 주소에 잘못 디코드된 자모, 상품 한 벌 증발).
+    for f in sorted(glob.glob(str(DATA / "crawl" / "*.jsonl"))) + \
+             sorted(glob.glob(str(DATA / "crawl" / "ocr" / "*.jsonl"))):
+        txt = open(f, encoding="utf-8").read()
+        n_line, n_nl = len(txt.splitlines()), txt.count("\n")
+        broken = 0
+        for line in txt.splitlines():
+            if not line.strip():
+                continue
+            try:
+                json.loads(line)
+            except Exception:
+                broken += 1
+        if broken or n_line != n_nl:
+            fails["창고 파일의 줄이 깨졌다"].append(
+                (os.path.basename(f)[:-6], f"안 읽히는 줄 {broken} · splitlines {n_line} vs 줄바꿈 {n_nl}", f))
+
+    for slug, d in latest_rows():
+        name = d.get("name") or ""
+        url = d.get("source_url") or ""
+        if d.get("soldout"):
+            continue
+        n_live += 1
+        code = classify_category(name, d.get("category_names") or [], d.get("description") or "")
+        per_brand_price[slug].append(int(d.get("price") or 0))
+
+        # 1. 상품이 아닌 행이 상품으로 올라와 있다
+        # 수집기가 이미 이름만 보고 걸러 내는 행(build_csv)은 앱에 안 올라간다 — 여기서
+        # 또 세면 338건이 쌓여 아무도 안 본다. **수집기를 빠져나간 것만** 센다.
+        if (JUNK_NAME.search(name) or len(name.strip()) < 2) and not (
+                CRAWL_JUNK.search(name) or not_a_product(name)):
+            fails["상품이 아닌 행"].append((slug, name, url))
+
+        # 2. 사진이 없다 — 앱이 보여줄 수 없다
+        if not d.get("image_url") and not d.get("gallery"):
+            fails["대표 사진 없음"].append((slug, name, url))
+
+        st = (sizes.get(url) or {}).get("sizes") or {}
+
+        # 3. 카테고리와 사이즈 표의 라벨이 서로 다른 옷을 가리킨다
+        if st and code in EXPECT:
+            ok, never = EXPECT[code]
+            wrong = set(st) & never
+            if wrong and not (set(st) & ok):
+                fails["카테고리 ↔ 사이즈 라벨 불일치"].append(
+                    (slug, f"{name} [{code}] {sorted(st)}", url))
+
+        # 4. 값이 사람 몸 치수 밖이다
+        for lab, vals in st.items():
+            lo, hi = SANE.get(lab, (0, 999))
+            bad = [v for v in vals if isinstance(v, (int, float)) and not (lo <= v <= hi)]
+            if bad:
+                fails["사이즈 값이 범위 밖"].append((slug, f"{name} {lab}={bad}", url))
+                break
+
+        # 5. 같은 표 안에서 사이즈 수가 라벨마다 다르다 — 값이 밀려 들어간 것
+        if st and len({len(v) for v in st.values() if isinstance(v, list)}) > 1:
+            fails["라벨마다 사이즈 개수가 다름"].append(
+                (slug, f"{name} {[(k, len(v)) for k, v in st.items()]}", url))
+
+        # 6. 사이즈가 커질수록 커져야 하는데 뒤집혔다(가슴·허리 — 두 벌 이상일 때만)
+        for lab in ("가슴", "허리", "어깨", "총장"):
+            v = st.get(lab)
+            v = [x for x in v if isinstance(x, (int, float))] if isinstance(v, list) else None
+            if v and len(v) >= 3 and v == sorted(v, reverse=True) and v[0] != v[-1]:
+                fails["사이즈 순서가 거꾸로"].append((slug, f"{name} {lab}={v}", url))
+                break
+
+        # 7. 옷인데 소재가 「가죽 100%」처럼 옷이 아닌 것뿐 — 표기 자체가 없는 건 커버리지 몫
+        mat = ((tags.get(url) or {}).get("tags") or {}).get("material")
+        if mat and isinstance(mat, list) and code in EXPECT:
+            if all(re.fullmatch(r"[\d.%\s]+", str(m) or "") for m in mat):
+                fails["소재 값이 숫자뿐"].append((slug, f"{name} {mat}", url))
+
+        # 8. 잡화인데 옷 사이즈 표가 붙어 있다(매장 공용 안내표를 물어 온 것)
+        if st and code in ("bags", "accessories", "jewelry", "headwear", "lifestyle"):
+            if set(st) & {"어깨", "가슴", "밑위", "허벅지"}:
+                fails["잡화에 옷 사이즈 표"].append((slug, f"{name} [{code}] {sorted(st)}", url))
+
+        # 9-1. 한 라벨 안에서 값이 배로 벌어진다 — 서로 다른 두 항목을 한 라벨로 읽은 것
+        for lab, vals in st.items():
+            pos = [v for v in vals if isinstance(v, (int, float)) and v > 0]
+            if len(pos) >= 2 and max(pos) / min(pos) > 1.6:
+                fails["한 라벨 안에서 값이 1.6배 넘게 벌어짐"].append(
+                    (slug, f"{name} {lab}={pos}", url))
+                break
+
+        # 9. 이름은 잡화인데 옷으로 세고 있다(또는 그 반대)
+        # 수집기와 **같은 손질**을 거친 이름으로 본다(acc_of). raw 이름에 걸면
+        # 「WIDE UTILITY SHIRT / BLUE STRIPE OXFORD」가 구두가 되어 39번 헛울렸다.
+        # 앱 목록에 아예 안 올라가는 kids 는 세지 않는다 — 148벌이 여기 쌓여 있었다
+        # (KIDS BEANIE·KIDS BACKPACK·KIDS UGG BOOTS…). 둘 다 2026-09-15 확인.
+        acc = acc_of(name)
+        if acc and is_apparel(d) and code != "kids":
+            fails["잡화 이름인데 의류로 셈"].append((slug, f"{name} → {acc}", url))
+
+    # 9-2. 색만 다른 같은 옷인데 치수가 다르다 — 같은 옷이니 실측도 같아야 한다
+    import re as _re
+    _COL = _re.compile(r"[\s_\-\(\[/]*(black|white|ivory|beige|navy|blue|grey|gray|charcoal|khaki|"
+                       r"olive|brown|cream|pink|red|green|블랙|화이트|아이보리|베이지|네이비|블루|"
+                       r"그레이|차콜|카키|올리브|브라운|크림|핑크|레드|그린)[\s_\-\)\]/]*", _re.I)
+    fam = collections.defaultdict(list)
+    for slug, d in latest_rows():
+        if d.get("soldout"):
+            continue
+        u = d.get("source_url") or ""
+        st = (sizes.get(u) or {}).get("sizes") or {}
+        if not st:
+            continue
+        base = _COL.sub(" ", _re.sub(r"\[[^\]]*\]", "", d.get("name") or "")).strip().lower()
+        if base:
+            fam[(slug, base)].append((d.get("name"), u, st))
+    for (slug, base), sibs in fam.items():
+        if len(sibs) < 2:
+            continue
+        first = sibs[0][2]
+        for nm, u, st in sibs[1:]:
+            for lab in set(first) & set(st):
+                a = [x for x in first[lab] if isinstance(x, (int, float))]
+                b = [x for x in st[lab] if isinstance(x, (int, float))]
+                # 사이즈 벌 수가 다르면 맞댈 수 없다 — 한 벌짜리 [54] 와 세 벌짜리
+                # [42, 43.5, 45] 를 앞에서부터 짝지으면 멀쩡한 상품이 어긋난 것으로 잡힌다
+                # (9999archive 「Archive Long Sleeves」, 2026-09-05).
+                n = len(a)
+                if n != len(b) or not n:
+                    continue
+                if any(abs(x - y) > 3 for x, y in zip(a, b)):
+                    fails["(참고) 색만 다른 같은 옷인데 치수가 다름 — 남녀 차이일 수 있어 고치지 않는다"].append(
+                        (slug, f"{nm[:40]} {lab}: {a[:3]} vs {b[:3]}", u))
+                    break
+            else:
+                continue
+            break
+
+    # 10. 매장 통째로 값이 이상하다 — 외화 매장(xlim/en.xlim.link)이 이 꼴이었다
+    for slug, ps in per_brand_price.items():
+        if len(ps) < 20:
+            continue
+        cheap = sum(1 for p in ps if p <= 1000)
+        if cheap / len(ps) > 0.8:
+            fails["매장 값이 통째로 1,000 이하"].append(
+                (slug, f"{cheap}/{len(ps)}건 — 외화 매장을 훑은 게 아닌지 official_url 확인", ""))
+
+    print(f"판매중 {n_live}건 검사\n")
+    if not fails:
+        print("  걸린 것 없음")
+    for k, v in sorted(fails.items(), key=lambda x: -len(x[1])):
+        by = collections.Counter(s for s, _, _ in v)
+        print(f"  {k}: {len(v)}건  ({', '.join(f'{b} {n}' for b, n in by.most_common(4))})")
+        for s, t, u in v[:args.show]:
+            print(f"      {s} · {t}")
+            if u:
+                print(f"        {u}")
+    print(f"\n합계 {sum(len(v) for v in fails.values())}건")
+
+
+if __name__ == "__main__":
+    main()

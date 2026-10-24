@@ -1,0 +1,36 @@
+# 비공개 데이터 저장소를 work/ 에 받아 두고, 이 저장소(일꾼)의 스크립트를 그 위에 얹는다.
+# 스크립트는 ROOT = 파일의 부모의 부모 로 data/ 를 찾으므로, work/scripts 에 두면 work/data 를 본다.
+name: 데이터 저장소 준비
+description: 비공개 데이터 저장소를 받고 일꾼 스크립트를 얹는다
+inputs:
+  token:
+    description: 데이터 저장소에 읽고 쓸 수 있는 토큰 (secrets.DATA_TOKEN)
+    required: true
+  repo:
+    description: owner/repo
+    required: false
+    default: 20232039-cell/layer-brand-agent
+  branch:
+    description: 작업 가지
+    required: false
+    default: crawl/cafe24-full-catalog
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        set -e
+        git clone --depth 1 --branch "${{ inputs.branch }}" \
+          "https://x-access-token:${{ inputs.token }}@github.com/${{ inputs.repo }}.git" work
+        rm -rf work/scripts
+        cp -r "$GITHUB_WORKSPACE/scripts" work/scripts
+        cd work
+        # 얹은 scripts/ 는 이 판에서만 쓰는 사본이니 git 눈에서 뺀다. 안 그러면 사람이
+        # 거울에 **새 파일**을 올린 판을 받을 때 rebase 가 통째로 멈춘다 — 받아야 할 파일이
+        # 여기서는 「추적 안 되는 파일」이라 git 이 덮기를 거부한다(2026-09-20 판
+        # 35507459684: upload_supabase.py 하나 때문에 OCR 수확이 세 번 다 못 밀리고 끝났다).
+        # 무시 목록에 든 파일은 git 이 말없이 덮으므로 그 자리에서 풀린다.
+        printf 'scripts/\n' >> .git/info/exclude
+        git config user.name "layer-runner-bot"
+        git config user.email "runner@layer.invalid"
+        echo "데이터 저장소 준비됨 — $(ls data/crawl/*.jsonl | wc -l)개 브랜드"

@@ -1,0 +1,101 @@
+User-agent: Googlebot
+Disallow: /secured/
+Disallow: /raffle/
+Allow: /
+
+User-agent: Googlebot-Image
+Disallow: /secured/
+Disallow: /raffle/
+Allow: /
+
+User-agent: Googlebot-Mobile
+Disallow: /secured/
+Disallow: /raffle/
+Allow: /
+
+User-agent: Google-Extended
+Disallow: /secured/
+Disallow: /raffle/
+Allow: /
+
+User-agent: Mediapartners-Google
+Disallow: /secured/
+Disallow: /raffle/
+Allow: /
+
+User-agent: NaverBot
+Disallow: /secured/
+Disallow: /raffle/
+Allow: /
+
+User-agent: daumoa
+Disallow: /secured/
+Disallow: /raffle/
+Allow: /
+
+User-agent: Baiduspider
+Disallow: /secured/
+Disallow: /raffle/
+Allow: /
+
+User-agent: Baiduspider-image
+Disallow: /secured/
+Disallow: /raffle/
+Allow: /
+
+User-agent: Bingbot
+Disallow: /secured/
+Disallow: /raffle/
+Allow: /
+
+User-agent: GPTBot
+Disallow: /secured/
+Disallow: /raffle/
+Allow: /
+
+User-agent: ChatGPT-User
+Disallow: /secured/
+Disallow: /raffle/
+Allow: /
+
+User-agent: OAI-SearchBot
+Disallow: /secured/
+Disallow: /raffle/
+Allow: /
+
+User-agent: PerplexityBot
+Disallow: /secured/
+Disallow: /raffle/
+Allow: /
+
+User-agent: Perplexity-User
+Disallow: /secured/
+Disallow: /raffle/
+Allow: /
+
+User-agent: ClaudeBot
+Disallow: /secured/
+Disallow: /raffle/
+Allow: /
+
+User-agent: Claude-User
+Disallow: /secured/
+Disallow: /raffle/
+Allow: /
+
+User-agent: Claude-SearchBot
+Disallow: /secured/
+Disallow: /raffle/
+Allow: /
+
+User-agent: Yeti
+Disallow: /secured/
+Disallow: /raffle/
+Allow: /
+
+User-agent: *
+Disallow: /
+
+
+# sitemaps
+sitemap: https://m.ssfshop.com/sitemap_index.xml

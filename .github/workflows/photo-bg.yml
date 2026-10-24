@@ -1,0 +1,96 @@
+# 대표 사진 가장자리 바탕색 — scripts/photo_bg.py 머리말. 앱 세션 부탁(2026-11-10, 컬렉션 표지 시안 A).
+# 결과 data/photo_bg/<조각>.jsonl 은 export_app_data.photo_bg 가 index 의 bg 칸으로 쓴다(publish 때 반영). 이미 잰 사진은 건너뛴다.
+# 비용: 모델 없이 사진만 받아 7점을 본다 — 판매중 10만 장을 8조각, 조각마다 1시간 안팎.
+
+name: photo-bg
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "조각마다 사진 수 상한(0 이면 전부)"
+        required: false
+        default: "0"
+      hours:
+        description: "조각마다 쓸 시간 상한(시간)"
+        required: false
+        default: "5"
+  # 주간 수집(weekly.yml)이 합치기 뒤에 부른다(2026-11-11) — 새로 들어온 상품 몫만 돈다(이미 본 것은 건너뛴다).
+  # concurrency 그룹은 부른 쪽의 ref 로 풀려 손으로 돌릴 때와 같다 — 두 판이 같은 조각 파일을 동시에 붙이지 않는다.
+  # soft: 조각이 죽어도 부른 판(주간 수집)의 결론을 실패로 만들지 않는다 — embed 가 주간 수집의 성공에 물려 돈다.
+  workflow_call:
+    inputs:
+      limit: {type: string, required: false, default: "0"}
+      hours: {type: string, required: false, default: "5"}
+      soft: {type: boolean, required: false, default: false}
+    secrets:
+      DATA_TOKEN: {required: true}
+
+env:
+  DATA_BRANCH: crawl/cafe24-full-catalog
+
+permissions:
+  contents: read
+
+concurrency:
+  group: photo-bg-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    continue-on-error: ${{ inputs.soft == true }}   # 손으로 돌릴 때는 inputs.soft 가 없어 false
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    defaults:
+      run:
+        working-directory: work
+    steps:
+      - uses: actions/checkout@v4
+      - name: 데이터 저장소(비공개) 받기
+        uses: ./.github/actions/data-repo
+        with:
+          token: ${{ secrets.DATA_TOKEN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: 설치
+        run: pip install -q pillow requests
+      - name: 판독 · 조금씩 커밋
+        # 러너가 GitHub 쪽 종료 신호로 한꺼번에 꺼진 적이 있다(2026-10-11 ocr-paddle 12조각 중 11조각이 13분 만에, 끝 커밋도 못 하고).
+        # 그래서 4000장씩 끊어 돌고 그때마다 커밋한다 — 꺼져도 잃는 것은 한 토막뿐이고, 다시 돌리면 읽은 것은 건너뛴다.
+        shell: bash
+        run: |
+          mkdir -p data/photo_bg
+          LOG=data/photo_bg/${{ matrix.shard }}.log
+          push() {
+            git add data/photo_bg/ 2>/dev/null || true
+            git diff --cached --quiet && return 0
+            git commit -qm "바탕색 조각 ${{ matrix.shard }} (Actions)"
+            for i in 1 2 3 4 5; do
+              git pull -q --rebase --autostash origin "$DATA_BRANCH" && git push -q && return 0
+              git rebase --abort 2>/dev/null || true
+              sleep $((10 + RANDOM % 40))
+            done
+            return 1
+          }
+          # 시간 상한(2026-11-11): 손으로는 5시간, 주간 수집이 부를 때는 3시간. 남은 시간을 스크립트에도 넘겨(--hours)
+          # 마지막 토막이 상한을 넘겨 돌지 않게 한다 — 예전엔 토막마다 5시간을 새로 줬다.
+          hrs=${{ inputs.hours }}; hrs=${hrs:-5}; budget=$(awk -v h="$hrs" 'BEGIN { printf "%d", h * 3600 }')
+          start=$(date +%s); cap=${{ inputs.limit }}; cap=${cap:-0}; did=0
+          while left=$(( budget - $(date +%s) + start )); [ "$left" -gt 60 ]; do
+            n=4000; if [ "$cap" -gt 0 ]; then n=$(( cap - did )); [ $n -gt 4000 ] && n=4000; [ $n -le 0 ] && break; fi
+            rc=0; python -u scripts/photo_bg.py --shard "${{ matrix.shard }}/8" --limit $n --hours "$(awk -v s="$left" 'BEGIN { print s / 3600 }')" > /tmp/raw 2>&1 || rc=$?
+            cp /tmp/raw /tmp/round
+            # 할 일이 없으면 기록 줄도 커밋도 남기지 않는다 — 주간 수집에서는 조각 44개 대부분이 금방 여기로 온다.
+            if grep -q "대상 0" /tmp/round; then tail -1 /tmp/round; break; fi
+            cat /tmp/round >> "$LOG"; tail -3 /tmp/round
+            push || true
+            did=$(( did + n ))
+            # 스크립트가 죽으면(설치 빠짐 등) 멈춘다 — 2026-10-11 worn-photo 가 torchvision 없이 5시간 헛돌며 로그만 커밋했다
+            if [ "$rc" != 0 ] && grep -q "Traceback" /tmp/round; then echo "스크립트 실패 — 멈춤"; exit 1; fi
+          done
+          push
