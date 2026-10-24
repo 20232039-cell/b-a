@@ -1,0 +1,1350 @@
+{
+  "productDetail": {
+    "__typename": "productDetailResult",
+    "product": {
+      "__typename": "productDetail",
+      "code": "CWUAW26881GYD",
+      "name": "그레이 다잉 후드 다운 자켓",
+      "images": [
+        {
+          "__typename": "productImage",
+          "imageLS": {
+            "__typename": "productImageData",
+            "index": 0,
+            "url": "https://images.kolonmall.com/Prod_Img/CW/2026/LS1/CWUAW26881GYD_LS1.jpg",
+            "type": null
+          },
+          "imageLM": {
+            "__typename": "productImageData",
+            "index": 0,
+            "url": "https://images.kolonmall.com/Prod_Img/CW/2026/LM1/CWUAW26881GYD_LM1.jpg",
+            "type": null
+          },
+          "imageLZ": {
+            "__typename": "productImageData",
+            "index": 0,
+            "url": "https://images.kolonmall.com/Prod_Img/CW/2026/LZ1/CWUAW26881GYD_LZ1.jpg",
+            "type": null
+          }
+        },
+        {
+          "__typename": "productImage",
+          "imageLS": {
+            "__typename": "productImageData",
+            "index": 1,
+            "url": "https://images.kolonmall.com/Prod_Img/CW/2026/LS2/CWUAW26881GYD_LS2.jpg",
+            "type": null
+          },
+          "imageLM": {
+            "__typename": "productImageData",
+            "index": 1,
+            "url": "https://images.kolonmall.com/Prod_Img/CW/2026/LM2/CWUAW26881GYD_LM2.jpg",
+            "type": null
+          },
+          "imageLZ": {
+            "__typename": "productImageData",
+            "index": 1,
+            "url": "https://images.kolonmall.com/Prod_Img/CW/2026/LZ2/CWUAW26881GYD_LZ2.jpg",
+            "type": null
+          }
+        },
+        {
+          "__typename": "productImage",
+          "imageLS": {
+            "__typename": "productImageData",
+            "index": 2,
+            "url": "https://images.kolonmall.com/Prod_Img/CW/2026/LS3/CWUAW26881GYD_LS3.jpg",
+            "type": null
+          },
+          "imageLM": {
+            "__typename": "productImageData",
+            "index": 2,
+            "url": "https://images.kolonmall.com/Prod_Img/CW/2026/LM3/CWUAW26881GYD_LM3.jpg",
+            "type": null
+          },
+          "imageLZ": {
+            "__typename": "productImageData",
+            "index": 2,
+            "url": "https://images.kolonmall.com/Prod_Img/CW/2026/LZ3/CWUAW26881GYD_LZ3.jpg",
+            "type": null
+          }
+        },
+        {
+          "__typename": "productImage",
+          "imageLS": {
+            "__typename": "productImageData",
+            "index": 3,
+            "url": "https://images.kolonmall.com/Prod_Img/CW/2026/LS4/CWUAW26881GYD_LS4.jpg",
+            "type": null
+          },
+          "imageLM": {
+            "__typename": "productImageData",
+            "index": 3,
+            "url": "https://images.kolonmall.com/Prod_Img/CW/2026/LM4/CWUAW26881GYD_LM4.jpg",
+            "type": null
+          },
+          "imageLZ": {
+            "__typename": "productImageData",
+            "index": 3,
+            "url": "https://images.kolonmall.com/Prod_Img/CW/2026/LZ4/CWUAW26881GYD_LZ4.jpg",
+            "type": null
+          }
+        },
+        {
+          "__typename": "productImage",
+          "imageLS": {
+            "__typename": "productImageData",
+            "index": 4,
+            "url": "https://images.kolonmall.com/Prod_Img/CW/2026/LS5/CWUAW26881GYD_LS5.jpg",
+            "type": null
+          },
+          "imageLM": {
+            "__typename": "productImageData",
+            "index": 4,
+            "url": "https://images.kolonmall.com/Prod_Img/CW/2026/LM5/CWUAW26881GYD_LM5.jpg",
+            "type": null
+          },
+          "imageLZ": {
+            "__typename": "productImageData",
+            "index": 4,
+            "url": "https://images.kolonmall.com/Prod_Img/CW/2026/LZ5/CWUAW26881GYD_LZ5.jpg",
+            "type": null
+          }
+        },
+        {
+          "__typename": "productImage",
+          "imageLS": {
+            "__typename": "productImageData",
+            "index": 5,
+            "url": "https://images.kolonmall.com/Prod_Img/CW/2026/LS6/CWUAW26881GYD_LS6.jpg",
+            "type": null
+          },
+          "imageLM": {
+            "__typename": "productImageData",
+            "index": 5,
+            "url": "https://images.kolonmall.com/Prod_Img/CW/2026/LM6/CWUAW26881GYD_LM6.jpg",
+            "type": null
+          },
+          "imageLZ": {
+            "__typename": "productImageData",
+            "index": 5,
+            "url": "https://images.kolonmall.com/Prod_Img/CW/2026/LZ6/CWUAW26881GYD_LZ6.jpg",
+            "type": null
+          }
+        },
+        {
+          "__typename": "productImage",
+          "imageLS": {
+            "__typename": "productImageData",
+            "index": 6,
+            "url": "https://images.kolonmall.com/Prod_Img/CW/2026/LS7/CWUAW26881GYD_LS7.jpg",
+            "type": null
+          },
+          "imageLM": {
+            "__typename": "productImageData",
+            "index": 6,
+            "url": "https://images.kolonmall.com/Prod_Img/CW/2026/LM7/CWUAW26881GYD_LM7.jpg",
+            "type": null
+          },
+          "imageLZ": {
+            "__typename": "productImageData",
+            "index": 6,
+            "url": "https://images.kolonmall.com/Prod_Img/CW/2026/LZ7/CWUAW26881GYD_LZ7.jpg",
+            "type": null
+          }
+        },
+        {
+          "__typename": "productImage",
+          "imageLS": {
+            "__typename": "productImageData",
+            "index": 7,
+            "url": "https://images.kolonmall.com/Prod_Img/CW/2026/LS8/CWUAW26881GYD_LS8.jpg",
+            "type": null
+          },
+          "imageLM": {
+            "__typename": "productImageData",
+            "index": 7,
+            "url": "https://images.kolonmall.com/Prod_Img/CW/2026/LM8/CWUAW26881GYD_LM8.jpg",
+            "type": null
+          },
+          "imageLZ": {
+            "__typename": "productImageData",
+            "index": 7,
+            "url": "https://images.kolonmall.com/Prod_Img/CW/2026/LZ8/CWUAW26881GYD_LZ8.jpg",
+            "type": null
+          }
+        },
+        {
+          "__typename": "productImage",
+          "imageLS": {
+            "__typename": "productImageData",
+            "index": 8,
+            "url": "https://images.kolonmall.com/Prod_Img/CW/2026/LS9/CWUAW26881GYD_LS9.jpg",
+            "type": null
+          },
+          "imageLM": {
+            "__typename": "productImageData",
+            "index": 8,
+            "url": "https://images.kolonmall.com/Prod_Img/CW/2026/LM9/CWUAW26881GYD_LM9.jpg",
+            "type": null
+          },
+          "imageLZ": {
+            "__typename": "productImageData",
+            "index": 8,
+            "url": "https://images.kolonmall.com/Prod_Img/CW/2026/LZ9/CWUAW26881GYD_LZ9.jpg",
+            "type": null
+          }
+        }
+      ],
+      "productNoteDescription": [],
+      "opAddExplanation": null,
+      "productMaterials": [],
+      "imageLLs": [
+        {
+          "__typename": "productImageData",
+          "index": 0,
+          "url": "https://images.kolonmall.com/Prod_Img/CW/2026/LL1/CWUAW26881GYD_LL1.jpg",
+          "type": null
+        },
+        {
+          "__typename": "productImageData",
+          "index": 1,
+          "url": "https://images.kolonmall.com/Prod_Img/CW/2026/LL2/CWUAW26881GYD_LL2.jpg",
+          "type": null
+        },
+        {
+          "__typename": "productImageData",
+          "index": 2,
+          "url": "https://images.kolonmall.com/Prod_Img/CW/2026/LL3/CWUAW26881GYD_LL3.jpg",
+          "type": null
+        },
+        {
+          "__typename": "productImageData",
+          "index": 3,
+          "url": "https://images.kolonmall.com/Prod_Img/CW/2026/LL4/CWUAW26881GYD_LL4.jpg",
+          "type": null
+        },
+        {
+          "__typename": "productImageData",
+          "index": 4,
+          "url": "https://images.kolonmall.com/Prod_Img/CW/2026/LL5/CWUAW26881GYD_LL5.jpg",
+          "type": null
+        },
+        {
+          "__typename": "productImageData",
+          "index": 5,
+          "url": "https://images.kolonmall.com/Prod_Img/CW/2026/LL6/CWUAW26881GYD_LL6.jpg",
+          "type": null
+        },
+        {
+          "__typename": "productImageData",
+          "index": 6,
+          "url": "https://images.kolonmall.com/Prod_Img/CW/2026/LL7/CWUAW26881GYD_LL7.jpg",
+          "type": null
+        },
+        {
+          "__typename": "productImageData",
+          "index": 7,
+          "url": "https://images.kolonmall.com/Prod_Img/CW/2026/LL8/CWUAW26881GYD_LL8.jpg",
+          "type": null
+        },
+        {
+          "__typename": "productImageData",
+          "index": 8,
+          "url": "https://images.kolonmall.com/Prod_Img/CW/2026/LL9/CWUAW26881GYD_LL9.jpg",
+          "type": null
+        }
+      ],
+      "sizeSpecs": [
+        {
+          "__typename": "groupedSizeSpec",
+          "useRegnNm": "어깨너비",
+          "useRegnCd": "C0003",
+          "sortSeq": 999,
+          "sizeSpecs": [
+            {
+              "__typename": "sizeSpec",
+              "useRegnNm": "어깨너비",
+              "useRegnCd": "C0003",
+              "sortSeq": 999,
+              "sizeSpecVal": "54.5",
+              "sizeSpecGb": "01",
+              "legacySize": "S",
+              "sizeCd": "CD"
+            },
+            {
+              "__typename": "sizeSpec",
+              "useRegnNm": "어깨너비",
+              "useRegnCd": "C0003",
+              "sortSeq": 999,
+              "sizeSpecVal": "56",
+              "sizeSpecGb": "01",
+              "legacySize": "M",
+              "sizeCd": "CD"
+            },
+            {
+              "__typename": "sizeSpec",
+              "useRegnNm": "어깨너비",
+              "useRegnCd": "C0003",
+              "sortSeq": 999,
+              "sizeSpecVal": "57.5",
+              "sizeSpecGb": "01",
+              "legacySize": "L",
+              "sizeCd": "CD"
+            }
+          ]
+        },
+        {
+          "__typename": "groupedSizeSpec",
+          "useRegnNm": "소매길이",
+          "useRegnCd": "C0004",
+          "sortSeq": 999,
+          "sizeSpecs": [
+            {
+              "__typename": "sizeSpec",
+              "useRegnNm": "소매길이",
+              "useRegnCd": "C0004",
+              "sortSeq": 999,
+              "sizeSpecVal": "61.5",
+              "sizeSpecGb": "01",
+              "legacySize": "S",
+              "sizeCd": "CD"
+            },
+            {
+              "__typename": "sizeSpec",
+              "useRegnNm": "소매길이",
+              "useRegnCd": "C0004",
+              "sortSeq": 999,
+              "sizeSpecVal": "63",
+              "sizeSpecGb": "01",
+              "legacySize": "M",
+              "sizeCd": "CD"
+            },
+            {
+              "__typename": "sizeSpec",
+              "useRegnNm": "소매길이",
+              "useRegnCd": "C0004",
+              "sortSeq": 999,
+              "sizeSpecVal": "64.5",
+              "sizeSpecGb": "01",
+              "legacySize": "L",
+              "sizeCd": "CD"
+            }
+          ]
+        },
+        {
+          "__typename": "groupedSizeSpec",
+          "useRegnNm": "총길이",
+          "useRegnCd": "C0001",
+          "sortSeq": 999,
+          "sizeSpecs": [
+            {
+              "__typename": "sizeSpec",
+              "useRegnNm": "총길이",
+              "useRegnCd": "C0001",
+              "sortSeq": 999,
+              "sizeSpecVal": "78",
+              "sizeSpecGb": "01",
+              "legacySize": "S",
+              "sizeCd": "CD"
+            },
+            {
+              "__typename": "sizeSpec",
+              "useRegnNm": "총길이",
+              "useRegnCd": "C0001",
+              "sortSeq": 999,
+              "sizeSpecVal": "80",
+              "sizeSpecGb": "01",
+              "legacySize": "M",
+              "sizeCd": "CD"
+            },
+            {
+              "__typename": "sizeSpec",
+              "useRegnNm": "총길이",
+              "useRegnCd": "C0001",
+              "sortSeq": 999,
+              "sizeSpecVal": "82",
+              "sizeSpecGb": "01",
+              "legacySize": "L",
+              "sizeCd": "CD"
+            }
+          ]
+        },
+        {
+          "__typename": "groupedSizeSpec",
+          "useRegnNm": "가슴둘레",
+          "useRegnCd": "C0002",
+          "sortSeq": 999,
+          "sizeSpecs": [
+            {
+              "__typename": "sizeSpec",
+              "useRegnNm": "가슴둘레",
+              "useRegnCd": "C0002",
+              "sortSeq": 999,
+              "sizeSpecVal": "130.5",
+              "sizeSpecGb": "01",
+              "legacySize": "S",
+              "sizeCd": "CD"
+            },
+            {
+              "__typename": "sizeSpec",
+              "useRegnNm": "가슴둘레",
+              "useRegnCd": "C0002",
+              "sortSeq": 999,
+              "sizeSpecVal": "135.5",
+              "sizeSpecGb": "01",
+              "legacySize": "M",
+              "sizeCd": "CD"
+            },
+            {
+              "__typename": "sizeSpec",
+              "useRegnNm": "가슴둘레",
+              "useRegnCd": "C0002",
+              "sortSeq": 999,
+              "sizeSpecVal": "140.5",
+              "sizeSpecGb": "01",
+              "legacySize": "L",
+              "sizeCd": "CD"
+            }
+          ]
+        },
+        {
+          "__typename": "groupedSizeSpec",
+          "useRegnNm": "소매통너비",
+          "useRegnCd": "C0005",
+          "sortSeq": 999,
+          "sizeSpecs": [
+            {
+              "__typename": "sizeSpec",
+              "useRegnNm": "소매통너비",
+              "useRegnCd": "C0005",
+              "sortSeq": 999,
+              "sizeSpecVal": "30",
+              "sizeSpecGb": "01",
+              "legacySize": "S",
+              "sizeCd": "CD"
+            },
+            {
+              "__typename": "sizeSpec",
+              "useRegnNm": "소매통너비",
+              "useRegnCd": "C0005",
+              "sortSeq": 999,
+              "sizeSpecVal": "31",
+              "sizeSpecGb": "01",
+              "legacySize": "M",
+              "sizeCd": "CD"
+            },
+            {
+              "__typename": "sizeSpec",
+              "useRegnNm": "소매통너비",
+              "useRegnCd": "C0005",
+              "sortSeq": 999,
+              "sizeSpecVal": "32",
+              "sizeSpecGb": "01",
+              "legacySize": "L",
+              "sizeCd": "CD"
+            }
+          ]
+        },
+        {
+          "__typename": "groupedSizeSpec",
+          "useRegnNm": "소매단너비",
+          "useRegnCd": "C0006",
+          "sortSeq": 999,
+          "sizeSpecs": [
+            {
+              "__typename": "sizeSpec",
+              "useRegnNm": "소매단너비",
+              "useRegnCd": "C0006",
+              "sortSeq": 999,
+              "sizeSpecVal": "18",
+              "sizeSpecGb": "01",
+              "legacySize": "S",
+              "sizeCd": "CD"
+            },
+            {
+              "__typename": "sizeSpec",
+              "useRegnNm": "소매단너비",
+              "useRegnCd": "C0006",
+              "sortSeq": 999,
+              "sizeSpecVal": "18.5",
+              "sizeSpecGb": "01",
+              "legacySize": "M",
+              "sizeCd": "CD"
+            },
+            {
+              "__typename": "sizeSpec",
+              "useRegnNm": "소매단너비",
+              "useRegnCd": "C0006",
+              "sortSeq": 999,
+              "sizeSpecVal": "19",
+              "sizeSpecGb": "01",
+              "legacySize": "L",
+              "sizeCd": "CD"
+            }
+          ]
+        }
+      ],
+      "sizeMarkdown": null,
+      "sizeProductDiagrams": [],
+      "productDiagram": null,
+      "price": {
+        "__typename": "price",
+        "discountRate": 0,
+        "symbol": "원",
+        "formattedPrice": "849,000",
+        "currencyIso": "KRW",
+        "price": 849000,
+        "wishPrice": 849000,
+        "formattedWishPrice": "849,000"
+      },
+      "baseOption": {
+        "__typename": "baseOption",
+        "options": [
+          {
+            "__typename": "baseOptionItem",
+            "code": "CWUAW26881GYD",
+            "wishProduct": null,
+            "price": {
+              "__typename": "price",
+              "discountRate": 0,
+              "symbol": "원",
+              "formattedPrice": "849,000",
+              "currencyIso": "KRW",
+              "price": 849000,
+              "wishPrice": 849000,
+              "formattedWishPrice": "849,000"
+            },
+            "variantOptionQualifiers": [
+              {
+                "__typename": "variantOptionQualifier",
+                "image": {
+                  "__typename": "productImageData",
+                  "index": 0,
+                  "url": "https://images.kolonmall.com/Prod_Img/CW/2026/CC/CWUAW26881GYD_CC.gif",
+                  "type": null
+                },
+                "qualifier": "style",
+                "name": "스타일",
+                "value": "그레이",
+                "code": null,
+                "isInStock": null
+              }
+            ],
+            "legacySize": null,
+            "stock": {
+              "__typename": "stock",
+              "stockLevelStatus": "inStock",
+              "stockLevel": 81
+            },
+            "employeeProductYn": false,
+            "url": "https://images.kolonmall.com/Prod_Img/CW/2026/LS1/CWUAW26881GYD_LS1.jpg",
+            "swatchColors": [
+              "GREY"
+            ],
+            "colorOptionUrl": "https://images.kolonmall.com/Prod_Img/CW/2026/AT1/CWUAW26881GYD_AT1.jpg"
+          }
+        ],
+        "selected": {
+          "__typename": "baseOptionItem",
+          "code": "CWUAW26881GYD",
+          "wishProduct": null,
+          "price": {
+            "__typename": "price",
+            "discountRate": 0,
+            "symbol": "원",
+            "formattedPrice": "849,000",
+            "currencyIso": "KRW",
+            "price": 849000,
+            "wishPrice": 849000,
+            "formattedWishPrice": "849,000"
+          },
+          "variantOptionQualifiers": [
+            {
+              "__typename": "variantOptionQualifier",
+              "image": {
+                "__typename": "productImageData",
+                "index": 0,
+                "url": "https://images.kolonmall.com/Prod_Img/CW/2026/CC/CWUAW26881GYD_CC.gif",
+                "type": null
+              },
+              "qualifier": "style",
+              "name": "스타일",
+              "value": "그레이",
+              "code": null,
+              "isInStock": null
+            }
+          ],
+          "legacySize": null,
+          "stock": {
+            "__typename": "stock",
+            "stockLevelStatus": "inStock",
+            "stockLevel": 81
+          },
+          "employeeProductYn": false,
+          "url": "/c/%EA%B7%B8%EB%A0%88%EC%9D%B4-%EB%8B%A4%EC%9E%89-%ED%9B%84%EB%93%9C-%EB%8B%A4%EC%9A%B4-%EC%9E%90%EC%BC%93/p/CWUAW26881GYD",
+          "swatchColors": [
+            "GREY"
+          ],
+          "colorOptionUrl": null
+        },
+        "salePausedOptions": []
+      },
+      "swatchColors": [
+        "GREY"
+      ],
+      "employeeProductYn": false,
+      "variantOptions": [
+        {
+          "__typename": "baseOptionItem",
+          "code": "CWUAW26881GYD-S",
+          "wishProduct": null,
+          "price": {
+            "__typename": "price",
+            "discountRate": 0,
+            "symbol": "원",
+            "formattedPrice": "849,000",
+            "currencyIso": "KRW",
+            "price": 849000,
+            "wishPrice": 849000,
+            "formattedWishPrice": "849,000"
+          },
+          "variantOptionQualifiers": [
+            {
+              "__typename": "variantOptionQualifier",
+              "image": {
+                "__typename": "productImageData",
+                "index": 0,
+                "url": "https://images.kolonmall.com/Prod_Img/CW/2026/CC/CWUAW26881GYD_CC.gif",
+                "type": null
+              },
+              "qualifier": "style",
+              "name": "스타일",
+              "value": "그레이",
+              "code": null,
+              "isInStock": null
+            },
+            {
+              "__typename": "variantOptionQualifier",
+              "image": null,
+              "qualifier": "size",
+              "name": "(v)사이즈",
+              "value": "S",
+              "code": null,
+              "isInStock": null
+            }
+          ],
+          "legacySize": "S",
+          "stock": {
+            "__typename": "stock",
+            "stockLevelStatus": "inStock",
+            "stockLevel": 31
+          },
+          "employeeProductYn": false,
+          "url": "/c/%EA%B7%B8%EB%A0%88%EC%9D%B4-%EB%8B%A4%EC%9E%89-%ED%9B%84%EB%93%9C-%EB%8B%A4%EC%9A%B4-%EC%9E%90%EC%BC%93/p/CWUAW26881GYD-S",
+          "swatchColors": null,
+          "colorOptionUrl": null
+        },
+        {
+          "__typename": "baseOptionItem",
+          "code": "CWUAW26881GYD-M",
+          "wishProduct": null,
+          "price": {
+            "__typename": "price",
+            "discountRate": 0,
+            "symbol": "원",
+            "formattedPrice": "849,000",
+            "currencyIso": "KRW",
+            "price": 849000,
+            "wishPrice": 849000,
+            "formattedWishPrice": "849,000"
+          },
+          "variantOptionQualifiers": [
+            {
+              "__typename": "variantOptionQualifier",
+              "image": {
+                "__typename": "productImageData",
+                "index": 0,
+                "url": "https://images.kolonmall.com/Prod_Img/CW/2026/CC/CWUAW26881GYD_CC.gif",
+                "type": null
+              },
+              "qualifier": "style",
+              "name": "스타일",
+              "value": "그레이",
+              "code": null,
+              "isInStock": null
+            },
+            {
+              "__typename": "variantOptionQualifier",
+              "image": null,
+              "qualifier": "size",
+              "name": "(v)사이즈",
+              "value": "M",
+              "code": null,
+              "isInStock": null
+            }
+          ],
+          "legacySize": "M",
+          "stock": {
+            "__typename": "stock",
+            "stockLevelStatus": "inStock",
+            "stockLevel": 34
+          },
+          "employeeProductYn": false,
+          "url": "/c/%EA%B7%B8%EB%A0%88%EC%9D%B4-%EB%8B%A4%EC%9E%89-%ED%9B%84%EB%93%9C-%EB%8B%A4%EC%9A%B4-%EC%9E%90%EC%BC%93/p/CWUAW26881GYD-M",
+          "swatchColors": null,
+          "colorOptionUrl": null
+        },
+        {
+          "__typename": "baseOptionItem",
+          "code": "CWUAW26881GYD-L",
+          "wishProduct": null,
+          "price": {
+            "__typename": "price",
+            "discountRate": 0,
+            "symbol": "원",
+            "formattedPrice": "849,000",
+            "currencyIso": "KRW",
+            "price": 849000,
+            "wishPrice": 849000,
+            "formattedWishPrice": "849,000"
+          },
+          "variantOptionQualifiers": [
+            {
+              "__typename": "variantOptionQualifier",
+              "image": {
+                "__typename": "productImageData",
+                "index": 0,
+                "url": "https://images.kolonmall.com/Prod_Img/CW/2026/CC/CWUAW26881GYD_CC.gif",
+                "type": null
+              },
+              "qualifier": "style",
+              "name": "스타일",
+              "value": "그레이",
+              "code": null,
+              "isInStock": null
+            },
+            {
+              "__typename": "variantOptionQualifier",
+              "image": null,
+              "qualifier": "size",
+              "name": "(v)사이즈",
+              "value": "L",
+              "code": null,
+              "isInStock": null
+            }
+          ],
+          "legacySize": "L",
+          "stock": {
+            "__typename": "stock",
+            "stockLevelStatus": "inStock",
+            "stockLevel": 16
+          },
+          "employeeProductYn": false,
+          "url": "/c/%EA%B7%B8%EB%A0%88%EC%9D%B4-%EB%8B%A4%EC%9E%89-%ED%9B%84%EB%93%9C-%EB%8B%A4%EC%9A%B4-%EC%9E%90%EC%BC%93/p/CWUAW26881GYD-L",
+          "swatchColors": null,
+          "colorOptionUrl": null
+        }
+      ],
+      "vouchers": [],
+      "saleProductType": "GENERAL",
+      "opDeliveryMemo": null,
+      "customOrder": false,
+      "formattedDeliveryDueDate": null,
+      "stock": {
+        "__typename": "stock",
+        "stockLevelStatus": "inStock",
+        "stockLevel": 81
+      },
+      "formattedMaxAccumulationPoint": "16,980",
+      "availableForPickup": false,
+      "disableCvsDeliveryYn": true,
+      "deliveryInformation": {
+        "__typename": "deliveryInfo",
+        "cost": 0,
+        "formattedCost": "0",
+        "minimumPriceDescription": "3만원 이상 구매 시, 무료",
+        "symbol": "원",
+        "siteDeliveryCostFree": false
+      },
+      "trustGdYn": false,
+      "supplierBrand": {
+        "__typename": "supplierBrand",
+        "pk": null,
+        "brandName": "CUSTOMELLOW",
+        "brandNameKo": "커스텀멜로우",
+        "brandCode": "CW_B1",
+        "logoPath": "https://images3.kolonmall.com/upload/0711cb9e-814d-4942-a9c5-eec7757dcbf1/98b35ff5-13b4-487e-ba14-c7aa8f3f2a50.jpg",
+        "brandUrl": "CUSTOMELLOW",
+        "categoryCode": "4942",
+        "isRecommend": false,
+        "isShopRecommend": null,
+        "isOriginalBrands": true,
+        "mdName": "",
+        "mdThumbnailUrl": ""
+      },
+      "brandCategoryId": "4942",
+      "sellingPoint": null,
+      "productReferences": null,
+      "mainImageUrl": "https://images.kolonmall.com/Prod_Img/CW/2026/LS1/CWUAW26881GYD_LS1.jpg",
+      "baseProductCode": "CWUAW26881",
+      "supplier": {
+        "__typename": "supplier",
+        "deliveryInfo": "본 상품은 오프라인 매장과 동시에 판매하는 상품이므로, 주문 접수 및 상품 준비 도중 판매가 증가하여 발송지연 또는 품절 될 수 있으니 양해 부탁드립니다. 배송이 지연되는 경우 고객님께 빠르게 안내 할 수 있도록 노력하겠습니다. [물류센터배송]\r\n- 결제완료 후 평균 3~5일(휴일 및 공휴일제외) 이내에 배송됩니다.\r\n- 물류센터 내 상품 부족시, 상품이 있는 타매장에서 이동받아 배송하므로 평균 배송일보다 1~2일이 지연될 수 있습니다.\r\n\r\n[매장직배송]\r\n- 일부 상품의 경우, 지정된 매장에서 직접 배송이 이루어집니다.\r\n- 지정된 매장의 재고 부족시 타매장에서 재고를 수급하여 배송하므로 3~7일이 소요됩니다.\r\n\r\n* 예약 및 공동구매와 같은 특정 상품의 경우, 사전에 공지된 발송일에 일괄 배송됩니다.",
+        "code": "CW",
+        "exchangeInfo": "- 교환 및 반품은 상품수령 후 7일 이내에 요청 하셔야 하며, 수선 및 착용상태가 없는 사용하지 않은 상품이어야 합니다.\r\n- 단순 변심으로 인한 교환 및 반품 요청시 왕복 또는 편도 배송비는 고객님 부담입니다.\r\n- 맞교환은 불가능하며, 수령하신 상품이 물류센터로 입고된 후 요청하신 교환상품이 배송됩니다.\r\n- 사이즈 교환만 가능하며 컬러 교환을 원하실 경우, 기존 상품 반품 후 재 주문이 필요합니다.\r\n- 반품에 의한 선환불은 불가능 하며, 반품 상품이 물류센터로 입고된 후 상품의 이상 유무를 확인한 후에 환불처리 해드립니다.",
+        "name": "CUSTOMELLOW",
+        "ownYn": true,
+        "mendInfo": null,
+        "activeProductQnAYn": false,
+        "deliveryValues": [
+          {
+            "deliveryPeriod": null,
+            "deliveryVendorZone": null,
+            "currency": null,
+            "minimum": "0.0",
+            "value": "2500.0"
+          },
+          {
+            "deliveryPeriod": null,
+            "deliveryVendorZone": null,
+            "currency": null,
+            "minimum": "30000.0",
+            "value": "0.0"
+          }
+        ]
+      },
+      "sizeInformations": null,
+      "manufacturerName": "코오롱인더스트리(주)FnC부문",
+      "produceYear": 2026,
+      "produceYearMonth": "2026년 10월",
+      "originCountry": "베트남",
+      "season": "겨울",
+      "style": "그레이",
+      "fabric": "겉감: 나일론 72%, 면 28% 배색: 폴리에스터 98%, 폴리우레탄 2% 안감1: 폴리에스터 100% 2: 면 100% 충전재: 솜털 80%, 깃털 20% (심지, 보강재, 상표, 무늬, 레이스, 밴드 등 제외)",
+      "weight": 1338,
+      "kcYn": "0",
+      "productAttentionPoints": [
+        {
+          "__typename": "productSizeInfo",
+          "sizeType": null,
+          "code": "2",
+          "imageUrl": "//s3-ap-northeast-2.amazonaws.com/kop.images/Comm_Img/care/22.gif",
+          "name": null,
+          "description": "드라이클리닝을 해야 하며,   용제의 종류는 석유계에 한한다. (패딩류)"
+        },
+        {
+          "__typename": "productSizeInfo",
+          "sizeType": null,
+          "code": "6",
+          "imageUrl": "//s3-ap-northeast-2.amazonaws.com/kop.images/Comm_Img/care/30.gif",
+          "name": null,
+          "description": "그늘에 뉘어서 건조한다"
+        },
+        {
+          "__typename": "productSizeInfo",
+          "sizeType": null,
+          "code": "10",
+          "imageUrl": "//s3-ap-northeast-2.amazonaws.com/kop.images/Comm_Img/care/20.gif",
+          "name": null,
+          "description": "다리미질을 할 수 없다. (니트류)"
+        },
+        {
+          "__typename": "productSizeInfo",
+          "sizeType": null,
+          "code": "11",
+          "imageUrl": "//s3-ap-northeast-2.amazonaws.com/kop.images/Comm_Img/care/13.gif",
+          "name": null,
+          "description": "염소,산소계 표백제로 표백할 수 없다."
+        },
+        {
+          "__typename": "productSizeInfo",
+          "sizeType": null,
+          "code": "15",
+          "imageUrl": "//s3-ap-northeast-2.amazonaws.com/kop.images/Comm_Img/care/07.gif",
+          "name": null,
+          "description": "물세탁은 되지 않는다."
+        },
+        {
+          "__typename": "productSizeInfo",
+          "sizeType": null,
+          "code": "17",
+          "imageUrl": "//s3-ap-northeast-2.amazonaws.com/kop.images/Comm_Img/care/32.gif",
+          "name": null,
+          "description": "세탁 후 건조할 때 기계건조를 할 수 없다."
+        },
+        {
+          "__typename": "productSizeInfo",
+          "sizeType": null,
+          "code": "18",
+          "imageUrl": "//s3-ap-northeast-2.amazonaws.com/kop.images/Comm_Img/care/33.gif",
+          "name": null,
+          "description": "불에 약함. 불꽃 주의"
+        }
+      ],
+      "kcNumber": null,
+      "description": "<style id=\"po-editor-css\">\n        .po-editor * { box-sizing: border-box; margin: 0; padding: 0; }\n        .po-editor p { margin: 0; }\n        .po-editor span, .po-editor strong { line-height: 1; }\n        .po-editor ul, .po-editor ol { width: 100%; list-style-position: inside; padding: 0 20px; display: inline-flex; flex-direction: column; }\n        .po-editor blockquote { margin-left: 16px; border-left: 3px solid #ccc; padding-left: 12px; }\n        .po-editor pre { background-color: #f9f9f9; padding: 12px; }\n        .po-editor code { background-color: #f0f0f0; padding: 2px 4px; }\n        .po-editor table { width: 100%; border-collapse: collapse; border: 1px solid #ccc; }\n        .po-editor th, .po-editor td { border: 1px solid #ccc; padding: 8px; }\n        .tox-checklist { list-style: none !important; padding-left: 24px !important; }\n        .tox-checklist>li:not(.tox-checklist--hidden) { list-style: none; margin: .25em 0; }\n        .tox-checklist>li:not(.tox-checklist--hidden)::before { content: url(data:image/svg+xml;charset=UTF-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2216%22%20height%3D%2216%22%20viewBox%3D%220%200%2016%2016%22%3E%3Cg%20id%3D%22checklist-unchecked%22%20fill%3D%22none%22%20fill-rule%3D%22evenodd%22%3E%3Crect%20id%3D%22Rectangle%22%20width%3D%2215%22%20height%3D%2215%22%20x%3D%22.5%22%20y%3D%22.5%22%20fill-rule%3D%22nonzero%22%20stroke%3D%22%234C4C4C%22%20rx%3D%222%22%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E%0A); cursor: pointer; height: 1em; margin-left: -1.5em; margin-top: .125em; position: absolute; width: 1em; }\n        .tox-checklist li:not(.tox-checklist--hidden).tox-checklist--checked::before { content: url(data:image/svg+xml;charset=UTF-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2216%22%20height%3D%2216%22%20viewBox%3D%220%200%2016%2016%22%3E%3Cg%20id%3D%22checklist-checked%22%20fill%3D%22none%22%20fill-rule%3D%22evenodd%22%3E%3Crect%20id%3D%22Rectangle%22%20width%3D%2216%22%20height%3D%2216%22%20fill%3D%22%234099FF%22%20fill-rule%3D%22nonzero%22%20rx%3D%222%22%2F%3E%3Cpath%20id%3D%22Path%22%20fill%3D%22%23FFF%22%20fill-rule%3D%22nonzero%22%20d%3D%22M11.5703186%2C3.14417309%20C11.8516238%2C2.73724603%2012.4164781%2C2.62829933%2012.83558%2C2.89774797%20C13.260121%2C3.17069355%2013.3759736%2C3.72932262%2013.0909105%2C4.14168582%20L7.7580587%2C11.8560195%20C7.43776896%2C12.3193404%206.76483983%2C12.3852142%206.35607322%2C11.9948725%20L3.02491697%2C8.8138662%20C2.66090143%2C8.46625845%202.65798871%2C7.89594698%203.01850234%2C7.54483354%20C3.373942%2C7.19866177%203.94940006%2C7.19592841%204.30829608%2C7.5386474%20L6.85276923%2C9.9684299%20L11.5703186%2C3.14417309%20Z%22%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E%0A);\n      </style><div class=\"po-editor\"><div>\n<p class=\"p1\"><strong>다잉 원단을 사용한 후드 다운 자켓</strong></p>\n<p class=\"p2\"><br></p>\n<p class=\"p1\"><strong>FABRIC</strong></p>\n<p class=\"p1\">불규칙한 패턴으로 다잉 효과를 보이는 화섬 소재</p>\n<p class=\"p2\"><br></p>\n<p class=\"p1\"><strong>FIT</strong></p>\n<p class=\"p1\">전체적으로 여유로운 릴렉스 핏</p>\n<p class=\"p2\"><br></p>\n<p class=\"p1\"><strong>DESIGN &amp; DETAIL</strong></p>\n<p class=\"p1\">둘레 조정이 가능한 스트링이 포함된 후드 디자인</p>\n<p class=\"p1\">구스다운 80:20 사용</p>\n<p class=\"p1\">YKK <span class=\"s1\">社</span> 2-Way <span class=\"s1\">지퍼</span> <span class=\"s1\">사용</span></p>\n</div></div>",
+      "sizeProductCodes": null,
+      "onlyDayPromotionId": null,
+      "opOptionYn": false,
+      "productGender": "MALE",
+      "timeSaleYn": null,
+      "productOrbitvuUrl": null,
+      "foreignDeliveryYn": false,
+      "empPriceNotApplyYn": false,
+      "restockNotificationYn": false,
+      "deliveryCostDisplay": true,
+      "productLimited": {
+        "__typename": "productLimited",
+        "productLimitedYn": false,
+        "buyCnt": null,
+        "limitedCnt": null,
+        "endDate": null,
+        "styleProduct": null,
+        "boughtCnt": null,
+        "startDate": null
+      },
+      "rafflePromotionStatus": null,
+      "standardCategoryCode": "000010206020",
+      "productType": "TANGIBLE",
+      "presentYn": true,
+      "cakeProductPickupYn": false,
+      "productPlatform": null,
+      "productSaleStatus": "SALE_ACTIVE",
+      "topLevelCategories": [
+        "133010010000",
+        "8325",
+        "4942"
+      ],
+      "onlineExclusiveYn": false,
+      "wowNotApplyYn": true,
+      "diagramUseYn": false,
+      "mobileImageType": "MM",
+      "emblems": null,
+      "wishProductCount": 4,
+      "planItemYn": false,
+      "productClassificationCode": "CLOTHING"
+    },
+    "extendedProductDetail": null,
+    "currentBrandPath": null,
+    "naverCoupon": null,
+    "codeBlockForBrandPoint": null,
+    "essentialList": [
+      {
+        "__typename": "essential",
+        "code": "PRD054",
+        "name": "소재",
+        "value": "겉감: 나일론 72%, 면 28% 배색: 폴리에스터 98%, 폴리우레탄 2% 안감1: 폴리에스터 100% 2: 면 100% 충전재: 솜털 80%, 깃털 20% (심지, 보강재, 상표, 무늬, 레이스, 밴드 등 제외)"
+      },
+      {
+        "__typename": "essential",
+        "code": "PRD042",
+        "name": "색상",
+        "value": "그레이"
+      },
+      {
+        "__typename": "essential",
+        "code": "PRD140",
+        "name": "치수",
+        "value": "상품상세설명참조"
+      },
+      {
+        "__typename": "essential",
+        "code": "PRD105",
+        "name": "제조자, 수입품의 경우 수입자 표기 (병행수입의 경우, 병행수입여부로 대체가능)",
+        "value": "코오롱인더스트리(주)FnC부문"
+      },
+      {
+        "__typename": "essential",
+        "code": "PRD097",
+        "name": "제조국",
+        "value": "베트남"
+      },
+      {
+        "__typename": "essential",
+        "code": "PRD050",
+        "name": "세탁방법 및 취급시 주의사항",
+        "value": "드라이클리닝을 해야 하며, 용제의 종류는 석유계에 한한다. (패딩류)\t그늘에 뉘어서 건조한다\t 다리미질을 할 수 없다. (니트류)\t 염소,산소계 표백제로 표백할 수 없다.\t 물세탁은 되지 않는다.\t  세탁 후 건조할 때 기계건조를 할 수 없다.\t \t불에 약함. 불꽃 주의"
+      },
+      {
+        "__typename": "essential",
+        "code": "PRD102",
+        "name": "제조연월",
+        "value": "2026-10 (해당 정보는 실제 상품과 상이할 수 있음. 정확한 제조일은 제품 별도 표기 참고)"
+      },
+      {
+        "__typename": "essential",
+        "code": "PRD156",
+        "name": "품질보증기준",
+        "value": "코오롱인더스트리㈜FnC부문 제품의 품질보증기간은 구입일로부터 1년, 입점사 제품의 경우, 업체마다 다를 수 있음 그 외 기준은 관련법 및 소비자분쟁해결 규정에 따름"
+      },
+      {
+        "__typename": "essential",
+        "code": "PRD001",
+        "name": "A/S책임자와 전화번호",
+        "value": "코오롱인더스트리(주)FnC부문 1588-7667"
+      }
+    ],
+    "classificationCode": "CLOTHING",
+    "labelData": {
+      "__typename": "label",
+      "labelTypes": [
+        {
+          "__typename": "labelType",
+          "name": "NEW_PRODUCT",
+          "alias": "신상품",
+          "colorCode": null,
+          "textColorCode": null
+        }
+      ]
+    },
+    "freePromotions": [
+      {
+        "__typename": "discountPromotion",
+        "discountType": "INTERESTFREE",
+        "benefitsType": "CARDBENEFITS",
+        "name": "전북은행",
+        "startDate": "2026-01-31T15:00:00+00:00",
+        "endDate": "2026-10-31T15:00:59.999+00:00",
+        "imageUrl": "https://images3.kolonmall.com/upload//98f70582-1f93-4d97-87c4-41cb8ddde41b.png",
+        "description": "3개월 무이자",
+        "descriptionWithoutRemarks": "",
+        "isKOKPay": false,
+        "maxDiscountPrice": null,
+        "maxDiscountPriceUnit": null,
+        "id": "2045"
+      },
+      {
+        "__typename": "discountPromotion",
+        "discountType": "INTERESTFREE",
+        "benefitsType": "CARDBENEFITS",
+        "name": "국민카드",
+        "startDate": "2025-12-31T15:00:00+00:00",
+        "endDate": "2026-10-31T15:00:59.999+00:00",
+        "imageUrl": "https://images3.kolonmall.com/upload//cardBenefits/07bf6550-c099-4529-a7b1-304bc4b17a8d/d5f427af-8fc5-4a7c-8043-833f75dbea2d.png",
+        "description": "3개월 무이자",
+        "descriptionWithoutRemarks": "",
+        "isKOKPay": false,
+        "maxDiscountPrice": null,
+        "maxDiscountPriceUnit": null,
+        "id": "2031"
+      },
+      {
+        "__typename": "discountPromotion",
+        "discountType": "INTERESTFREE",
+        "benefitsType": "CARDBENEFITS",
+        "name": "신한카드",
+        "startDate": "2026-09-30T15:00:00+00:00",
+        "endDate": "2026-10-31T15:00:59.999+00:00",
+        "imageUrl": "https://images3.kolonmall.com/upload//cardBenefits/b033255d-fe44-4944-a181-754718aa9e56/38253f57-980f-4718-8540-a9344f66eeda.png",
+        "description": "3개월 무이자",
+        "descriptionWithoutRemarks": "",
+        "isKOKPay": false,
+        "maxDiscountPrice": null,
+        "maxDiscountPriceUnit": null,
+        "id": "2029"
+      },
+      {
+        "__typename": "discountPromotion",
+        "discountType": "INTERESTFREE",
+        "benefitsType": "CARDBENEFITS",
+        "name": "삼성카드",
+        "startDate": "2026-09-30T15:00:00+00:00",
+        "endDate": "2026-10-31T15:00:59.999+00:00",
+        "imageUrl": "https://images3.kolonmall.com/upload//cardBenefits/b8202a58-c415-4d9d-a087-1c204a6a0813/adfeb59f-1d23-4516-a857-994f894ba3f2.png",
+        "description": "3개월 무이자",
+        "descriptionWithoutRemarks": "",
+        "isKOKPay": false,
+        "maxDiscountPrice": null,
+        "maxDiscountPriceUnit": null,
+        "id": "2025"
+      },
+      {
+        "__typename": "discountPromotion",
+        "discountType": "INTERESTFREE",
+        "benefitsType": "CARDBENEFITS",
+        "name": "현대카드",
+        "startDate": "2025-06-30T15:00:00+00:00",
+        "endDate": "2026-10-31T15:00:59.999+00:00",
+        "imageUrl": "https://images3.kolonmall.com/upload//cardBenefits/2b5b4744-a423-40ff-ac5b-71518cb39a9f/53382897-4329-48ee-97c0-b7ccfbaa7c49.png",
+        "description": "3개월 무이자",
+        "descriptionWithoutRemarks": "",
+        "isKOKPay": false,
+        "maxDiscountPrice": null,
+        "maxDiscountPriceUnit": null,
+        "id": "2033"
+      },
+      {
+        "__typename": "discountPromotion",
+        "discountType": "INTERESTFREE",
+        "benefitsType": "CARDBENEFITS",
+        "name": "농협카드",
+        "startDate": "2026-02-28T15:00:00+00:00",
+        "endDate": "2026-10-31T15:00:59.999+00:00",
+        "imageUrl": "https://images3.kolonmall.com/upload//cardBenefits/d0b2dd48-84d1-4050-8cf0-77d17b292c08/d06d53c5-7413-4e89-9d4d-432046c0a9f9.png",
+        "description": "6개월 무이자",
+        "descriptionWithoutRemarks": "",
+        "isKOKPay": false,
+        "maxDiscountPrice": null,
+        "maxDiscountPriceUnit": null,
+        "id": "2037"
+      },
+      {
+        "__typename": "discountPromotion",
+        "discountType": "INTERESTFREE",
+        "benefitsType": "CARDBENEFITS",
+        "name": "광주은행",
+        "startDate": "2026-09-30T15:00:00+00:00",
+        "endDate": "2026-10-31T15:00:59.999+00:00",
+        "imageUrl": "https://images3.kolonmall.com/upload//cardBenefits/dadc7043-8609-48be-a39d-40959bb2a431/166511db-5bd8-428f-8e63-2eab5622ef0e.png",
+        "description": "5개월 무이자",
+        "descriptionWithoutRemarks": "",
+        "isKOKPay": false,
+        "maxDiscountPrice": null,
+        "maxDiscountPriceUnit": null,
+        "id": "2043"
+      },
+      {
+        "__typename": "discountPromotion",
+        "discountType": "INTERESTFREE",
+        "benefitsType": "CARDBENEFITS",
+        "name": "하나카드",
+        "startDate": "2026-06-30T15:00:00+00:00",
+        "endDate": "2026-10-31T15:00:59.999+00:00",
+        "imageUrl": "https://images3.kolonmall.com/upload//cardBenefits/6705a502-9c27-4899-b0b7-cbd0b6a1ca28/1619f54a-3a32-41a3-97d0-9ed2e3a35435.png",
+        "description": "5~12개월 무이자",
+        "descriptionWithoutRemarks": "",
+        "isKOKPay": false,
+        "maxDiscountPrice": null,
+        "maxDiscountPriceUnit": null,
+        "id": "2035"
+      },
+      {
+        "__typename": "discountPromotion",
+        "discountType": "INTERESTFREE",
+        "benefitsType": "CARDBENEFITS",
+        "name": "롯데카드",
+        "startDate": "2026-09-30T15:00:00+00:00",
+        "endDate": "2026-10-31T15:00:59.999+00:00",
+        "imageUrl": "https://images3.kolonmall.com/upload//cardBenefits/44f61f9f-3a86-41b9-b1cc-1beef21e417c/479f3fdc-6786-4d74-9d58-d9ae46994327.png",
+        "description": "3개월 무이자",
+        "descriptionWithoutRemarks": "",
+        "isKOKPay": false,
+        "maxDiscountPrice": null,
+        "maxDiscountPriceUnit": null,
+        "id": "2027"
+      },
+      {
+        "__typename": "discountPromotion",
+        "discountType": "INTERESTFREE",
+        "benefitsType": "CARDBENEFITS",
+        "name": "비씨카드",
+        "startDate": "2026-08-31T15:00:00+00:00",
+        "endDate": "2026-10-31T15:00:59.999+00:00",
+        "imageUrl": "https://images3.kolonmall.com/upload//cardBenefits/479e91fc-4f0e-4d1d-87b7-ac9e47d37967/d733b7ff-e263-4b0a-a7f9-c8dd718f36e3.png",
+        "description": "5개월 무이자",
+        "descriptionWithoutRemarks": "",
+        "isKOKPay": false,
+        "maxDiscountPrice": null,
+        "maxDiscountPriceUnit": null,
+        "id": "2039"
+      },
+      {
+        "__typename": "discountPromotion",
+        "discountType": "INTERESTFREE",
+        "benefitsType": "CARDBENEFITS",
+        "name": "우리카드",
+        "startDate": "2026-08-31T15:00:00+00:00",
+        "endDate": "2026-10-31T15:00:59.999+00:00",
+        "imageUrl": "https://images3.kolonmall.com/upload//cardBenefits/000cbe3d-dbe2-480f-a3d7-9fe2ee4e8a69/7a58494a-e9ce-4652-8469-b71c9f8da0ee.png",
+        "description": "5개월 무이자",
+        "descriptionWithoutRemarks": "",
+        "isKOKPay": false,
+        "maxDiscountPrice": null,
+        "maxDiscountPriceUnit": null,
+        "id": "2041"
+      }
+    ],
+    "discountPromotions": [
+      {
+        "__typename": "discountPromotion",
+        "discountType": "FIRSTORDER",
+        "benefitsType": "PAYMENTBENEFITS",
+        "name": "토스페이 ",
+        "startDate": "2026-09-30T15:00:00+00:00",
+        "endDate": "2026-10-31T14:30:59.999+00:00",
+        "imageUrl": "https://images3.kolonmall.com/upload//paymentBenefits/bfe7be05-2988-4f78-b466-8298e0b865ad/862a841e-c390-42d9-9c60-67a2e8b81a06.webp",
+        "description": "토스페이  첫결제 최대 5만원 (10만원 이상 결제 시 5% 할인, 토스페이 앱에서 쿠폰 다운로드 후 결제)",
+        "descriptionWithoutRemarks": "토스페이  첫결제 최대 5만원",
+        "isKOKPay": false,
+        "maxDiscountPrice": 50000,
+        "maxDiscountPriceUnit": "원",
+        "link": "",
+        "summary": "첫 구매 5% 추가 할인",
+        "detailList": "[{\"id\":\"bae0e1f6-e40c-44e5-8006-67d700a6aeda\",\"isActive\":true,\"priceUnder\":\"9999999\",\"discountUnit\":\"price\",\"priceAndOver\":\"100000\",\"discountPrice\":\"50000\"}]",
+        "id": "2053"
+      },
+      {
+        "__typename": "discountPromotion",
+        "discountType": "FIRSTORDER",
+        "benefitsType": "PAYMENTBENEFITS",
+        "name": "PAYCO",
+        "startDate": "2026-09-30T15:00:00+00:00",
+        "endDate": "2026-10-31T14:30:59.999+00:00",
+        "imageUrl": "https://images3.kolonmall.com/upload//2d7d9aad-56c1-4d46-b401-75da47eddb35.png",
+        "description": "PAYCO 첫결제 최대 2만5천원 (10/20만원 이상 첫 구매 시 1만원/2만 5천원 할인, 페이코 앱에서 쿠폰 다운로드 후 결제)",
+        "descriptionWithoutRemarks": "PAYCO 첫결제 최대 2만5천원",
+        "isKOKPay": false,
+        "maxDiscountPrice": 25000,
+        "maxDiscountPriceUnit": "원",
+        "link": "",
+        "summary": "첫 구매 최대 2만 5천원 할인",
+        "detailList": "[{\"id\":\"b02112a3-9fc5-4fb4-920c-23ad01a7c60c\",\"isActive\":true,\"priceUnder\":\"9999999\",\"discountUnit\":\"price\",\"priceAndOver\":\"100000\",\"discountPrice\":\"10000\"},{\"id\":\"baa00a46-d48f-4e2c-a416-1d022b8aad12\",\"isActive\":true,\"priceUnder\":\"9999999\",\"discountUnit\":\"price\",\"priceAndOver\":\"200000\",\"discountPrice\":\"25000\"}]",
+        "id": "2055"
+      },
+      {
+        "__typename": "discountPromotion",
+        "discountType": "IMMEDIATE",
+        "benefitsType": "PAYMENTBENEFITS",
+        "name": "삼성카드",
+        "startDate": "2026-09-30T15:00:00+00:00",
+        "endDate": "2026-10-31T14:30:59.999+00:00",
+        "imageUrl": "https://images3.kolonmall.com/upload//paymentBenefits/90b44e4d-faad-4ff4-a888-0bf2b8de0215/ccf54c46-f462-41c3-8b3d-33c5bb7f6890.webp",
+        "description": "삼성카드 즉시할인 최대 2만원 (20/35/50만원 이상 결제 시 7천원/1만 3천원/2만원 즉시 할인, 예산 소진 시 조기 종료)",
+        "descriptionWithoutRemarks": "삼성카드 즉시할인 최대 2만원",
+        "isKOKPay": false,
+        "maxDiscountPrice": 20000,
+        "maxDiscountPriceUnit": "원",
+        "link": "https://www.kolonmall.com/Event/252034",
+        "summary": "최대 2만원 즉시 할인",
+        "detailList": "[{\"id\":\"0ff3b668-1812-4ebf-8e86-ff51cfc7b4d5\",\"isActive\":true,\"priceUnder\":\"99999999\",\"discountUnit\":\"price\",\"priceAndOver\":\"200000\",\"discountPrice\":\"7000\"},{\"id\":\"6103f9d0-42ac-4062-a877-453e9f2e5e16\",\"isActive\":true,\"priceUnder\":\"99999999\",\"discountUnit\":\"price\",\"priceAndOver\":\"350000\",\"discountPrice\":\"13000\"},{\"id\":\"3730d904-7106-4def-af8d-c6c383a132a9\",\"isActive\":true,\"priceUnder\":\"99999999\",\"discountUnit\":\"price\",\"priceAndOver\":\"500000\",\"discountPrice\":\"20000\"}]",
+        "id": "2039"
+      },
+      {
+        "__typename": "discountPromotion",
+        "discountType": "ETC",
+        "benefitsType": "PAYMENTBENEFITS",
+        "name": "삼성카드",
+        "startDate": "2025-07-20T15:00:00+00:00",
+        "endDate": "2027-08-31T14:59:59.999+00:00",
+        "imageUrl": "https://images3.kolonmall.com/upload//3b0ad04c-59ae-4537-a0ba-e83faf03bded.png",
+        "description": "삼성카드 (삼성카드 결제 시 보너스포인트 100% 사용 가능)",
+        "descriptionWithoutRemarks": "삼성카드 (삼성카드 결제 시 보너스포인트 100% 사용 가능)",
+        "isKOKPay": false,
+        "maxDiscountPrice": null,
+        "maxDiscountPriceUnit": null,
+        "link": "https://www.kolonmall.com/Event/249510",
+        "summary": "보너스포인트사용",
+        "detailList": "[]",
+        "id": "1979"
+      },
+      {
+        "__typename": "discountPromotion",
+        "discountType": "ETC",
+        "benefitsType": "PAYMENTBENEFITS",
+        "name": "네이버페이",
+        "startDate": "2026-09-30T15:00:00+00:00",
+        "endDate": "2026-10-31T14:59:59.999+00:00",
+        "imageUrl": "https://images3.kolonmall.com/upload//paymentBenefits/bb44fc90-3d31-4094-97d1-aa3244559947/4c88772c-60f8-4fcb-884f-04f0fe2c14a5.png",
+        "description": "네이버페이 20만원 이상 결제 시 5천원 즉시 할인 (예산 소진 시 조기 종료)",
+        "descriptionWithoutRemarks": "네이버페이 20만원 이상 결제 시 5천원 즉시 할인 (예산 소진 시 조기 종료)",
+        "isKOKPay": false,
+        "maxDiscountPrice": null,
+        "maxDiscountPriceUnit": null,
+        "link": "https://www.kolonmall.com/Event/251286",
+        "summary": "5천원 즉시 할인",
+        "detailList": "[{\"id\":\"1112c450-29a2-4f8e-ad0c-5ca2440ed4d2\",\"isActive\":true,\"priceUnder\":\"999999999\",\"discountUnit\":\"price\",\"priceAndOver\":\"200000\",\"discountPrice\":\"5000\"}]",
+        "id": "2059"
+      },
+      {
+        "__typename": "discountPromotion",
+        "discountType": "ETC",
+        "benefitsType": "PAYMENTBENEFITS",
+        "name": "현대카드",
+        "startDate": "2025-06-30T15:00:00+00:00",
+        "endDate": "2027-06-30T14:59:59.999+00:00",
+        "imageUrl": "https://images3.kolonmall.com/upload//paymentBenefits/8bcb2a10-66a2-4bce-b8d0-f9cede86c4f8/2b6a942e-480b-42e1-84a0-2635b1e0ca67.webp",
+        "description": "현대카드 M포인트 5% 사용 가능 (최대 2만M포인트)",
+        "descriptionWithoutRemarks": "현대카드 M포인트 5% 사용 가능 (최대 2만M포인트)",
+        "isKOKPay": false,
+        "maxDiscountPrice": null,
+        "maxDiscountPriceUnit": null,
+        "link": "https://www.kolonmall.com/Event/249208",
+        "summary": "M포인트 5% 사용가능",
+        "detailList": "[]",
+        "id": "1953"
+      }
+    ],
+    "bestFreePromotion": null,
+    "sizeInformationsForSet1": null,
+    "sizeInformationsForSet2": null,
+    "sizeSpecsForSet1": null,
+    "sizeSpecsForSet2": null,
+    "isAISizeSpecs": false,
+    "timeDealEndAt": null,
+    "timeDealId": null,
+    "productDiagramForSet1": null,
+    "productDiagramForSet2": null,
+    "isYesPlzCategory": null,
+    "useProductQna": true,
+    "cvsEnabled": false,
+    "usePlcc": false,
+    "bannerResults": null,
+    "groobeeProduct": {
+      "__typename": "groobeeProduct",
+      "name": "그레이 다잉 후드 다운 자켓",
+      "code": "CWUAW26881GYD",
+      "amt": 849000,
+      "prc": 849000,
+      "salePrc": 849000,
+      "cnt": 0,
+      "img": "https://images.kolonmall.com/Prod_Img/CW/2026/LS1/CWUAW26881GYD_LS1.jpg",
+      "status": "",
+      "cat": "",
+      "category": {
+        "__typename": "trackingGroobeeCategory",
+        "cateCd": "133010061501",
+        "cateNm": "다운/패딩",
+        "catL": "133010010000",
+        "cateLNm": "남성",
+        "catM": "133010061500",
+        "cateMNm": "아우터",
+        "catS": "133010061501",
+        "cateSNm": "다운/패딩",
+        "catD": "",
+        "cateDNm": "",
+        "cat": "133010061501"
+      },
+      "brand": "CW_B1",
+      "brandNm": "CUSTOMELLOW"
+    },
+    "gaProductFieldObject": {
+      "__typename": "gaProductFieldObject",
+      "id": "CWUAW26881GYD",
+      "name": "그레이 다잉 후드 다운 자켓",
+      "brand": "CUSTOMELLOW",
+      "category": null,
+      "variant": null,
+      "price": 849000,
+      "quantity": 0,
+      "coupon": null,
+      "position": 0,
+      "afCategory": null,
+      "planGroup": "CW",
+      "brandId": "CW",
+      "productItem": "UA",
+      "disCountRate": 0,
+      "wishProductCount": 4,
+      "wishPrice": 849000,
+      "swatchColor": "GREY",
+      "reviewCount": 0,
+      "reviewScore": 0,
+      "productPlatform": null,
+      "stdCategoryLevel1": "남성의류",
+      "stdCategoryLevel2": "자켓",
+      "stdCategoryLevel3": "다운자켓"
+    },
+    "productSEO": null,
+    "newProductPaybackThumbnailYn": false
+  }
+}
