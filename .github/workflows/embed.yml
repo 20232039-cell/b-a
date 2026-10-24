@@ -1,0 +1,54 @@
+# 사진 임베딩 — 아직 안 한 상품만(대표 사진 통째 siglip · 옷만 자른 siglip_crop), 그 뒤 비슷한 옷 다시 계산.
+# 주간 수집이 끝나면 저절로 돈다. CPU.
+name: embed
+on:
+  workflow_run:
+    workflows: [weekly-update]
+    types: [completed]
+  workflow_dispatch:
+concurrency:
+  group: data-generated
+  cancel-in-progress: false
+jobs:
+  embed:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    defaults:
+      run: {working-directory: work}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 데이터 저장소(비공개) 받기
+        uses: ./.github/actions/data-repo
+        with: {token: "${{ secrets.DATA_TOKEN }}"}
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-siglip-segformer-v1
+      - run: |
+          pip install -q torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -q open_clip_torch transformers pillow numpy scipy requests beautifulsoup4 lxml
+      - name: 대표 사진 통째
+        timeout-minutes: 150
+        run: python -u scripts/embed_photos.py --model siglip --all | grep -vE "^\s*$" | tail -20
+      - name: 옷만 자른 사진
+        timeout-minutes: 150
+        run: python -u scripts/embed_crops.py --all | tail -20
+      - name: 비슷한 옷
+        if: always()
+        run: python scripts/similar_items.py | tail -5
+      - name: commit & push (rebase 후, 3회 재시도)
+        if: always()
+        shell: bash
+        run: |
+          git add data/emb/siglip data/emb/siglip_crop data/similar_items.json
+          if [ -f data/similar_axes.json ]; then git add data/similar_axes.json; fi
+          if git diff --cached --quiet; then echo "바뀐 것 없음"; exit 0; fi
+          git commit -qm "사진 임베딩 · 비슷한 옷 (Actions)"
+          for i in 1 2 3; do
+            git pull -q --rebase origin crawl/cafe24-full-catalog && git push -q origin HEAD:crawl/cafe24-full-catalog && exit 0
+            sleep $((i*10))
+          done
+          exit 1

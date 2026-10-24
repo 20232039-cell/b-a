@@ -1,0 +1,2369 @@
+"""텍스트 → 13축 아이템 태그. data/vocab_aliases.json 하나만 읽는 규칙 기반 매칭.
+
+무엇을 읽나: data/products_full.csv(상품 우주 — 크롤러가 걸러 낸 27k건)에 crawl/<slug>.jsonl 의
+description·spec 과 crawl/ocr/<slug>.jsonl 의 ocr_text 를 붙인다. 이미지밖에 없던 매장은 OCR 글이
+곧 설명이다. 결정적(LLM 없음)이라 OCR 이 더 들어오면 그냥 다시 돌린다.
+
+결과: data/product_tags_full.json — source_url → {brand_slug, category, source_quality, tags, text_sources}.
+layer-web scripts/build-discover-products.mjs 가 읽는 product_tags_seed.json 과 같은 모양.
+
+규칙(vocab_aliases.json _context_rules 를 코드로 옮긴 것):
+  · 긴 표현 우선(longest-first) + 매칭한 구간 마스킹 — '카고포켓'이 '포켓'을, '세미크롭'이 '크롭'을 먹지 않게.
+  · 한글 1~2글자 별칭('면','울','마','진','리브','다운')은 왼쪽이 한글이 아닐 때만(1글자는 오른쪽도).
+    '측면'·'서울'·'올리브'·'버튼다운'이 소재로 잡히는 것을 막는다. 영문은 단어 경계(\b).
+  · _text_blocklist(시어링, 레이어드 스타일링…)는 본문 매칭 전에 마스킹.
+  · color 는 본문이 아니라 name + representative_color + spec 의 색상 값에서만. _color_blocklist 먼저 마스킹.
+  · n부: '소매'가 따르면 sleeve_length.칠부소매, 팬츠면 length.버뮤다(버뮤다·카프리 명시어가 있으면 그 값).
+  · '여유로운 실루엣': 상의 루즈핏, 하의 루즈핏+와이드.
+  · 혼방: 소재가 하나만 잡혔는데 '혼방'이 있으면 폴리에스터를 더한다.
+  · 단색: 매칭 아닌 추론 — source_quality ok 이고 pattern 이 비면 단색.
+  · _bottoms_only(세미와이드·로우라이즈·하이웨이스트)는 하의·미분류에만.
+  · Skirts 의 기장은 미니·미디·맥시·롱기장만(크롭·쇼츠·버뮤다는 상의·바지의 말이다).
+    pants_type 은 Pants·Denim(·미분류)만. 가방·신발·액세서리는 옷 축(넥라인·소매·핏·기장) 없음.
+
+사용:
+    py scripts/tag_items.py                 # 전부
+    py scripts/tag_items.py --brands kirsh dunst --report
+"""
+from __future__ import annotations
+
+import grade_origin  # noqa: E402  소재 등급 · 원단 출처
+import wear_feel  # noqa: E402  착용감 · 계절감
+import argparse
+import csv
+import json
+import re
+import time
+from collections import Counter, defaultdict
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA = ROOT / "data"
+CRAWL = DATA / "crawl"
+OCR = CRAWL / "ocr"
+BROWSER = CRAWL / "browser"
+SIZEGUIDE = CRAWL / "sizeguide"
+VOCAB = DATA / "vocab_aliases.json"
+OUT = DATA / "product_tags_full.json"
+
+# 한 옷에 같이 붙을 수 없는 값. audit.py 의 CONTRADICT 와 같은 목록이다 — 감사기는 세고
+# 여기서는 이름을 보고 한쪽을 지운다. 한쪽을 고치면 다른 쪽도 같이 고쳐야 한다.
+CONTRADICT = [
+    ("sleeve_length", "반팔", "롱슬리브"), ("sleeve_length", "슬리브리스", "롱슬리브"),
+    ("sleeve_length", "슬리브리스", "반팔"),
+    ("length", "크롭", "맥시"), ("length", "크롭", "롱기장"), ("length", "쇼츠", "맥시"),
+    ("silhouette", "슬림핏", "오버핏"), ("silhouette", "슬림핏", "루즈핏"),
+    ("silhouette", "타이트", "오버핏"),
+    ("pattern", "단색", "스트라이프"), ("pattern", "단색", "체크"), ("pattern", "단색", "카모"),
+]
+
+AXES = ["neckline", "sleeve_length", "silhouette", "length", "pants_type", "material",
+        "finish_wash", "design_element", "construction", "pattern", "hardware", "function", "color"]
+GARMENT_AXES = {"neckline", "sleeve_length", "silhouette", "length", "pants_type"}
+NON_GARMENT = {"Accessories", "Bags", "Shoes"}
+GARMENT_CATEGORIES = {"Tops", "Pants", "Outerwear", "Knitwear", "Shirts", "Skirts", "Denim", "Dresses"}
+# 옷 전용 축(넥라인·소매·실루엣·기장·바지종류)을 지울 품목. NON_GARMENT 보다 넓다 —
+# 모자와 주얼리가 빠져 있어서 캡에 「레귤러핏」 59개, 발라클라바에 넥라인 「후드」 37개,
+# 브로치에 「슬리브리스」가 붙어 있었다(합계 243개, 2026-09-06 실측).
+# 보온성·통기성 갈래에는 NON_GARMENT 를 그대로 쓴다 — 기모 비니는 보온성이 맞다.
+NO_GARMENT_AXES = NON_GARMENT | {"Headwear", "Jewelry"}
+PANTS = {"Pants", "Denim", ""}
+BOTTOMS = {"Pants", "Denim", "Skirts"}
+# 목선·소매가 없는 품목. 하의와 잡화가 여기 든다(잡화는 NO_GARMENT_AXES 로도 지워진다).
+# 가죽 잡화 매장의 공용 A/S 안내문이 금속 부속에까지 소재를 물려주고 있었다.
+# vunque 「Metal Chain Handle Strap」 본문에서 「가죽」이 나오는 자리는 전부 그 안내문이고
+# (「가죽 본연의 특성 …」·「가죽 손상의 경우 A/S 불가」), 상품 이름은 메탈 체인이라고 말한다.
+# 안내문 자체는 못 지운다 — vunque 559벌 가운데 500여 벌은 그 문장이 유일한 가죽 근거이고
+# 실제로 가죽 가방이다(2026-09-07 확인). 이름이 금속 부속이라고 말하는 것만 뺀다.
+METAL_PART = re.compile(r"(?:메탈|metal|스틸|steel)\s*(?:위빙\s*)?체인|체인\s*(?:스트랩|핸들|strap|handle)|"
+                        r"chain\s*(?:strap|handle)|불렛\s*체인|bullet\s*chain", re.I)
+LEATHER_NAME = re.compile(r"가죽|leather|스웨이드|suede|누벅|레더", re.I)
+
+# 청바지에 달린 가죽 라벨 조각이 「소재 = 가죽」이 되던 것 48벌.
+#   afterpray 「코티드 와이드 데님 진」 … 「리벳 장식과 벨트 후면부 소가죽 라벨 탭」
+# 붙여쓰기 예외(GLUE_PREFIX)로 「소가죽」을 읽게 되면서 함께 들어온 오탐이다. 이 옷들은
+# 원문 어디에도 다른 가죽 이야기가 없다 — 증거가 라벨 조각 하나뿐이다. 가죽으로 걸러
+# 청바지가 나오면 안 된다(메탈 체인 부속을 뺀 것과 같은 종류다, b90f427).
+# 낱말 하나만 지운다 — 「라벨」은 부자재로 남아야 한다. 겉감이 가죽인 가방·지갑·구두
+# (matin-kim 「겉감 - 소가죽 100%」 등 164벌)와 가죽을 배색으로 쓴 옷(frizmworks 「어깨
+# 부분에는 천연 양가죽으로 배색하여」)은 그대로다.
+# 판독기가 「가슴단면」을 「가 슴 단 면」으로 띄워 놓으면 마지막 「면」이 소재 면(코튼)이 된다 —
+# 2자 별칭 규칙이 앞 글자가 한글이 아니면(공백) 통과시키기 때문이다. 「단면」은 치수를 재는
+# 자리(단면 = 한쪽 폭)이지 원단이 아니다. 판매중 옷에서 181벌이 이 한 글자로 코튼이 됐다
+# (2026-09-08, 근거 스캔). 「단」과 「면」 사이에 공백이 있는 꼴은 실제 글에 없다 — 그 「면」만 지운다.
+# 「버튼다운」·「히든 다운 버튼」의 다운은 카라 모양(button-down)이지 충전재 다운이 아니다. 그런데
+# 셔츠·스웨터 52벌이 그 낱말 하나로 material/다운(오리털)이 됐다 — 52벌 다 구스·덕·충전재 같은
+# 진짜 근거는 없었다(2026-09-08). 「버튼」은 남긴다 — 버튼다운 셔츠에 단추는 실제로 있다.
+BUTTON_DOWN = re.compile(r"(버튼\s*)(다운)|(다운)(\s*버튼)|(button[\s-]*)(down)", re.I)
+
+
+def _mask_button_down(m: re.Match) -> str:
+    g = m.groups()
+    if g[0] is not None:   # 버튼 다운
+        return g[0] + " " * len(g[1])
+    if g[2] is not None:   # 다운 버튼
+        return " " * len(g[2]) + g[3]
+    return g[4] + " " * len(g[5])  # button down
+
+
+OCR_SPLIT_DANMYEON = re.compile(r"단\s+면(?![가-힣])")
+
+# 부자재의 가죽 — 옷의 소재가 아니다. 처음엔 「가죽 라벨·탭·패치…」만 봤는데, 혼용률 없는 옷의 가죽 표본(E 판)
+# 12벌 중 넷이 「레더 라벨」「레더 탭」「가죽 로고 포인트」「가죽 소재 포인트」였다 — 레더·leather 와 로고·포인트도 본다.
+LEATHER_TRIM = re.compile(
+    r"(?:소|양|합성|인조|에코|재생|송아지|천연)?(?:가죽|레더|leather)\s*(?:소재\s*)?"
+    r"(?:라벨|탭|패치|파이핑|트리밍|트림|와펜|로고|포인트|배색|태그|지퍼|풀러|손잡이|핸들|스트랩"
+    r"|label|tab|patch|piping|trim|logo|tag|zipper|puller|pull|handle|strap)")
+FAKE_LEATHER = re.compile(r"fake\s*leather|페이크\s*가죽|인조\s*가죽")
+# 골지(립) 원단 ≠ 끝단 시보리. 「넥, 소매, 밑단 립 조직」 「골지 소맷단, 밑단」 「ribbed cuffs and hem」은 몸판이 골지가 아니라
+# 끝단만 골지다 — 1,739벌 「골지」 · 1,404벌 「립 조직」 표본 대부분이 이쪽이었다(2026-10-06). 그 낱말을 「리브」(시보리)로 바꿔 읽는다.
+_TRIM_PART = r"(?:소맷단|소매단|소매\s*끝|소매|슬리브\s*끝|밑단|넥\s*라인|네크라인|넥|카라|칼라|커프스?|끝단|가장자리|허리\s*밴드|허리)"
+_RIB_WORD = r"(?:골지|리브드|립\s?조직|립\s?니트|ribbed|rib(?:-knit)?)"
+RIB_TRIM = re.compile(
+    rf"({_RIB_WORD})\s*(?:조직의?\s*|처리된?\s*|knit(?:ted)?\s*)?(?:후드\s*|crew\s*|mock\s*|spread\s*)?(?:{_TRIM_PART}|cuffs?|hems?|collar|trim(?:ming)?|edges?|neck(?:line)?|waist(?:band)?)"
+    rf"|{_TRIM_PART}(?:\s*(?:[,·/및]|와|과|은|는|의|에|을|를)\s*{_TRIM_PART}?){{0,4}}\s*(?:은|는|을|를|에|의|도)?\s*"
+    rf"(?:얇은\s*|탄탄한\s*|볼드한\s*|더블\s*|도톰한\s*|두꺼운\s*|넓은\s*|일래스틱\s*|변형\s*)?({_RIB_WORD})"
+    rf"|{_TRIM_PART}(?:\s*(?:[,·/및]|와|과)\s*{_TRIM_PART}){{0,4}}(?:은|는)\s[^.\n]{{0,16}}?({_RIB_WORD})\s*(?:조직)?\s*(?:으로|로)"
+    rf"|({_RIB_WORD})\s*(?:조직\s*)?(?:으로\s*|로\s*)?마감"
+    rf"|(?:cuffs?|hems?|collar|trim|edges?|neck(?:line)?)(?:\s*(?:,|and)\s*\w+){{0,3}}\s*(?:finished\s*)?(?:with|in)\s*({_RIB_WORD})",
+    re.I)
+
+
+def rib_trim_to_ribbing(text: str) -> str:
+    """끝단 골지 낱말을 같은 길이의 「리브」로 — 시보리(construction)로 읽히고 골지(material)는 안 붙는다."""
+    def fix(m: re.Match) -> str:
+        g = next(i for i in range(1, 6) if m.group(i))
+        a, b = m.start(g) - m.start(), m.end(g) - m.start()
+        w = m.group(0)
+        return w[:a] + ("리브" + " " * (b - a - 2) if b - a >= 2 else w[a:b]) + w[b:]
+    return RIB_TRIM.sub(fix, text)
+
+
+def fake_to_faux(text: str) -> str:
+    """「Fake Leather」「인조 가죽」 → 사전이 아는 인조가죽 말로(길이는 그대로 — 뒤 마스킹 자리가 안 밀리게)."""
+    return FAKE_LEATHER.sub(lambda m: ("faux leather" if m.group(0)[0] in "fF" else "인조레더").ljust(len(m.group(0))), text)
+
+NECKLESS = {"Pants", "Denim", "Skirts"}
+# 품목 이름이 곧 소매를 말하는 옷 — 맨투맨·후디·자켓/코트는 사실상 전부 긴소매다.
+# 글로 소매를 아는 2,588벌에 대 보니 97.53% 가 롱슬리브였다(틀림 64: 반팔 46 · 퍼프소매 8 ·
+# 슬리브리스 7). 니트 76.7% · 티셔츠 62.5% · 셔츠 48.2% 는 쓰지 않는다 — 반팔 니트·반팔
+# 셔츠가 흔해서 짐작이 서지 않는다(2026-09-06).
+# 이름에 베스트·슬리브리스·반팔이 들어가면 손대지 않는다 — 그때는 이름이 이미 말해 준다.
+# 소재가 곧 기능인 것 — 다운·기모(플리스)·시어링은 따뜻하라고 쓰는 소재고, 메쉬는
+# 통하라고 쓴다. 매장이 그 말을 굳이 적지 않을 뿐이다: 다운 1,362벌 가운데 보온성이
+# 붙은 것은 12.9%, 기모 421벌 중 31.8%, 메쉬 351벌 중 34.5%뿐이었다(2026-09-06).
+# 치마·원피스 이름의 「mini」·「미니」는 기장이다. 어휘에는 「mini skirt」처럼 붙은 꼴만
+# 있어서 「MINI PLEATS SKIRT」·「PLEATS MINI CHECKED SKIRT」가 빠졌다. 이 두 품목에서는
+# 낱말 순서와 무관하게 기장이다 — 기장을 아는 219벌에 대 보니 219벌 모두 미니였다.
+# 다른 품목에는 쓰지 않는다: 「Mini Logo Fitted Long Sleeve T-Shirt」·「Mini Pocket
+# Denim Pants」의 mini 는 로고와 주머니를 꾸미는 말이다(2026-09-06).
+MINI_NAME = re.compile(r"(?<![a-z])mini(?![a-z])|미니(?!멀)", re.I)
+WESTERN_NAME = re.compile(r"(?<![a-z])western(?![a-z])|웨스턴", re.I)
+ROBE_NAME = re.compile(r"(?<![a-z])robe(?![a-z])|(?<![가-힣])로브(?!스터)", re.I)
+SKIRTY = {"Skirts", "Dresses"}
+
+WARM_MATERIALS = {"다운", "기모", "시어링"}
+# 스판덱스는 함량이 적혀 있을 때만 신축성으로 본다. 숫자를 찾은 1,326벌 중 87%가 3% 이상
+# 이었지만 2% 이하도 173벌 있었다 — 우븐 셔츠에 2% 든 스판은 늘어난다고 하기 어렵다.
+# 숫자를 못 찾은 2,797벌은 확인할 길이 없으니 손대지 않는다.
+SPAN_PCT = re.compile(r"(?:스판덱스|스판|폴리우레탄|elastane|spandex)\s*[:：]?\s*(\d{1,2}(?:\.\d)?)\s*%", re.I)
+
+LONG_SLEEVE_KIND = re.compile(
+    r"sweat\s?shirts?|맨투맨|스웨트셔츠|hoodie|hoody|후디|jackets?|자켓|재킷|"
+    r"coats?|코트|blouson|블루종|parka|파카|점퍼", re.I)
+# 매장이 소매를 이름에서 「L/S」·「S/S」로만 밝히는 일이 있다. 본문에는 딴 소매가 적혀
+# 있어서(매장이 다른 상품 설명을 복사해 둔다) 롱슬리브이면서 반팔인 옷이 생겼다 —
+# frizmworks 「OG Vintage dyeing l/s tee」 본문에 「반팔 티셔츠입니다」, espionage
+# 「Jungle Fatigue S/S Outer Shirt」 본문에 롱슬리브. 이름이 이긴다.
+# 계절 표시와 헷갈리면 안 된다 — 「S/S 26 COLLECTION」의 S/S 는 봄여름이라 뒤에 숫자가
+# 오면 안 본다.
+NAME_LS = re.compile(r"(?<![a-z0-9])l\s*/\s*s(?![a-z0-9])", re.I)
+NAME_SS = re.compile(r"(?<![a-z0-9])s\s*/\s*s(?!\s*\d)(?![a-z0-9])", re.I)
+NOT_LONG_SLEEVE = re.compile(
+    r"vest|베스트|조끼|sleeveless|슬리브리스|민소매|나시|반팔|half\s?sleeve|"
+    r"short\s?sleeve|숏슬리브|s/s|캡슬리브", re.I)
+
+SLEEVED = {"Tops", "Shirts", "Knitwear", "Outerwear", "Dresses"}
+# 치마에 쓸 수 있는 기장 값. 크롭·세미크롭·쇼츠·버뮤다·카프리는 상의·바지의 말이다.
+SKIRT_LENGTH = {"미니", "미디", "맥시", "롱기장"}
+SHORT_TEXT = 80
+# spec 표에서 태깅에 쓸 만한 키만 — 사이즈 실측(chest/hem)·배송 표(ems/ups)는 뺀다
+SPEC_KEY = re.compile(r"소재|material|fabric|composition|혼용|원단|색상|color|colour|세탁|care|간략설명|디테일|detail|핏|fit|상품명|설명", re.I)
+COLOR_KEY = re.compile(
+    r"^(?:(?:제품\s*)?색상|컬러|colou?r(?:\s*name)?|color\s*/\s*색상)"
+    r"(?:\s*[/\-]\s*(?:size|사이즈))?\s*[:：]?$", re.I)
+HANGUL = "가-힣"
+CSS_RX = re.compile(r"\{[^{}]{0,80}:[^{}]{0,80}\}|border-(?:bottom|top|left|right)|\d+px solid")
+NBU_RX = re.compile(r"([5-8])\s*부\s*(소매|기장|팬츠|바지)?")
+LOOSE_RX = re.compile(r"여유\s?(?:로운|있는|로이)\s?(?:실루엣|핏|fit)", re.I)
+
+
+def _is_hangul(s: str) -> bool:
+    return bool(s) and all("가" <= c <= "힣" for c in s)
+
+
+# 2자 한글 별칭 앞에 붙어도 뜻이 변하지 않는 색 낱말. 매장이 「그린카모」·「베이지체크」처럼
+# 색과 무늬를 붙여 적는다.
+COLOR_PREFIX = ("그린|블랙|화이트|블루|레드|네이비|그레이|베이지|브라운|카키|아이보리|핑크|"
+                "퍼플|옐로우|오렌지|민트|차콜|크림|와인|버건디|실버|골드|라이트|다크|딥")
+
+
+# 앞말에 붙여 쓰는 옷 부위 낱말. 색 예외와 같은 자리인데, 이쪽은 낱말마다 따로 적는다 —
+# 두 글자 한글은 남의 낱말 꼬리에 너무 쉽게 걸린다.
+#
+# 왜 필요한가: 매장은 「아웃포켓」·「허리밴드」·「자개단추」·「소가죽」처럼 붙여 쓴다. 앞이
+# 한글이면 막는 방벽 때문에 이런 진짜 디테일이 통째로 안 읽혔다 — 이 꼴로만 적힌 상품이
+# 8,092벌이다(2026-09-07 실측).
+#
+# 왜 방벽을 그냥 못 걷어내는가: 같은 셈에서 걸린 것 가운데 대부분이 남의 낱말이었다.
+#   슬리브·롱슬리브·숏슬리브 → 「리브」 1,820  ·  「~하시어」 → 「시어」 312
+#   케어라벨 → 「라벨」 2,739  ·  브레이슬릿 → 「슬릿」 27  ·  꽈배기 → 「배기」 25
+#   버튼다운·아름다운 → 「다운」 60  ·  올리브 → 「리브」 72  ·  아트워크 → 「워크」 248
+# 그래서 「무엇 뒤에 오면 뜻이 그대로인가」를 실제로 나온 앞말에서만 골라 적는다.
+# 틀린 태그는 없는 태그보다 나쁘다 — 앱 상세 표에 사람이 그대로 본다.
+GLUE_PREFIX = {
+    "포켓": "아웃|인|빅|사이드|히든|웰트|카고|앞|뒤|가슴|배색|플랩|지퍼|패치|슬랜트",
+    "밴드": "허리|고무|밑단|소매|목",
+    "단추": "자개|소뿔|조개|앞|뒤|금속|나무",
+    "여밈": "앞|뒤|옆|지퍼|단추",
+    "트임": "옆|뒤|앞|밑|목|소매",
+    "자수": "로고|직|가슴|앞|뒤|기계|손",
+    "가죽": "소|양|합성|인조|에코|재생|송아지",
+    "카라": "오픈|셔츠|피터팬|윙|스탠드|테일러드",
+    "체인": "키|메탈|볼",
+    "조절": "길이|허리|끈|어깨",
+    "크롭": "세미",
+    # 「슬리브」·「올리브」의 리브를 막으면서 「소매리브」는 받는다 — 앞말이 두 글자 이상이라
+    # 갈라진다. 「워싱」은 「덤블워싱」·「텀블워싱」(세탁 안내 159벌)을 일부러 뺀다.
+    "리브": "소매|밑단|목|넥|허리",
+    # 「버튼다운」은 카라 종류지만 그 셔츠에도 단추는 있다 — 막지 않는다(120벌 확인, 2026-09-08).
+    "버튼": "스냅|택|더블|싱글|자개|메탈|나무|앞|뒤|프론트",
+    "워싱": "가먼트|스톤|빈티지|인디고|피그먼트|워터|아이스|블리치|오버다이",
+}
+
+
+# 뒤에 이 글자가 붙으면 뜻이 뒤집히는 낱말. 「코튼 롱 슬리브리스 티셔츠」는 민소매인데
+# 「롱 슬리브」가 앞부분에 그대로 들어 있어서 롱슬리브·슬리브리스 둘 다 붙었다(3벌,
+# 2026-09-08). 영어 쪽은 이미 `(?![a-z0-9])` 로 막혀 있어 'long sleeveless' 가 안 걸린다 —
+# 세 글자 넘는 한글 별칭에만 경계가 없었다. 한글은 조사가 붙어 다녀서(「롱슬리브를」)
+# 뒤를 통째로 막을 수는 없고, 뜻이 뒤집히는 글자만 짚어 막는다.
+BLOCK_SUFFIX = {
+    "롱슬리브": "리스",
+    "롱 슬리브": "리스",
+    "라이닝": r"\s*(?:나염|프린트|프린팅)",   # 라인 나염
+    "미디": "움|엄",   # M 사이즈
+    "스웨트": "셔츠",
+}
+
+
+def compile_alias(alias: str) -> re.Pattern:
+    a = re.escape(alias.lower())
+    if alias in BLOCK_SUFFIX:
+        return re.compile(rf"{a}(?!{BLOCK_SUFFIX[alias]})")
+    if _is_hangul(alias) and len(alias) == 1:
+        return re.compile(rf"(?<![{HANGUL}]){a}(?![{HANGUL}])")
+    if _is_hangul(alias) and len(alias) == 2:
+        # 앞이 한글이면 막는다 — 「측면」의 면, 「서울」의 울, 「올리브」의 리브를 걸러 온 규칙이다.
+        # 다만 색 이름이 앞에 붙는 것은 막으면 안 된다: 「그린카모」·「베이지체크」·「블랙진」은
+        # 색 + 그 낱말이라 뜻이 그대로다. 이름에 그렇게 적는 매장이 있어 22벌이 무늬를 잃고
+        # 있었다(그린카모 9 · 베이지체크 3 …, 2026-09-06). 색 낱말 뒤는 허용한다.
+        pre = COLOR_PREFIX
+        if alias in GLUE_PREFIX:                 # 옷 부위 낱말 뒤도 허용한다(위 GLUE_PREFIX 주석)
+            pre = f"{pre}|{GLUE_PREFIX[alias]}"
+        return re.compile(rf"(?<![{HANGUL}]){a}|(?:{pre}){a}")
+    if re.fullmatch(r"[a-z0-9 /\-]+", alias.lower()):
+        # 복수형 s 를 받는다 — 「Archive Long Sleeves」가 「long sleeve」에 안 걸려
+        # 상품명에 sleeve 723 · long 616 이 미등록으로 남아 있었다(2026-09-05).
+        #
+        # 낱말 **뒤에 바로 붙은 숫자**도 받는다. 매장이 혼용률을 붙여 적는다:
+        #     FABRIC POLYESTER95% SPAN5%          (etmon)
+        #     FABRIC: COTTON100%                  (lekim)
+        #     [ Fabric ] POLYESTER100             (mooneed)
+        # 띄어 쓴 「COTTON 100%」는 되는데 붙여 쓴 것만 안 돼서, 소재가 빈 옷 6,275벌 중
+        # 613벌이 **글에 버젓이 적혀 있는데** 비어 있었다(2026-09-15 전수).
+        # 네 글자 미만 별칭은 그대로 둔다 — 짧은 말에 숫자가 붙는 건 대개 딴 것이다.
+        tail = r"(?![a-z])" if len(alias) >= 4 else r"(?![a-z0-9])"
+        # 두 낱말 별칭은 띄어 쓴 꼴 · 하이픈 · 붙여 쓴 꼴을 다 받는다 — 「Cut-Out Strap Knit Top」이 「cut out」에 안 걸려 컷아웃이
+        # 비어 있었다(사람 디테일 확인, 2026-10-06). double-knee · cargo-pocket 도 같다.
+        if re.search(r"[a-z]", alias.lower()) and re.search(r"[ \-]", alias):
+            a = re.sub(r"(?:\\ |\\-|-)+", r"[\\s\\-]?", a)
+        return re.compile(rf"(?<![a-z0-9]){a}s?{tail}")
+    return re.compile(a)
+
+
+def alias_lit(alias: str) -> str:
+    """그 별칭이 걸리려면 글에 반드시 있어야 하는 글자(_scan 의 빠른 거르기). 두 낱말 영문 별칭은 띄어쓰기 · 하이픈이 바뀌어도
+    걸리므로(compile_alias) 가장 긴 낱말 하나만 요구한다."""
+    low = alias.lower()
+    if re.fullmatch(r"[a-z0-9 /\-]+", low) and re.search(r"[a-z]", low) and re.search(r"[ \-]", low):
+        return max(re.split(r"[ \-]+", low), key=len)
+    return low
+
+
+
+
+# 상세 설명 뒤(또는 사이)에 매장이 「함께 보는 상품」을 이름+가격으로 붙인다. 그 이름이
+# 이 옷의 태그가 됐다 — badblood MA-1 자켓이 옆의 「솔리드 복서 - 블랙/스트라이프」 때문에
+# 단색이면서 스트라이프가 되고, dunst 블레이저가 옆의 「H-LINE MAXI SKIRT」 때문에 맥시가
+# 됐다. 상품 12,493벌(33%)이 이런 글을 달고 있다(2026-09-05).
+#
+# 「가격이 처음 나오는 데서 자른다」는 못 쓴다 — 자기 가격 블록이 글 한가운데(중앙값 39%
+# 지점)에 있어 진짜 설명 25,740건이 함께 잘린다. 그래서 자르지 않고 **가격과 그 앞의
+# 이름만 도려낸다**. 앞으로 예순 자까지 되짚되 문장 경계(마침표·「다 」·「요 」·줄바꿈·
+# 가운뎃점)에서 멈추므로 진짜 문장은 남는다(네 매장 표본에서 한 글자도 안 잘렸다).
+_PRICE_RUN = re.compile(
+    r"(?:(?:krw|won)\s*\d{1,3},\d{3}|\d{1,3},\d{3}\s*(?:krw|won|원))"
+    r"(?:\s*(?:\(\s*\d+%\s*\))?\s*(?:krw|won)?\s*\d{1,3},\d{3}\s*(?:krw|won|원)?)*", re.I)
+_SENT_END = re.compile(r"[.。!?\n|·•▪]|다\s|요\s")
+
+# 통화 표시 없이 값만 적는 매장이 있다 — depound 「slim fit t-shirt - navy 58,000」,
+# mardi-mercredi·matin-kim·the-coldest-moment 의 「함께 보는 상품」 블록이 그렇다.
+# 낱개로 보면 값인지 아닌지 알 수 없어서(「1,000회 세탁」) 셋 이상 잇달아 있을 때만 값으로 본다.
+_PRICE_BARE = re.compile(r"(?<![\d,.])\d{1,3},\d{3}(?![\d,.])")
+_CUR_NEAR = re.compile(r"(?:krw|won|원)", re.I)
+_EXTRA_PRODUCT = re.compile(r"추가구성상품\s+[^.\n]{1,100}?\d{1,3},\d{3}(?!\d)")
+
+
+# 손님 후기와 문의 글. 매장이 상품 설명 칸에 그것을 함께 담아 온다 — siyazu 는 설명 666자가
+# 통째로 후기+Q&A+가격줄이라 상품 설명이 아예 없었다(783벌, 2026-09-06). 후기는 사이즈·핏·색을
+# 말하므로 그대로 두면 손님의 감상이 옷의 태그가 된다(「커서 스몰사이즈로 교환했는데도 크네요」).
+#
+#   Review 14 만족 [1] 네이버 페이 구매자 | 23.12.24 13 좀 긴듯한데 … [1] 네이버 페이 구매자 | 21.02.01
+#   Q&A write all 10 문의합니다. 장**** | 22.10.26 9 고객님 답변 드립니다. 시야쥬 | 22.10.26
+#
+# 한 줄은 <말> [번호] <이름> | <날짜> 꼴이라 그 앞의 말까지 함께 지운다.
+REVIEW_LINE = re.compile(
+    r"[^.!?\n]{0,80}\[\d+\]\s*(?:[가-힣]{2,4}|네이버\s*페이\s*구매자|[A-Za-z*]{2,12})\s*\|\s*\d\d\.\d\d\.\d\d\s*\d*")
+QNA_LINE = re.compile(
+    r"[^.!?\n]{0,40}(?:문의합니다|고객님 답변 드립니다)[^|]{0,30}\|\s*\d\d\.\d\d\.\d\d\s*\d*")
+REVIEW_HEAD = re.compile(r"(?:^|\s)(?:Review|리뷰)\s+\d+\s|(?:^|\s)Q&A\s+write\s+all\s+\d+\s", re.I)
+REVIEW_TABLE = re.compile(r"(?:포토리뷰\s*\([^)]*\)|리뷰\s*전체보기)[\s\S]*?"
+                          r"첫\s*페이지\s*이전\s*페이지[\s\S]{0,80}?마지막\s*페이지")
+# 번호가 [1] 없이 이름·날짜 뒤에 붙는 후기 목록도 있다(lookast).
+# 전체 삭제는 실제 니트/핏의 유일한 근거도 잃었다. 경계가 확인된 블록에서
+# 코디 상대의 니트만 가린다. 다른 후기 형식은 기존 규칙을 유지한다.
+REVIEW_DATED = re.compile(
+    r"\breview\s+\d+\s+(?=[\s\S]{0,2500}?\|\s*\d{2}\.\d{2}\.\d{2})"
+    r"[\s\S]{0,6000}?\bwrite\s+all(?:\s+\d+)*", re.I)
+
+
+def strip_reviews(text: str) -> str:
+    """후기·문의 글을 걷어낸다. 상품 설명이 아니라 손님의 말이다."""
+    def partners(m):
+        return re.sub(r"(?:같이\s*산|코디된)[^.!?\n|]{0,16}니트|니트(?=랑|\s*넣어\s*입)",
+                      lambda p: p.group().replace("니트", "  "), m.group())
+    t = REVIEW_LINE.sub(" ", REVIEW_DATED.sub(partners, REVIEW_TABLE.sub(" ", text or "")))
+    t = QNA_LINE.sub(" ", t)
+    t = REVIEW_HEAD.sub(" ", t)
+    return t
+
+
+# 상세 이미지에 「PRODUCT GUIDE」 눈금자를 넣는 매장이 있다. OCR 이 그 눈금의 이름을
+# 통째로 읽어 온다 — 이 옷의 핏이 아니라 자의 눈금 이름이다.
+#
+#   PRODUCT GUIDE
+#   핏     타이트  슬림  레귤러  세미 와이드  와이드      ← 이 옷은 이 중 하나인데 다 적힌다
+#   촉감   부드러움  보통  뻣뻣함
+#
+# 그래서 blr 「Waffle Mix Washed Sweat Pants」가 슬림핏이면서 오버핏이었다. 눈금자가 있는
+# 상품이 1,602벌이다(matin-kim 536 · badblood 462 · nick-nicole 449 · blr 121, 2026-09-07).
+# 한 줄에 핏 낱말이 셋 이상 잇달아 나오면 그건 옷 이야기가 아니라 자다. OCR 오독을 감안해
+# 낱말 사이에 잡스러운 글자 몇 개는 봐준다(「레글러」·「벗뱃함」처럼 눈금 이름도 깨져 온다).
+# 자의 눈금 이름은 두 갈래로 온다.
+#  · 한글 눈금은 그림에서 읽어 오느라 낱말 사이에 OCR 쓰레기가 낀다
+#    (「타이트 슬림 alee] 세미 와이드 와이드」 — 레귤러가 alee] 로 깨졌다).
+#  · 영문 눈금은 글자로 깔끔하게 온다(frizmworks 「SLIM | CROP REGULAR TAPERED | ANKLE WIDE」).
+# 그래서 한글 쪽만 낱말 사이 잡글자를 봐주고, 영문 쪽은 구분기호만 허락한다. 영문에 글자를
+# 허락하면 진짜 설명글이 잘린다 — 「Relaxed fit with a wide leg and a slim taper」.
+# 자에는 「오버핏」이 아니라 「오버」로만 적히기도 한다(blr 「타이트 슬림 레글러 세미 오버 오버」).
+# 눈금 가운데 칸 이름도 낱말로 센다 — 「슬림핏 스탠다드 오버핏」(ava-molli), 「오버핏 @ 기본 슬림」(ronron),
+# 「슬림핏 레글러핏 루즈핏」(concepts1one). 이 셋이 빠져 자가 두 칸으로만 읽혀 안 걸렀고, 판매중 700벌 넘게
+# 슬림핏과 오버핏 · 루즈핏을 한꺼번에 받았다(2026-10-04 감사).
+_FIT_KO = (r"(?:타이트|슬림\s*핏|슬림핏|슬림|레귤러\s*핏|레글러\s*핏|레귤러|레글러|스탠다드\s*핏|스탠다드|기본|노멀|"
+           r"세미\s*와이드|세미\s*오버\s*핏|세미|와이드|오버\s*핏|오버핏|오버|루즈\s*핏|루즈핏|루즈)")
+# 「Fit Slim Fit True to Size Loose Fit」(till-i-die 눈금) — fit · true to size · standard 도 칸 이름이다.
+_FIT_EN = (r"(?:regular|slim|tapered|straight|relaxed|loose|oversized?|wide|skinny|baggy|"
+           r"crop(?:ped)?|ankle|semi|tight|true\s+to\s+size|standard|normal|fit)")
+SCALE_BAR = re.compile(
+    rf"{_FIT_KO}(?:[^\n가-힣]{{0,12}}{_FIT_KO}){{2,}}"
+    rf"|{_FIT_EN}(?:[^\n가-힣A-Za-z0-9]{{1,8}}{_FIT_EN}){{2,}}"
+    rf"|(?:착용감|촉감|두께감?|비침|신축성)\s*[^\n가-힣]{{0,10}}{_FIT_KO}"
+    rf"(?:[^\n가-힣]{{0,8}}{_FIT_KO})+", re.I)
+
+# 「슬림해 보이는」은 이 옷의 핏이 아니라 입은 사람이 어떻게 보이는지다. 오히려 넉넉한 옷에
+# 자주 적힌다 — haiq 「타이트 하지 않고 넉넉한 폭으로 … 다리 라인이 슬림해 보이도록」,
+# 「넉넉한 박시 핏이 허벅지 라인을 여유 있게 감싸 자연스럽게 슬림해 보이는 효과」.
+# 그 낱말만 지운다(141벌, 2026-09-07).
+SLIM_LOOK = re.compile(r"슬림(?=(?:해|하게)\s*보이)")
+# 실루엣 낱말이 이 옷의 핏을 말하지 않는 자리들. 감사기의 실루엣 모순 62건을 문장까지
+# 열어 모았다(2026-09-07).
+#   「4. 폴리 백 제작 시 서로 달라붙는 것을 방지하기 위하여 미량의 슬림제가 들어 있습니다」
+#       → 포장 안내문의 화학물질이 슬림핏이 됐다. 한 브랜드에 38벌, 그 브랜드 모순의 대부분이다.
+#   「세로로 잔잔하게 흐르는 골지 조직은 시각적으로 슬림한 효과를 주며」
+#       → 눈에 그렇게 보인다는 말이지 이 옷의 핏이 아니다(이미 있는 「슬림해 보이」와 같은 갈래).
+#   「슬림한 티셔츠나 슬리브리스와는 산뜻하고 미니멀한 분위기」
+#       → 같이 입을 남의 옷이다.
+FIT_NOISE = re.compile(r"슬림(?=제)"
+                       r"|슬림(?=한?\s*효과)"
+                       r"|(?:슬림|루즈|오버|타이트)(?=한\s*[가-힣]{2,6}(?:나|이나)\s)")
+# 「어느 사이즈를 고르면 어떤 핏이 되는가」는 이 옷의 핏이 아니라 고르는 안내다.
+#   「* 유니섹스 ( s size – 슬림핏 / m size – 슬림핏 남녀공용 / l, xl size – 루즈핏 )」  67벌
+#   「여성의 경우 슬림한 핏으로는 xs-s, 루즈핏으로는 m 사이즈를 추천드리며」              10벌
+# 한 벌에 슬림핏과 루즈핏이 함께 붙는 가장 흔한 까닭이다. 어느 한쪽을 고를 수 없으니
+# 둘 다 지운다 — 틀린 태그보다 없는 태그가 낫다.
+FIT_SIZE_GUIDE = re.compile(
+    r"(?:xxs|xs|s|m|l|xl|xxl|2xl|3xl|\d)\s*size\s*[-–—]\s*(?:슬림|루즈|오버|레귤러|타이트)[가-힣]*"
+    r"|(?:슬림|루즈|오버|타이트)한?\s*핏?으로는", re.I)
+
+# 자는 늘 양 끝을 다 적는다 — 좁은 쪽과 넓은 쪽이 한 줄에 같이 있어야 자다.
+# 이 조건이 없으면 진짜 설명글이 잘린다: 「a slim, tapered, straight silhouette」은
+# 핏 낱말이 셋 잇달아 나오지만 한 옷을 말하는 것이고, 좁은 쪽만 있다(2026-09-07).
+_NARROW = re.compile(r"타이트|슬림|tight|slim|skinny", re.I)
+_WIDE = re.compile(r"와이드|오버|루즈|wide|oversized?|loose|baggy|relaxed", re.I)
+
+
+def strip_scale_bar(text: str) -> str:
+    """상세 이미지의 핏 눈금자와 「슬림해 보이는」을 걷어낸다. 둘 다 이 옷의 핏이 아니다."""
+    def cut(m):
+        g = m.group(0)
+        return " " if (_NARROW.search(g) and _WIDE.search(g)) else g
+    t = SLIM_LOOK.sub(" ", SCALE_BAR.sub(cut, text or ""))
+    t = FIT_SIZE_GUIDE.sub(lambda m: " " * len(m.group(0)), t)
+    return FIT_NOISE.sub(" ", t)
+
+
+# 매장이 「이 옷에 무엇을 같이 입으면 좋다」를 적는다. 거기 적힌 옷은 이 상품이 아니다.
+#   haiq  「쌀쌀한 저녁에는 슬리브리스나 티셔츠와 레이어드해 가디건처럼 연출할 수 있습니다」
+#   haiq  「간절기에는 나시나 얇은 긴팔들과 레이어링하고」
+#   grove 「비침이 있어 슬리브리스, 티셔츠 등 다양한 아이템과 매칭 시 매력적인 아이템입니다」
+#   kirsh 「나시티, 긴팔 등으로 여러 스타일링 가능」
+# 그래서 반팔 니트가 슬리브리스이고 후드 아노락이 민소매였다.
+# 문장을 통째로 버리지 않는다 — 그 안에 이 옷 이야기(홑겹·비침·기장)도 함께 있다.
+# 「무엇이나」·「무엇, 무엇 등」으로 남을 부르는 자리의 그 낱말만 지운다(2026-09-07).
+_WEAR_WORD = r"(?:슬리브리스|sleeveless|민소매|나시티|나시|반팔|긴팔|롱슬리브)"
+STYLE_OR = re.compile(rf"{_WEAR_WORD}(?=(?:나|이나)\s)", re.I)
+STYLE_LIST = re.compile(rf"{_WEAR_WORD}(?=\s*[,·]\s*[^.\n]{{0,24}}?등[\s으로])")
+# 매장이 「짝이 되는 다른 상품과 세트로 입으세요」를 적는다. 그 짝은 이 옷이 아니다(2026-09-07).
+#   grove 「julian sleeveless와 세트로 착용할 수 있습니다」   → 반팔 티셔츠가 슬리브리스가 됐다
+#   grove 「leaf sleeveless 세트 착용 가능」                 → 긴팔 가디건이 슬리브리스가 됐다
+#   grove 「rina sleeveless 와 세트 착용 가능」
+STYLE_SET = re.compile(rf"{_WEAR_WORD}(?=\s*(?:와|과)?\s*세트)", re.I)
+# 「무엇과 레이어드해」도 같다 — 겹쳐 입을 남의 옷 이름이다.
+#   haiq 「간절기에는 긴팔 이너와 레이어드해 포인트를 더할 수도 있습니다」 → 반팔 티가 롱슬리브가 됐다
+STYLE_LAYER = re.compile(rf"{_WEAR_WORD}(?=\s*(?:이너|아우터|셔츠|니트|가디건|티셔츠)?\s*(?:제품)?\s*(?:등)?\s*(?:와|과)\s*(?:함께\s*)?레이어[드딩])", re.I)
+# 상대 상품의 이름표만: 현재 상품의 핏·부자재가 같은 문장에 있어도 남긴다.
+STYLE_PARTNER = re.compile(
+    r"(?:\[[^\]\n]{1,65}\]|(?:와이드|슬림|신치백|벨티드)[^.\n,·•]{0,25}?(?:팬츠|데님|스커트))"
+    r"(?=\s*(?:제품)?\s*(?:(?:와|과)(?:\s*함께)?|등)\s*(?:set[ -]?up|세트|매치|코디|이얼즈어고의))", re.I)
+
+
+def strip_styling_suggestion(text: str) -> str:
+    """「~와 같이 입으세요」에서 남의 옷 이름을 지운다."""
+    t = text or ""
+    for rx in (STYLE_OR, STYLE_LIST, STYLE_SET, STYLE_LAYER):
+        t = rx.sub(" ", t)
+    # '슬림핏 실루엣으로 데님과 매치'의 슬림은 본품, 데님은 코디 상대다.
+    return STYLE_PARTNER.sub(lambda m: m.group() if re.search(r"실루엣|핏으로|기장", m.group()) else " ", t)
+
+
+# 같은 낱말이라도 부위·안내·공정을 말하면 해당 축의 근거가 아니다.
+AXIS_NOISE = {
+    "silhouette": re.compile(
+        r"\btight\s*\d+(?:\.\d+)?\s*cm\b"
+        r"|\bstructured\s+(?:collar|armhole)\b"
+        r"|\bstraight\s+hair\b|구조적인\s*(?:완성도|디자인을\s*선보이는)"
+        r"|슬림하게\s*잡아주는\s*(?:소매|밑단)"
+        r"|(?:스트랩|끈|랩)을?\s*활용하여\s*슬림한\s*(?:핏으로|[A-Z]{2,4}(?:으로)?)\s*연출\s*가능", re.I),
+    "length": re.compile(r"기장\s*크롭\s*(?:[/|~–-]\s*)?롱\b"),
+    "neckline": re.compile(r"(?:\bribbed|리브)\s+collar\b", re.I),
+    "material": re.compile(
+        r"\bhand[ -]+knitted(?=[^\n.]{0,30}\bdenim\b)"
+        r"|니트(?:웨어)?(?=나\s)|니트(?=\s*(?:와|과)\s*(?:매치|코디|스타일링))"
+        r"|다운(?=받|로드|로딩)", re.I),
+    "finish_wash": re.compile(
+        r"데미지(?=(?:가|는)?\s*있을\s*수)"
+        r"|데미지\s*워싱(?=\s*(?:공정이\s*진행되는\s*)?제품\s*같은\s*경우)"
+        r"|물\s*빠짐(?=(?:\s*및\s*이염)?(?:\s*현상)?(?:이|가)?\s*있을\s*수)"
+        r"|피그먼트(?=\s*코팅)|\bpigment(?=\s*(?:coat(?:ing|ed)?\b|finish))", re.I),
+    "design_element": re.compile(
+        r"패치(?=\s*포켓)|\bpatch(?=[ -]*pockets?\b)"
+        r"|드레이프(?=성)|배색(?=감\s*(?:[:：]|cotton|tencel|폴리|면|코튼))"
+        r"|(?:하드\s*)?트위스트\s*(?:코튼\s*)?원사|\bhard[ -]twist(?:ed)?\s+(?:cotton|yarn)"
+        r"|울마크\s*로고|woolmark\s*logo"
+        r"|\bdouble[ -]layered\s+pocket(?:ing|s)?\b"
+        r"|배색(?=[^.\n]{0,45}이염[^.\n]{0,30}세탁)", re.I),
+    "construction": re.compile(r"(?:(?:주머니|포켓)\s*(?:안감|라이닝)|\bpocket\s+lining\b)", re.I),
+    "pattern": re.compile(r"\bcheck\s*point\b|(?:사이즈|실측|치수)\s*체크"
+                          r"|(?:헤링본|해링본|herringbone)\s*(?:테이프|밴드|tape|band)", re.I),
+    "hardware": re.compile(
+        r"(?:플라워\s*)?아일렛(?=\s*(?:소재|원단|자수))"
+        r"|\beyelet(?=\s*(?:fabric|embroidery)\b)"
+        r"|\bbelt\s+loops?\b|벨트\s*(?:고리|루프)"
+        r"|모니터의?\s*밝기를?\s*조절"
+        r"|(?:단추|스냅)[^.\n]{0,50}(?:체결|않은\s*상태)[^.\n]{0,40}(?:케어해|세탁하는\s*경우)[^.\n]*"
+        r"|구성품\s*분실[^\n]{0,30}\([^)]{0,60}\)"
+        r"|(?:골드\s*)?메탈\s*사(?=가|를|로|와|의|는|도|[\s.,]|$)|\bmetal\s+(?:yarn|thread)\b"
+        r"|(?:지퍼\s*(?:폴리\s*백|백)|zip(?:per)?[ -]*(?:poly[ -]*)?bag)"
+        r"|사이즈는\s*(?:단추|버튼)[^.\n]{0,70}측정한\s*사이즈"
+        r"|프린팅\s*/\s*금속\s*장식\s*/\s*자수의\s*경우", re.I),
+    "function": re.compile(r"대다수의\s*울\s*소재\s*섬유는\s*항균성"),
+}
+
+# 선택지가 남아 있는 표는 전체가 속성이 아니다. 확실한 선택 기호가 하나이고 나머지가
+# 빈 기호일 때만 선택한 값으로 바꾼다. OCR의 @/ㅁ/o/를 은 체크로 복원하지 않는다.
+_ATTR_KEY = r"신축성|신축감|비\s*침|(?<![a-z])stretch(?=\s|:)|see[ -]through|sheerness"
+ATTRIBUTE_ROW = re.compile(
+    rf"(?P<key>{_ATTR_KEY})(?P<tail>[^\n]{{0,180}})", re.I)
+ATTRIBUTE_STOP = re.compile(r"두께감?|촉감|무게감?|안감|광택|사이즈|제조|소재|핏|thickness|texture|weight|lining", re.I)
+ATTRIBUTE_VALUE = re.compile(
+    r"(?:아주\s*)?좋음|(?:약간\s*|조금\s*)?있음|없음|많음|약간|보통"
+    r"|(?<![a-z])(?:non[ -]stretch|no\s+stretch|light\s+stretch|slight(?:ly)?\s+(?:stretch|sheer)|stretchy|none|sheer|see[ -]through)(?![a-z])", re.I)
+_CHECK_MARKS = re.compile(r"[■●☑✓✔◉□○☐ㅁ@©]|(?<![a-z])o(?![a-z])", re.I)
+
+
+def selected_attribute_text(text: str) -> str:
+    """신축성·비침 표에서 판독 가능한 선택만 남기고 다중/깨진 선택지는 비운다."""
+    def row(m):
+        key, tail = m.group("key"), m.group("tail")
+        stop = ATTRIBUTE_STOP.search(tail)
+        end = stop.start() if stop else len(tail)
+        # 한 줄에 다음 속성이 붙어 있으면 그 속성도 독립적으로 처리한다.
+        is_stretch = bool(re.search(r"신축|stretch", key, re.I))
+        for nxt in re.finditer(_ATTR_KEY, tail, re.I):
+            if bool(re.search(r"신축|stretch", nxt.group(), re.I)) != is_stretch:
+                end = min(end, nxt.start())
+                break
+        boundary = re.search(r"[.!?·•▪]|\s[-+](?=\s|[가-힣A-Za-z])", tail[:end])
+        if boundary:
+            end = min(end, boundary.start())
+        value_text = tail[:end]
+        # 없음/약간 두 칸이 빈 괄호이고 마지막 칸만 @인 동일한 3열 서식.
+        # e3 etmon-2066에서 마지막 '많음'이 us로 OCR된 경우도 선택 위치는 남아 있다.
+        # @ 일반 해석으로 넓히지 않고 읽을 수 있는 두 선택지와 빈 표시를 모두 요구한다.
+        empty = r"(?:\(\s*_?\s*\)|[○O])"
+        if is_stretch and re.fullmatch(
+                rf"\s*{empty}\s*없음\s*{empty}\s*약간\s*@\s*(?:많음|좋음|있음|[a-z]{{1,5}})\s*",
+                value_text, re.I):
+            return "신축성 있음" + selected_attribute_text(tail[end:])
+        lead = value_text.lstrip(" :：-–/|")
+        # 선택표 머리는 값/기호로 시작한다. 신축성이 좋은 원단, stretch fabric 같은
+        # 문장·상품명을 표로 읽지 않는다. 깨진 OCR 행은 짧고 기호가 있는 때만 허용한다.
+        starts_value = ATTRIBUTE_VALUE.match(lead)
+        starts_mark = re.match(r"[■●☑✓✔◉□○☐ㅁ@©]", lead)
+        broken_row = (len(value_text) < 75 and _CHECK_MARKS.search(value_text)
+                      and not re.search(r"[가-힣]{2,}", ATTRIBUTE_VALUE.sub("", value_text)))
+        if not starts_value and not starts_mark and not broken_row:
+            return key + value_text + selected_attribute_text(tail[end:])
+        vals = list(ATTRIBUTE_VALUE.finditer(value_text))
+        marks = list(_CHECK_MARKS.finditer(value_text))
+        # 뒤 문장의 불릿/저작권 기호를 선택 기호로 오인하지 않는다.
+        prose = (not vals and re.search(r"[가-힣]{2,}", value_text)) or (
+            len(vals) == 1 and not any(mark.start() < vals[0].start() for mark in marks))
+        if len(vals) < 2 and (not marks or prose):
+            return key + value_text + selected_attribute_text(tail[end:])
+        if vals:
+            # 마지막 선택지 뒤의 별도 상품 설명까지 삼키지 않는다.
+            end = vals[-1].end()
+        selected = []
+        reliable = bool(vals)
+        prev = 0
+        for v in vals:
+            prefix = value_text[prev:v.start()].strip()
+            mm = re.search(r"([■●☑✓✔◉□○☐])\s*$", prefix)
+            if not mm:
+                reliable = False
+            elif mm.group(1) in "■●☑✓✔◉":
+                selected.append(v.group())
+            prev = v.end()
+        kept = ""
+        if reliable and len(selected) == 1:
+            negative = bool(re.search(r"없음|none|non[ -]stretch|no\s+stretch", selected[0], re.I))
+            kept = ("신축성" if is_stretch else "비침") + (" 없음" if negative else " 있음")
+            if not is_stretch and not negative:
+                kept += " sheer"
+        return kept + selected_attribute_text(tail[end:])
+    return ATTRIBUTE_ROW.sub(row, text or "")
+
+
+_DAMAGE_WORD = re.compile(r"데미지(?:드)?|에이징|\bdamag(?:e|ed)\b|\bag(?:ing|ed)\b", re.I)
+_DAMAGE_WARNING = re.compile(
+    r"건조기|고온\s*건조|부주의|보상|반품|교환|원치\s*않|손상될\s*우려"
+    r"|\bironing\b|\bnegligence\b|\bsigns of wear\b|\breturns?\b|\brefund", re.I)
+_DAMAGE_DESIGN = re.compile(r"데미지\s*(?:워싱|디테일|가공)|\bdamaged?\s+(?:wash|detail|finish)", re.I)
+_FAUX_DENIM = re.compile(r"faux[ -]denim|(?:데님|denim)\s*trompe\s+l[’'` ]?oeil|트롱프뢰유\s*데님", re.I)
+
+
+def mask_damage_warnings(text: str) -> str:
+    """손상 경고 문장의 가공 낱말만 가린다. 별도의 디자인 근거는 유지한다."""
+    return "".join(_DAMAGE_WORD.sub(lambda m: " " * len(m.group()), s)
+                   if _DAMAGE_WARNING.search(s) and not _DAMAGE_DESIGN.search(s) else s
+                   for s in re.split(r"(?<=[.!?\n])", text))
+
+# 판독기가 선택 표시를 놓친 표. 여러 칸이 한 줄에 있으면 적용 여부를 알 수 없다.
+ATTRIBUTE_CHOICES = re.compile(
+    r"신축성[^가-힣\n]{0,20}약간\s*있음[^가-힣\n]{0,20}아주\s*좋음"
+    r"|안\s*감[^가-힣\n]{0,30}(?:기모|누빔)[^가-힣\n]{0,15}(?:기모|누빔)")
+BRAND_STORY = re.compile(r"\bthe\s+\d{2,4}\s+[^.\n]{1,50}\bcollection describes\b[\s\S]{0,2000}?"
+                         r"\beach piece in our collection\b[^.]{0,300}\.", re.I)
+
+
+def strip_brand_story(text: str) -> str:
+    """시즌 소개부터 브랜드 소개의 맺음말까지. 제품 혼용률이 끼면 남긴다."""
+    return BRAND_STORY.sub(lambda m: " " * len(m.group(0))
+                           if "%" not in m.group(0) and re.search(r"\bdesigner brand\b", m.group(0), re.I)
+                           else m.group(0), text)
+
+
+def mask_axis_noise(axis: str, text: str) -> str:
+    """다른 축의 포켓·소재 등은 남기고 이 축에서만 가린다."""
+    def blank(m):
+        s = m.group(0)
+        if axis == "hardware" and s.startswith("사이즈는"):
+            # 가디건/셔츠는 안내문이 유일한 단추 근거여도 실제 단추일 수 있다.
+            # 감사에서 확인된 티셔츠류의 공용 실측 안내에만 적용한다.
+            name = text.split("\n", 1)[0]
+            if (not re.search(r"티셔츠|\bt[ -]?shirts?\b|\blong[ -]sleeves?\b|롱\s*슬리브", name, re.I)
+                    or re.search(r"카라|칼라|헨리|폴로|\b(?:collar|henley|polo|button|snap|zip)\b|버튼|단추|스냅|지퍼", name, re.I)):
+                return s
+        if axis == "construction":
+            return re.sub(r"안감|라이닝|lining", lambda w: " " * len(w.group(0)), s)
+        if axis == "hardware" and s.startswith("구성품"):
+            return " " * len(s)
+        return " " * len(s)
+    rx = AXIS_NOISE.get(axis)
+    text = rx.sub(blank, text) if rx else text
+    if axis == "hardware":
+        # 조절이라는 동사는 부자재가 아니다. 실제 비조/신치/어드저스터 별칭은 남는다.
+        # 어져스터 같은 표기 변형도 실물 근거다. 이 낱말을 사전이 놓쳤다고
+        # 그 상품의 유일한 기존 근거(조절)까지 삭제하지 않는다.
+        mechanism = re.search(r"어(?:드)?[져저]스터|어드저스트|아저스터|스토퍼|조리개|디링|d링|\bd[ -]?ring\b", text)
+        def generic_adjust(m):
+            clause = re.split(r"[.\n·•]", text[max(0, m.start() - 30):m.start()])[-1]
+            clause += re.split(r"[.\n·•]", text[m.end():m.end() + 30])[0]
+            return m.group() if mechanism or re.search(r"버클|\bbuckle\b", clause, re.I) else " " * len(m.group())
+        text = re.sub(r"조절|\badjust\b", generic_adjust, text, flags=re.I)
+    if axis == "finish_wash":
+        text = mask_damage_warnings(text)
+    if axis == "construction":
+        def body_rib(m):
+            prefix = text[max(0, m.start() - 30):m.start()]
+            suffix = text[m.end():m.end() + 25]
+            if (re.search(r"(?:소매|밑단|네크|넥|커프스|카라)[^.\n]{0,12}$", prefix)
+                    or re.match(r"\s*(?:(?:직조|조직|짜임)의?\s*)?(?:네크라인|넥라인|소맷단|소매단|커프스|밑단|카라|헴)", suffix)
+                    or re.search(r"(?:넥|소매|밑단)\s*(?:배색\s*)?립지", text)
+                    or re.search(r"(?:소맷단|소매단|밑단)[^.\n]{0,25}립\s*(?:피니시|마감)", text)):
+                return m.group()
+            return " " * len(m.group())
+        text = re.sub(r"(?<![가-힣])리브드|\brib\s+(?:fabric|texture|jersey)\b", body_rib, text, flags=re.I)
+        # 원단의 cut edge를 구멍 구조로 읽지 않는다. 별도 컷아웃 문구는 남긴다.
+        if re.search(r"\braw\s+edge\b", text, re.I):
+            text = re.sub(r"(?:셔츠\s*)?끝단에\s*적용된\s*컷\s*아웃", lambda m: " " * len(m.group()), text)
+    if axis == "material":
+        text = re.sub(r"\bsheerness\s+slightly\s+sheer\b", lambda m: " " * len(m.group()), text, flags=re.I)
+    if axis == "pants_type":
+        text = _FAUX_DENIM.sub(lambda m: " " * len(m.group()), text)
+        text = "".join(" " * len(s) if "데님" in s and re.search(r"세탁|오염|다림질|주름을\s*펴", s)
+                       or ("데님" in s and re.search(r"특히\s*피그먼트.*경우.*이염", s))
+                       else s for s in re.split(r"(?<=[.\n])", text))
+    return text
+
+
+# 매장은 「무엇이 아니다」도 적는다. 그 낱말은 이 옷에 있는 것이 아니라 없는 것이다.
+#   frizmworks 「레귤러핏 기반으로 제작되었으며, 루즈하지 않고 깔끔하게 떨어지는 기장감으로」
+#   → 루즈핏 이 붙었다. 매장은 루즈하지 *않다*고 적었는데 루즈핏 이 된 것이다.
+#   흔한 꼴: 「안감 없는 홑겹」·「신축성이 없는 원단」·「절개 없이 통으로」·「비치지 않는 두께」
+# 부정문 안에 태그 낱말이 있는 상품이 1,616벌이다(2026-09-07 셈).
+# 문장을 통째로 버리지 않는다 — 부정 앞의 그 낱말만 지운다. 뒤에 이 옷 이야기가 이어진다.
+NEGATED = re.compile(r"([가-힣]{2,7})(?:하지|지|하게)\s*않"
+                     r"|([가-힣]{2,7})\s*없(?:이|는|어|고|음|다)")
+
+
+def strip_negated(text: str) -> str:
+    """「~하지 않」·「~ 없」 바로 앞의 낱말을 지운다. 그건 이 옷에 없는 것이다."""
+    def cut(m):
+        g = m.group(1) or m.group(2)
+        return m.group(0).replace(g, " " * len(g), 1)
+    text = re.sub(r"\b(?:non[ -]?stretch|no[ -]stretch|not\s+stretchy)\b|논\s*스트레치",
+                  lambda m: " " * len(m.group()), text or "", flags=re.I)
+    return NEGATED.sub(cut, text)
+
+
+# 매장 공용 「사이즈 측정 가이드」 탭 메뉴 — 품목 이름이 낱말 사이 아무것도 없이 줄줄이 이어진다.
+#   years-ago 「사이즈 측정 가이드 Outwear Top Dress Bottom Acc Coat Parka Jacket & Blazer Jumper & Blouson
+#   Sleeveless Short Sleeve Long Sleeve Shirt 1/2 Shirt Vest One-piece Chino & Denim Shorts Skirt watch」
+# 이 메뉴가 모든 상품 글에 붙어 판매중 726벌(66%)이 슬리브리스 · 반팔 · 롱슬리브를 한꺼번에 받았다(2026-10-04 감사).
+# 상품 글이 품목 이름만 다섯 개 넘게 잇달아 적는 일은 없다 — 그런 줄만 지운다.
+_NAV_WORD = (r"(?:outwear|outer|tops?|dress|bottoms?|acc|accessor(?:y|ies)|coats?|parkas?|jackets?|blazers?|jumpers?|"
+             r"blousons?|sleeveless|short\s+sleeves?|long\s+sleeves?|1/2\s+shirts?|shirts?|vests?|one-?piece|chinos?|"
+             r"denim|shorts|skirts?|watch|pants|knit(?:wear)?|cardigans?|hoodies?|sweat(?:shirts?)?|bags?|shoes|caps?|"
+             r"아우터|상의|하의|원피스|스커트|팬츠|셔츠|니트|가디건|자켓|재킷|코트|패딩|베스트|반팔|긴팔|민소매|슬리브리스|액세서리)")
+NAV_MENU = re.compile(rf"(?<![\w])(?:{_NAV_WORD}(?:\s*&\s*|\s+|\s*/\s*)){{5,}}{_NAV_WORD}(?![\w])", re.I)
+
+
+def strip_nav_menu(text: str) -> str:
+    """품목 이름이 여섯 개 넘게 잇달아 나오는 매장 메뉴 줄을 지운다."""
+    return NAV_MENU.sub(" ", text or "")
+
+
+def strip_other_products(text: str, back: int = 60) -> str:
+    """값이 나오는 자리 앞 60자를 문장 끝까지 되짚어 도려낸다 — 거기 남의 상품 이름이 있다.
+
+    이걸로 원문 글자의 6%가 잘린다. 남는 새는 것은 167벌뿐이다(감사기 「설명에 남의 상품이
+    섞였다」, 2026-09-06). 남는 것은 이런 꼴이다:
+        the-coldest-moment "Made In China Styled With TCM dot flower T (blue) ₩45,000"
+        lmood              "연관 상품 브룩 하이넥 니트 집업 ELECTRIC BLUE ₩128,000"
+
+    재 보고 되돌린 잣대: 「Styled With·연관 상품」 같은 표시를 만나면 그 뒤를 통째로 버리기.
+    새는 것은 167 → 0 이 되지만 태그 7,226개가 같이 사라진다. 그 표시가 글 한가운데
+    있기 때문이다 — 1,931벌에서 표시 위치 중앙값이 글의 27% 지점이고, 1,097벌은 30% 앞에
+    있다. 매장은 추천 상품 블록을 가운데 끼워 넣고 그 뒤에 다시 제 상품의 소재·관리법을
+    적는다. 167을 고치려고 7,226을 버릴 수는 없다.
+    """
+    if not text:
+        return text
+    spans = [(m.start(), m.end()) for m in _PRICE_RUN.finditer(text)]
+    # 통화 표시 없는 값은 셋 이상 모여 있을 때만 값으로 본다(위 _PRICE_BARE 주석)
+    bare = [(m.start(), m.end()) for m in _PRICE_BARE.finditer(text)
+            if not _CUR_NEAR.search(text[m.end():m.end() + 6])
+            and not _CUR_NEAR.search(text[max(0, m.start() - 6):m.start()])]
+    if len(bare) >= 3:
+        spans = sorted(set(spans + bare))
+    if not spans:
+        return _EXTRA_PRODUCT.sub(" ", text)
+    out, last = [], 0
+    for start, end in spans:
+        if start < last:
+            last = max(last, end)
+            continue
+        win_from = max(last, start - back)
+        win = text[win_from:start]
+        k = 0
+        for mm in _SENT_END.finditer(win):
+            k = mm.end()
+        cut = win_from + k
+        if cut >= last:
+            out.append(text[last:cut])
+        last = end
+    out.append(text[last:])
+    # 가격 빈도를 센 뒤 적용해야 기존의 세 벌 조건이 흔들리지 않는다.
+    return _EXTRA_PRODUCT.sub(" ", "".join(out))
+
+
+# ── 소재는 혼용률이 정한다 ────────────────────────────────────────────────────
+# 소재 낱말을 글에서 주우면 이 옷의 소재가 아닌 것이 섞인다 — 세탁 안내(「가죽 전용 클리너로」
+# 「천연가죽 특성상」), 부자재(「가죽 패치」「카우 레더 라벨탭」), 코디 문장. 혼용률이 적힌 옷에서
+# 가죽 태그가 그 혼용률에 실제로 있는 비율이 39%였다(5,546벌, 2026-09-23).
+# 세탁 문장을 통째로 지우는 것은 해 보고 버렸다 — 「울 소재 특성상 보풀이」처럼 **정말 울일 때**
+# 쓰는 말이라 맞는 울 925벌이 같이 빠졌다(전후 전수).
+# 매장이 적은 혼용률(「섬유 NN%」, blend_fibers)이 있으면 **섬유는 그것만**
+# 쓴다. 짜임·가공(데님·코듀로이·기모 …)은 혼용률에 안 나오므로 글에서 주운 것을 둔다.
+# 순서도 정한다 — 예전엔 가나다순이라 목록의 대표 소재(첫 칸)가 「가죽」인 옷이 12,183벌이었다.
+# 혼용률이 있으면 비율이 큰 순서, 없으면 글에 먼저 나온 순서다.
+FIBERS = {"코튼", "폴리에스터", "나일론", "레이온", "린넨", "스판덱스", "울", "아크릴", "캐시미어",
+          "텐셀", "다운", "알파카", "모헤어", "큐프라", "아세테이트", "실크", "모달",
+          "가죽", "천연가죽", "소가죽", "양가죽", "송아지가죽", "염소가죽", "말가죽"}
+VEGAN_DOWN = re.compile(r"(?i)(?:비건|에코|vegan|eco|faux)\s*(?:구스|덕|goose|duck)?\s*(?:다운|down)")
+DOWN_FILL = re.compile(r"(?i)(?:goose|duck)\s*down|구스\s*다운|덕\s*다운|오리털|거위털|솜털|filled\s*with[^.\n]{0,30}down|down\s*\d{2}\s*/\s*\d{2}|\d{2}\s*/\s*\d{2}\s*\(?\s*down|필\s*파워|fill\s*power")
+REAL_LEATHER = {"가죽", "천연가죽", "소가죽", "양가죽", "송아지가죽", "염소가죽", "말가죽"}
+LEATHER_WORD = re.compile(r"가죽|레더|leather", re.I)
+
+
+# 「섬유 NN%」 한 덩이. 이름은 앞의 한두 낱말 — 「DUCK DOWN 80%」「VISCOSE RAYON 48%」는 두 낱말째 받고,
+# 「제품 상세 POLYESTER 69%」는 끝 낱말로 받는다.
+_COMP_ONE = re.compile(r"((?:[A-Za-z가-힣]+[ \t])?[A-Za-z가-힣]+)\s*[:：/]?\s*(\d{1,3}(?:\.\d+)?)\s?%")
+# 두 번째 낱말이 부위 말이면 받지 않는다 — 「22% Spandex Lining: 98% Polyester」의 Lining 을 먹으면
+# 겉감·안감 경계를 못 봐 안감 폴리에스터가 맨 앞에 선다(Hyein Seo).
+_COMP_NUM_FIRST = re.compile(
+    r"(\d{1,3}(?:\.\d+)?)\s?%\s*([A-Za-z가-힣]+"
+    r"(?:[ \t]+(?!(?:lining|shell|outshell|안감|겉감|배색|trim|contrast|filling|pocketing|fabric|made|body|rib)\b)[A-Za-z가-힣]+)?)",
+    re.I)
+# 부위가 바뀌는 말 — 이 말을 건너면 새 부위다(겉감 순서를 안감이 흐트러뜨리지 않게)
+_COMP_PART = re.compile(r"(?i)안감|배색|충전|시보리|립|포켓|lining|trim|contrast|coloring|filling|rib|pocket|shell\s*2")
+
+
+def _fiber_guess(words: str) -> str | None:
+    """product_desc._fiber 가 모르는 이름 — 가죽 이름과 스판덱스 오타.
+
+    D 판 전수에서 이 둘 때문에 맞던 태그를 잃었다: 「Shell : Hog leather 100%」「COWHIDE 100%」의 가죽 94벌,
+    「Spanedx 28%」「Spans 3%」「SPAN5 5%」의 스판덱스 7벌. 혼용률이 **있다**고 본 뒤 섬유를 못 읽으면
+    글에서 주운 것까지 지워져 빈손이 된다. 「Lambswool」은 양털이라 가죽이 아니다 — 가죽 낱말이 있어야 받는다.
+    """
+    w = (words or "").lower()
+    if re.search(r"^span|\bspan|^스판|elast", w):
+        return "스판덱스"
+    if re.search(r"\bpolye", w):
+        return "폴리에스터"        # 「Polyeter 15%」(발라클라바) — 오타
+    if re.search(r"\bpolyam", w):
+        return "나일론"            # 폴리아미드는 나일론이다
+    if re.search(r"wool|울", w) and not re.search(r"leather|hide|skin|가죽|레더", w):
+        return "울"               # 「Lambswool 30%」 — 양털이다(레더 퍼 후디 안감)
+    if not re.search(r"leather|hide|skin|가죽|레더|스킨", w):
+        return None
+    if re.search(r"vegan|faux|fake|synthetic|eco|인조|페이크|비건|에코", w):
+        return "인조가죽"
+    for rx, f in ((r"cow|소가죽|카우", "소가죽"), (r"lamb|sheep|양가죽|램", "양가죽"), (r"goat|염소", "염소가죽"),
+                  (r"calf|송아지", "송아지가죽"), (r"horse|말가죽", "말가죽")):
+        if re.search(rx, w):
+            return f
+    return "가죽"
+
+
+def _fiber_name(product_desc, words: str) -> str | None:
+    """「섬유 NN%」 앞 한두 낱말 → 섬유. 섬유 이름은 대개 **끝 낱말**이다(DUCK DOWN · VISCOSE RAYON ·
+    NUBUCK COWHIDE · Hog leather). 두 낱말을 통째로 먼저 물으면 「NUBUCK COWHIDE」가 앞의 누벅(가공)으로
+    읽혀 소가죽을 잃었다. 비건·페이크 가죽은 끝 낱말(leather)보다 앞에서 인조가죽으로 잡는다."""
+    g = _fiber_guess(words)
+    if g == "인조가죽":
+        return g
+    parts = words.split()
+    last = product_desc._fiber(parts[-1])
+    if last in FIBERS:
+        return last
+    # 「100% Polyester FABRIC2」처럼 섬유 뒤에 다른 낱말이 붙으면 앞 낱말이 섬유다
+    first = product_desc._fiber(parts[0]) if len(parts) > 1 else None
+    return product_desc._fiber(words) or (first if first in FIBERS else None) or last or g
+
+
+# 약자 혼용률 — 일류는 「원단 혼용률: C 75 P 25」「C 57 MD 38 SP5」「P 85 R 13 SP 2 Lining- P 100」로 적는다
+# (61벌 중 55, % 없이). 「혼용률」 같은 이름표 바로 뒤에서만 읽고, 첫 부위의 합이 90~110 일 때만 받는다 —
+# 아무 데서나 「C100」을 읽으면 품번이 섬유가 된다.
+_ABBR = {"C": "코튼", "CO": "코튼", "P": "폴리에스터", "PE": "폴리에스터", "PL": "폴리에스터", "PO": "폴리에스터", "R": "레이온", "RA": "레이온",
+         "MD": "모달", "MO": "모달", "SP": "스판덱스", "SD": "스판덱스", "PU": "스판덱스", "N": "나일론", "NY": "나일론",
+         "W": "울", "WO": "울", "L": "린넨", "LI": "린넨", "AC": "아크릴", "CA": "캐시미어", "CS": "캐시미어",
+         "SI": "실크", "SK": "실크", "TE": "텐셀", "LY": "텐셀"}
+# 「겉감 : P 70% C 30%」(포스센스티브 패딩 셔츠) · 「FABRIC\n- C 100%」(포스센스티브 상세 그림 글 19벌) —
+# 이름표 뒤에 목록 기호 「- 」가 먼저 오면 첫 칸을 못 잡아 통째로 버렸다(2026-09-24).
+# 「MATERIAL : P 80% / R 20%」(not4nerd 상세 그림 글 — 527 · 580 · 1167 · 342 …) — 이름표가 material 이라
+# 못 읽고 있었다(2026-10-01). 합 90~110 검산은 그대로라 품번 같은 「MATERIAL SS26」은 안 걸린다.
+_ABBR_LABEL = re.compile(r"(?i)(?:혼용률|혼용|composition|fabric|material|겉감)\s*[:：]?\s*(?:[-–•·*]\s*)?")
+_ABBR_HEAD = re.compile(r"(?i)^\s*(?:fabric|composition)\s*[:：]?\s*$")
+_ABBR_ONE = re.compile(r"\b([A-Z]{1,2})\s*-?\s*(\d{1,3})(?![\d.])")
+
+
+def _abbr_hits(text: str) -> list[tuple[int, int, str, float]]:
+    out: list[tuple[int, int, str, float]] = []
+    for lab in _ABBR_LABEL.finditer(text or ""):
+        seg_from = lab.end()
+        seg = text[seg_from:seg_from + 120]
+        first = _ABBR_ONE.match(seg)
+        if not first:
+            continue
+        got = []
+        for m in _ABBR_ONE.finditer(seg):
+            f = _ABBR.get(m.group(1))
+            if not f:
+                continue
+            got.append((seg_from + m.start(), seg_from + m.end(), f, float(m.group(2))))
+        if not got:
+            continue
+        # 첫 부위(부위 말이 나오기 전까지)의 합으로 검산한다
+        head, last = [], got[0][0]
+        for g in got:
+            if _COMP_PART.search(text[last:g[0]]):
+                break
+            head.append(g); last = g[1]
+        if 90 <= sum(g[3] for g in head) <= 110:
+            out.extend(got)
+            break
+    return out
+
+
+# 「%」가 빠진 혼용률 — o-oi 상세 그림의 FABRIC 칸은 「겉감 면 100%」인데 판독기가 %를 자주 놓친다
+# (「겉감 면 100」, o-oi 2673 · 2674 잔디와펜 크롭 후드집업, 2026-10-01). 이름표 **바로 뒤**에 섬유 이름 + 숫자가
+# 오고, 첫 부위의 합이 90~110 일 때만 받는다 — 「겉감 면 100」은 받고 「FABRIC cm 총장 어깨 … 면100」처럼
+# 표 머리가 끼면 안 받는다(거기 숫자는 치수일 수 있다).
+_NOPCT_ONE = re.compile(r"[ \t]*[-–•·*]?[ \t]*([A-Za-z가-힣]+)[ \t]*[:：]?[ \t]*(\d{1,3})(?![\d.])(?![ \t]*(?:cm|mm|kg|g\b|수|s\b))[ \t]*%?[ \t,/+]*",
+                        re.I)
+
+
+# 겉감 뒤의 안감 · 배색 · 충전재도 같은 꼴로 적는다(「겉감 : COTTON 63 NYLON 37 안감 : POLYESTER 100」, ostkaka).
+# 겉감만 읽으면 퍼센트가 붙은 혼용률(blend_fibers 는 부위를 다 읽는다)과 달리 안감 섬유를 잃는다 — 첫 이름표가
+# 혼용률 이름표일 때 그 뒤 부위 이름표의 덩이도 합 90~110 이면 함께 받는다.
+_NOPCT_PART = re.compile(r"(?i)(?:안감|배색|충전재|충전|lining|trim|contrast)\s*[:：]?\s*(?:[-–•·*]\s*)?")
+
+
+def _nopct_run(text: str, pos: int, product_desc) -> list[tuple[int, int, str, float]]:
+    got = []
+    while True:
+        m = _NOPCT_ONE.match(text, pos)
+        if not m:
+            break
+        f = product_desc._fiber(m.group(1))
+        if f not in FIBERS:
+            break
+        got.append((m.start(1), m.end(2), f, float(m.group(2))))
+        pos = m.end()
+    return got if got and 90 <= sum(g[3] for g in got) <= 110 else []
+
+
+def _nopct_hits(text: str, product_desc) -> list[tuple[int, int, str, float]]:
+    text = text or ""
+    for lab in _ABBR_LABEL.finditer(text):
+        got = _nopct_run(text, lab.end(), product_desc)
+        if not got:
+            continue
+        # 같은 덩이 바로 뒤(200자 안)의 부위 이름표
+        end = got[-1][1]
+        for part in _NOPCT_PART.finditer(text, end, min(len(text), end + 200)):
+            more = _nopct_run(text, part.end(), product_desc)
+            if more:
+                got.extend(more)
+        return got
+    return []
+
+
+# 두 단 그림(왼쪽 SIZE GUIDE 표 · 오른쪽 FABRIC 칸)을 판독기가 줄 단위로 섞어 읽으면 「SIZE GUIDE FABRIC」
+# 다음 줄이 「cm 총장 어깨 가슴 암홀 소매 밑단 면 100」이 된다 — 표 머리 끝에 붙은 「면 100」이 FABRIC 칸이다
+# (o-oi 판매중 의류 빈칸 67벌 중 47벌이 이 꼴, 3126 · 2788 · 3206 …, 2026-10-01 그림으로 확인: 「겉감 면100」).
+# 「밑단 면」은 「단면」 띄어 읽기 규칙(OCR_SPLIT_DANMYEON)에 걸려 면이 지워지므로 낱말 사전으로는 못 읽는다.
+# FABRIC 으로 끝나는 줄 **바로 다음 줄의 끝**에 섬유 + 100 이 올 때만 받는다.
+_FABRIC_COL = re.compile(r"(?im)fabric[ \t]*\n[^\n]*?(?<![가-힣A-Za-z])([가-힣A-Za-z]+)[ \t]?(100)[ \t]*%?[ \t]*$")
+
+
+def _fabric_col_hits(text: str, product_desc) -> list[tuple[int, int, str, float]]:
+    for m in _FABRIC_COL.finditer(text or ""):
+        f = product_desc._fiber(m.group(1))
+        if f in FIBERS:
+            return [(m.start(1), m.end(2), f, 100.0)]
+    return []
+
+
+def is_coating_pu(words: str, pct: float, name: str) -> bool:
+    """인조가죽의 고함량 PU는 코팅 수지다. 낮은 함량·스판덱스 명시는 남긴다."""
+    return bool(pct >= 20 and re.search(r"poly\s*urethane|폴리우레탄", words, re.I)
+                and re.search(r"synthetic\s*leather|faux\s*leather|fake\s*leather|vegan\s*leather|"
+                              r"인조\s*(?:가죽|레더)|합성피혁|페이크\s*레더|비건\s*레더", name, re.I))
+
+
+def blend_fibers(body: str, name: str = "") -> tuple[list[str], bool]:
+    """글에 「섬유 NN%」로 적힌 섬유 전부를 부위 차례·부위 안에서 비율 큰 순서로, 그리고 그런 게 있었는지.
+
+    처음엔 product_desc.blend(합 90~110% 로 검산하는 엄격한 해석기)를 썼다. 그 해석기는 **처음 읽히는
+    부위 하나**만 돌려준다 — intheraw 슬랙스는 겉감 「POLYESTER 69% RAYON 29% POLYURETHANE 2%」가
+    안감 「(LINING. COTTON 100%)」과 붙어 합 200 으로 버려지고 안감만 읽혀, 섬유가 코튼 하나로 줄었다.
+    etmon 코트는 겉감·안감·충전재가 따로 적혔는데 한 부위만 남았다. 그렇게 맞던 섬유를 잃은 것이
+    폴리에스터 1,643 · 스판덱스 1,501 · 레이온 1,142벌이었다(전수 A/B, 2026-09-23). 여기서 묻는 것은
+    「이 섬유가 이 옷에 들었나」이지 비율 검산이 아니다. 섬유 이름에 %가 붙어 있으면 그것으로 넉넉하다.
+    100 을 넘는 비율(「POLYURETHANE 617%」 — OCR 이 6·17 을 붙였다)은 비율만 버린다.
+
+    둘을 따로 돌려주는 이유: 「POLYURETHANE 100%」처럼 적힌 것을 다 걸러 섬유가 하나도 안 남아도
+    혼용률은 **있었다**. 빈 목록을 「혼용률 없음」으로 읽으면 글에서 주운 스판덱스가 되살아난다.
+    """
+    try:
+        import product_desc
+    except Exception:
+        return [], False
+    text = body or ""
+    hits: list[tuple[int, int, str, float]] = []     # (시작, 끝, 섬유, 비율)
+    for m in _COMP_ONE.finditer(text):
+        words = m.group(1)
+        f = _fiber_name(product_desc, words)
+        if f:
+            pct = float(m.group(2))
+            if f == "스판덱스" and is_coating_pu(words, pct, name):
+                f = "인조가죽"
+            hits.append((m.start(), m.end(), f, pct if pct <= 100 else 0.0))
+    # 숫자가 앞인 꼴 — 「Outshell: 78% Nylon, 22% Spandex Lining: 98% Polyester」(Hyein Seo 전부).
+    # 예전엔 이름 앞 꼴이 **하나도** 없을 때만 봤다. 그런데 이 글에서도 이름 앞 꼴이 엉뚱하게 한둘
+    # 잡힌다(「Spandex Lining: 98%」 → Lining 98) — 그래서 숫자 앞 꼴을 안 보고 섬유를 잃었다(9벌).
+    # 둘 다 읽고 **알아본 섬유가 많은 쪽**을 쓴다. 비기면 이름 앞 꼴(예전 그대로).
+    num: list[tuple[int, int, str, float]] = []
+    for m in _COMP_NUM_FIRST.finditer(text):
+        f = _fiber_name(product_desc, m.group(2))   # 「100% COW LEATHER」은 두 낱말이라야 소가죽이다(tonywack)
+        if f:
+            pct = float(m.group(1))
+            if f == "스판덱스" and is_coating_pu(m.group(2), pct, name):
+                f = "인조가죽"
+            num.append((m.start(), m.end(), f, pct if pct <= 100 else 0.0))
+    if len(num) > len(hits):
+        hits = num
+    if not hits:
+        hits = _abbr_hits(text)
+    if not hits:
+        hits = _nopct_hits(text, product_desc)
+    if not hits:
+        hits = _fabric_col_hits(text, product_desc)
+    if not hits:
+        return [], False
+    runs: list[list[tuple[str, float]]] = [[]]
+    last = None
+    for a, b, f, pct in hits:
+        if last is not None and (a - last > 40 or _COMP_PART.search(text[last:a])):
+            runs.append([])
+        runs[-1].append((f, pct))
+        last = b
+    leather = LEATHER_WORD.search(f"{name}\n{text}")
+    out: list[str] = []
+    for run in runs:
+        for f, pct in sorted(run, key=lambda x: -x[1]):
+            # 「POLYURETHANE 100%」는 신축 섬유가 아니라 코팅(인조가죽)이다 — 스판덱스가 반을 넘는 옷은 없다.
+            if f == "스판덱스" and pct >= 50:
+                f = "인조가죽" if leather else None
+            if f and f not in out:
+                out.append(f)
+    return out, True
+
+
+# 데님은 짜임이라 혼용률로 못 가린다. 글의 「데님」은 대개 코디 문장이다 — 「데님 팬츠와 매치하기
+# 좋은」. 첫 소재가 데님인 티셔츠가 1,057벌 · 니트가 881벌이었다(2026-09-23). 이름·품목이 데님이거나
+# 원단으로 적은 것(「데님 원단」「12oz」「selvedge」)만 받는다.
+DENIM_NAME = re.compile(r"데님|denim|jean|청바지|\b진\b|샴브레이|chambray", re.I)
+DENIM_FABRIC = re.compile(r"데님\s*(?:원단|소재|fabric)|denim\s*(?:fabric|cloth)|\d+(?:\.\d+)?\s*oz(?!\s*(?:충전|패딩|웰론|솜))|"
+                          r"selvedge|셀비지|셀비지|워싱\s*데님|로우\s*데님|raw\s*denim", re.I)
+# DENIM_FABRIC 은 **그 옷 이야기**에서만 찾는다. 원문 통째로 보다가 세 갈래가 근거가 됐다(코덱스 감사 023 37번, 2026-10-02):
+#   · 세탁 · 이염 안내 — goodlifeworks 1936 「이지 와이드 스웨트 쇼츠」(면 70% 폴리 30%)의 상세 그림 끝 「데님 원단 특성상 이염이
+#     발생할 수 있으니 …」 「워싱된데님 원단의 경우 …」가 매장 공용 안내라 소재가 「코튼, 폴리에스터, 데님」이 됐다.
+#     arend 「스웨이드, 데님 원단 특성 상 약간의 물빠짐이 …」 · and-you 「데님 원단 특성상 동일 사이즈내 기장 편차」도 같은 꼴.
+#   · 다른 상품 추천 — and-you 「RECOMMEND ITEM … 나이보더 워싱 데님팬츠」(태그를 읽는 쪽은 strip_other_products 로 이미 거른다).
+#   · 충전재 무게 — ava-molli 「3oz 충전재 안감」 코트.
+# 태그를 읽는 _text 와 같은 씻기를 거치고, 안내 문장(특성상 · 이염 · 물빠짐 · 단독 세탁 · 편차 · 주의 …)은 지우고 본다.
+_DENIM_NOTICE = re.compile(r"특성\s?상|이염|물\s?빠짐|색\s?빠짐|단독\s*세탁|냄새|편차|주의|참고\s*부탁|환불|교환|반품|수선")
+
+
+def denim_evidence_text(body: str) -> str:
+    t = strip_negated(strip_other_products(strip_scale_bar(strip_styling_suggestion(strip_reviews(body or "")))))
+    return "".join("" if _DENIM_NOTICE.search(p) else p for p in re.split(r"(?<=[.!?\n·•*])", t))
+
+
+# 상품 이름에 적힌 소재는 정확하다(사람 2026-09-23 「제목에 소재 있으면 정확도 높음」). 혼용률이 있는
+# 옷에 대 보면 85%가 그 혼용률에 있고, 어긋나는 것도 대개 이름이 맞다 — 「다운 블루종」의 다운은
+# 충전재라 겉감 혼용률에 안 나오고, 「CASHMERE WOOL COAT」는 혼용률에 울만 적혔다. 그래서 이름의
+# 소재는 늘 붙이고 맨 앞에 세운다. 뒤에 부자재 말이 붙은 것만 뺀다 — 「Leather Collar Coat」
+# 「LEATHER TRIM LINEN SHIRT」「NYLON PATCH … JACKET」은 칼라·트림·패치의 소재다.
+NAME_PART = re.compile(r"[A-Za-z가-힣]+\s*[-_ ]?\s*(?:collar|trim|trimmed|patch|piping|pocket|strap|카라|칼라|트림|패치|배색|파이핑|포켓|스트랩|장식)", re.I)
+
+
+# 색마다 혼용률이 다른 옷 — waviness 「OUTSHELL Blue Stripe : Cotton 100% Navy Stripe : Cotton 98% Poly 2% Black Stripe :
+# Cotton 76% Nylon 21% Span 3%」를 통째로 읽으면 「… - Black Stripe」에 네이비의 폴리에스터까지 붙는다(waviness 673,
+# 2026-10-01 — 수집기가 ProductGroup 요약을 읽게 되면서 드러났다). siyazu 「LIGHT BEIGE : POLYESTER 58% … RED : ACRYLIC 75% …」,
+# generalidea 「Fabric navy : acrylic 69% + … grey : acrylic 73% + …」도 같은 꼴이다.
+# 「이름 : 혼용률」의 이름이 **색 낱말**(수집기 색 사전)을 담은 덩이가 둘 넘고, 그 가운데 꼭 하나가 상품 이름에 있으면
+# 그 덩이(다음 색 이름표 앞까지)만 혼용률로 읽는다. 색 낱말이 아닌 이름표는 안 본다 — 「퍼카라 : 폴리에스터 100%」를
+# 색으로 보았더니 「퍼카라 체크 하프 울 코트」가 퍼카라의 소재만 남았다(generalidea, 2026-10-01 첫 판).
+_COLOR_LABEL = re.compile(r"(?<![A-Za-z가-힣])((?:[A-Za-z]+ ){0,3}[A-Za-z]+|(?:[가-힣]+ ){0,2}[가-힣]+)\s*[:：]\s*"
+                          r"(?=[A-Za-z가-힣]+(?:[ \t][A-Za-z가-힣]+)?\s*\d{1,3}(?:\.\d+)?\s*%)")
+_PART_HEAD = re.compile(r"(?i)^(?:(?:outshell|outer\s*shell|shell|fabric|material|composition|겉감|소재|혼용률)\s+)+")
+_COLOR_WORDS: set | None = None
+
+
+def _color_words() -> set:
+    global _COLOR_WORDS
+    if _COLOR_WORDS is None:
+        try:
+            import crawl_cafe24 as _cc
+            _COLOR_WORDS = {a.lower() for k, vs in _cc.COLOR_VOCAB.items() for a in [k, *vs] if " " not in a}
+        except Exception:
+            _COLOR_WORDS = set()
+    return _COLOR_WORDS
+
+
+def color_blend(body: str, name: str) -> str:
+    words = _color_words()
+    if not words:
+        return ""
+    labs = []
+    for m in _COLOR_LABEL.finditer(body or ""):
+        lab = _PART_HEAD.sub("", m.group(1)).strip().lower()
+        if lab and any(w in words for w in lab.split()):
+            labs.append((m.start(), m.end(), lab))
+    if len({l for _, _, l in labs}) < 2:
+        return ""
+    low = (name or "").lower()
+    hit = [(i, l) for i, (_, _, l) in enumerate(labs) if re.search(rf"(?<![a-z가-힣]){re.escape(l)}(?![a-z가-힣])", low)]
+    if len({l for _, l in hit}) != 1:
+        return ""
+    i = hit[0][0]
+    end = labs[i + 1][0] if i + 1 < len(labs) else labs[i][1] + 200
+    return (body or "")[labs[i][1]:min(end, labs[i][1] + 200)]
+
+
+def order_materials(found: set[str], body: str, name: str, subtype: str = "",
+                    name_mats: list[str] | None = None) -> list[str]:
+    fib, has_blend = blend_fibers(color_blend(body, name) or body, name)
+    found = set(found) | set(name_mats or ())
+    if subtype == "Denim":          # 매장이 데님 칸에 넣은 옷 — 글에 그 말이 없어도 데님이다
+        found.add("데님")
+    if "데님" in found and not (DENIM_NAME.search(f"{name} {subtype}") or DENIM_FABRIC.search(denim_evidence_text(body))):
+        found.discard("데님")
+    if has_blend:
+        # 다운은 충전재라 겉감 혼용률에 안 나온다 — 「Outshell 100% Polyamide … Filled with Goose down 90/10」.
+        # 폴리아미드를 읽게 되자 이 규칙이 다운 파카 14벌의 다운을 지웠다(E3 판). **다운에만 쓰는** 충전재 말이
+        # 있으면 남긴다 — 그냥 「충전재」로 보았더니 신슐레이트(합성) 조끼·헤어핀에도 다운이 남았다(E4 표본).
+        keep_down = "다운" in found and DOWN_FILL.search(VEGAN_DOWN.sub(" ", body or ""))
+        rest = [m for m in found if m not in FIBERS or (m == "다운" and keep_down)]
+        # 데님은 면으로 짠다. 혼용률에 면이 없으면 글의 「데님」은 남의 옷 이야기다.
+        if "데님" in rest and "코튼" not in fib:
+            rest.remove("데님")
+        found = set(fib) | set(rest)
+    text = f"{name}\n{body}".lower()
+
+    nm = list(name_mats or ())
+    found |= set(nm)          # 이름의 소재는 혼용률이 있어도 남긴다(위 주석)
+    # 이름이 「Leather」라도 혼용률이 폴리우레탄이면 인조가죽이다 — 「Shimmer Leather Jacket」
+    # (POLYURETHANE 55%)에 가죽·인조가죽이 둘 다 붙었다. 혼용률에 진짜 가죽이 없을 때만 뺀다.
+    if "인조가죽" in fib and not (set(fib) & REAL_LEATHER):
+        found -= REAL_LEATHER
+        nm = [m for m in nm if m not in REAL_LEATHER]
+
+    def first(m: str) -> tuple:
+        if m in nm:
+            return (0, nm.index(m))
+        if m in fib:
+            return (1, fib.index(m))
+        i = text.find(m.lower())
+        return (2, i if i >= 0 else 10 ** 9)
+    # 동점(글에 안 나온 소재끼리)은 이름순 — 집합 순서는 실행마다 바뀌어(해시 무작위) 재생성마다 2,945벌 소재 순서가 흔들렸다.
+    out = sorted(found, key=lambda m: (first(m), m))
+    # 소가죽·양가죽이 있으면 「가죽」도 — 앱 필터의 가죽 칸이 이 옷들을 찾아야 한다. 혼용률이 「소가죽 100%」면
+    # 글의 「가죽」이 섬유 규칙에 걸려 빠져서, 가죽 칸에서 245벌이 사라졌다(D 판 전수, 2026-09-23).
+    specific = [m for m in out if m in REAL_LEATHER and m != "가죽"]
+    if specific and "가죽" not in out:
+        out.insert(out.index(specific[0]) + 1, "가죽")
+    return out
+
+
+# 매장이 거의 모든 상품에 글자 그대로 붙인 문장은 그 옷의 소재를 말하지 않는다. 세탁 안내(shirter ·
+# massnoun 은 섬유 열한 가지의 세탁법을 모든 상품에 붙여 티셔츠마다 캐시미어·실크·린넨이 붙었다),
+# 반품·수선 규정(ostkaka 「가죽의 찢어짐」 678/678벌), 가죽 브랜드의 스웨이드 관리 안내(gu-de 532/532).
+# 그 매장의 혼용률에 대 보면 이런 문장의 캐시미어는 shirter 177벌 중 0벌, massnoun 233벌 중 0벌에 맞았다
+# (careblock 전수, 2026-09-23). 소재를 **적은** 문장은 되풀이돼도 남긴다 — 같은 원단을 여러 벌에 쓰면
+# 「fabric :MERINO WOOL 50%…」(noice 396벌) · 「소재 : 천연가죽(소)」(vunque 323벌)가 되풀이된다.
+# 세탁 문장을 통째로 지우던 판(위 FIBERS 주석)과 다르다: 이것은 그 **매장**에서 되풀이되는 것만 본다 —
+# 울 옷에만 붙인 「울 소재 특성상 보풀」은 매장 상품의 40%를 못 넘으면 그대로 근거다.
+STORE_SPLIT = re.compile(r"[\n·•*]+|(?<=[.!?])\s+|\s-\s|\s~\s|\s=\s")
+STORE_SHARE, STORE_MIN = 0.4, 15
+STATES_MATERIAL = re.compile(r"\d{1,3}\s?%|(?:소재|혼용률|원단|fabric|material|composition)\s*[:：]", re.I)
+
+
+# 이염 경고의 가죽은 물드는 쪽이다 — 「옅은색 계열제품(이너, 하의, 가방, 가죽, 자동차 시트 등)에 이염」
+# 「밝은 색의 의류, 악세사리, 가죽, 가방 등 사용 시 주의」. 크롤 글 전체에 5,483곳(nick-nicole ·
+# margesherwood · ostkaka …). 문장마다 말이 조금씩 달라 위의 되풀이 문장으로는 안 잡힌다(ostkaka 33벌씩).
+# 이염 문장 안에서 **물건 목록에 끼인** 가죽만 가린다. 「가죽 특성상 이염이 생길 수 있어」처럼 제 옷이
+# 가죽인 문장은 목록이 아니라 남는다. 데님은 건드리지 않는다 — 「짙은 데님 제품으로 이염」은 그 옷이다.
+_STAIN = re.compile(r"이염|묻어|물\s?빠짐|색\s?빠짐|물듦")
+_VICTIM_NOUN = r"(?:의류|옷|가방|시트|소파|악세사리|액세서리|이너|하의|상의|신발|카시트|밝은)"
+_STAIN_LIST = re.compile(
+    r"(?<=[(,·/]) ?(가죽|레더)(?= ?[,·/)])"                                   # 목록 가운데·끝
+    r"|(가죽|레더)(?= ?(?:[,·/]|및) ?[^,.\n]{0,12}" + _VICTIM_NOUN + ")"       # 목록 첫머리
+    r"|" + _VICTIM_NOUN + r"[^,.\n]{0,6}(?:[,·/]|및) ?(가죽|레더)")        # 물건 뒤(가린 것은 가죽 낱말뿐)
+
+
+def mask_stain_victims(text: str) -> str:
+    if "가죽" not in text and "레더" not in text:
+        return text
+    out = []
+    for sent in re.split(r"(?<=[.!?\n])", text):
+        if _STAIN.search(sent):
+            sent = _STAIN_LIST.sub(lambda m: re.sub(r"가죽|레더", lambda w: " " * len(w.group(0)), m.group(0)), sent)
+        out.append(sent)
+    return "".join(out)
+
+
+# 「실크처럼 부드럽게 가공된 Cotton Drill」「린넨 라이크 롱 스커트」「울 터치 저지」「리얼 레더에 가까운
+# 질감의 페이크 레더」「캐시미어 다음으로 고급섬유(알파카 가디건)」 — 비유·비교의 소재는 그 옷의 소재가
+# 아니다. 크롤 글 전체에 1,000곳 남짓(2026-09-23 전수). 혼용률 없는 옷의 캐시미어 표본에서 확인 못 한 셋이
+# OCR 까지 열어 보니 셋 다 이 꼴이었다. 이름에도 쓴다 — 「린넨라이크 긴팔 자켓」.
+_SIMILE = re.compile(
+    r"(캐시미어|실크|린넨|가죽|레더|스웨이드|울|모헤어|벨벳|앙고라|알파카)(?= ?(?:같은|같이|처럼|못지않|버금|수준|다음으로"
+    r"|에 가까운|에 가깝|을 연상|를 연상|느낌|터치|라이크|유연|급의|급 ))"
+    r"|(cashmere|silk|linen|leather|suede|wool|mohair|velvet)(?=[ -]?(?:like|touch|feel)\b)", re.I)
+
+
+def mask_simile(text: str) -> str:
+    return _SIMILE.sub(lambda m: " " * len(m.group(0)), text)
+
+
+def store_sentences(text: str) -> set[str]:
+    out = set()
+    for s in STORE_SPLIT.split(text or ""):
+        s = " ".join(s.split())
+        if 12 <= len(s) <= 160:
+            out.add(s)
+    return out
+
+
+def store_repeats(bodies: list[str]) -> frozenset:
+    """한 매장 상품 글에서 40%·15벌 넘게 되풀이되는 문장(소재를 적은 문장은 뺀다)."""
+    bodies = [b for b in bodies if (b or "").strip()]
+    if len(bodies) < STORE_MIN:
+        return frozenset()
+    seen = Counter(s for b in bodies for s in store_sentences(b))
+    lim = max(STORE_MIN, STORE_SHARE * len(bodies))
+    return frozenset(s for s, c in seen.items() if c >= lim and not STATES_MATERIAL.search(s))
+
+
+def without_lines(body: str, lines: frozenset) -> str:
+    parts = STORE_SPLIT.split(body or "")
+    kept = [p for p in parts if " ".join(p.split()) not in lines]
+    return body if len(kept) == len(parts) else "\n".join(kept)
+
+
+class Tagger:
+    def __init__(self, vocab: dict):
+        self.vocab = vocab
+        self.mine_only = set(vocab.get("_mine_alias_only", []))
+        self.blocklist = [b.lower() for b in vocab.get("_color_blocklist", [])]
+        self.text_blocklist = [b.lower() for b in vocab.get("_text_blocklist", [])]
+        self.bottoms_only = [tuple(x.split(".", 1)) for x in vocab.get("_bottoms_only", [])]
+        # 치마 · 원피스 모양(티어드 · 벌룬 · 머메이드 · 펜슬 · 랩 · 플리츠 · 슬립)은 그 둘에만 — 「wrap top」「pleated pants」의
+        # 실루엣이 아니다(2026-10-05: 치마 실루엣 관측 44%, 이름에 pleat 374 · wrap 144 · tiered 70 · balloon 82 가 실루엣 없이 남아 있었다).
+        self.skirt_dress_only = [tuple(x.split(".", 1)) for x in vocab.get("_skirt_dress_only", [])]
+        # 옷의 소재가 금속·보석일 수는 없다 — 아래 tag() 주석 참고
+        self.not_garment_material = set(vocab.get("_not_garment_material", []))
+        # 축 전체를 한 목록으로 — 길이 내림차순으로 매칭하고 매칭 구간을 마스킹한다
+        text_rules, color_rules = [], []
+        # 색은 수집기 어휘 하나만 쓴다. 예전에는 여기 25색을 따로 적어 두었는데, 그것은
+        # 사실 「거친 이름」이라 차콜 2,037벌이 그레이로, 크림 753벌이 아이보리로 뭉개졌다
+        # (색상 칸이 찬 36,964벌 중 6,101벌, 2026-09-05). 이제 값은 수집기의 63색을 쓰고,
+        # 예전 25색은 _color_rollup(세밀→거친)으로 남겨 앱이 두 층을 다 쓸 수 있게 한다.
+        vocab = dict(vocab)
+        try:
+            import crawl_cafe24 as _cc
+            vocab["color"] = {k: list(vs) for k, vs in _cc.COLOR_VOCAB.items()}
+        except Exception:
+            pass
+        for ax in AXES:
+            for value, aliases in vocab[ax].items():
+                names = list(aliases) if value in self.mine_only else [value] + list(aliases)
+                for a in names:
+                    (color_rules if ax == "color" else text_rules).append((len(a), ax, value, compile_alias(a), alias_lit(a)))
+        self.text_rules = sorted(text_rules, key=lambda r: -r[0])
+        self.color_rules = sorted(color_rules, key=lambda r: -r[0])
+
+    @staticmethod
+    def _scan(rules, text: str) -> dict[str, set]:
+        """긴 낱말이 짧은 낱말을 먹는다 — 단, 같은 축 안에서만.
+
+        예전에는 축을 가리지 않고 먹었다. 그래서 「카고 팬츠」에 pants_type 어휘를 더하자
+        construction 의 「카고포켓」 409벌이 사라졌다(2026-09-05). 한 낱말이 두 가지를
+        동시에 말하는 일은 흔하다 — 카고는 바지 종류이면서 주머니고, 밴딩은 바지 종류이면서
+        허리 만듦새다(사람 지적). 축마다 따로 가려야 둘 다 남는다.
+        「가먼트 워싱」이 「워싱」을 먹는 것은 같은 축 안이라 그대로 지켜진다.
+        """
+        text = text.lower()
+        hits: dict[str, set] = defaultdict(set)
+        by_ax: dict[str, list] = defaultdict(list)
+        for r in rules:
+            by_ax[r[1]].append(r)
+        for ax, rs in by_ax.items():
+            cur = mask_axis_noise(ax, text)
+            masked = list(cur)
+            for _, _, value, rx, lit in rs:
+                # 모든 별칭 정규식은 별칭 글자(alias_lit)를 그대로 담는다(compile_alias) — 글에 그 글자가 없으면 정규식을 돌릴 것도 없다.
+                # 축마다 수천 개 규칙을 4,000자 글에 다 돌려 태그 재생성이 상품당 0.2초, 전수 몇 시간이 걸렸다(주간 갱신
+                # 37021619738 의 태그 단계가 잡 상한을 넘김, 2026-10-02).
+                if lit not in text:
+                    continue
+                found = False
+                for m in rx.finditer(cur):
+                    found = True
+                    for i in range(m.start(), m.end()):
+                        masked[i] = "\x00"
+                if found:
+                    hits[ax].add(value)
+                    cur = "".join(masked)
+        return hits
+
+    def tag(self, category: str, name: str, body: str, color_text: str, quality: str,
+            sleeve_cm: float | None = None, store_lines: frozenset = frozenset()) -> dict[str, list]:
+        # 바지 설명의 셋업 재킷 이름은 바지 기장이 아니다.
+        scan_body = re.sub(r"\bcrop(?:ped)?\s+jacket\b|크롭\s*(?:자켓|재킷)", " ", body, flags=re.I) if category in PANTS else body
+        scan_text = self._text(name, scan_body)
+        hits = self._scan(self.text_rules, scan_text)
+        # 포장 문구를 걷어도 실제 2WAY 여밈은 지퍼의 독립 근거다. 포장 문구만이
+        # 일반 '지퍼' 별칭을 만들던 상품에서 정상 지퍼 값까지 잃지 않게 한다.
+        if "2WAY지퍼" in hits.get("hardware", set()) and re.search(
+                r"지퍼\s*폴리\s*백|지퍼백|\bzip(?:per)?[ -]*(?:poly[ -]*)?bag\b", body, re.I):
+            hits["hardware"].add("지퍼")
+        if store_lines and hits.get("material"):
+            kept = without_lines(body, store_lines)
+            if kept != body:
+                # 되풀이 문장에 이미 붙은 소재가 있을 때만 다시 훑는다 — 매장 대부분이 배송·반품 문장을
+                # 되풀이해서, 늘 다시 훑으면 태깅이 86분에서 2시간 18분으로 늘었다(샌드박스 D 판).
+                gone = self._scan(self.text_rules, self._text("", " \n".join(
+                    p for p in STORE_SPLIT.split(body) if " ".join(p.split()) in store_lines))).get("material", set())
+                if gone & hits["material"]:
+                    hits["material"] &= self._scan(self.text_rules, self._text(name, kept)).get("material", set())
+
+        # n부 — 소매면 칠부소매, 팬츠면 버뮤다(명시어 우선)
+        for m in NBU_RX.finditer(body):
+            tail = body[m.end():m.end() + 6]
+            if m.group(2) == "소매" or tail.startswith("소매"):
+                hits["sleeve_length"].add("칠부소매")
+            elif category in PANTS:
+                window = body[max(0, m.start() - 40):m.end() + 40]
+                if "카프리" in window or "capri" in window.lower():
+                    hits["length"].add("카프리")
+                else:
+                    hits["length"].add("버뮤다")
+        if LOOSE_RX.search(body):
+            hits["silhouette"].add("루즈핏")
+            if category in {"Pants", "Denim"}:
+                hits["silhouette"].add("와이드")
+        # 「혼방」이라는 낱말만 보고 폴리에스터를 넣던 규칙을 뺀다(2026-09-05).
+        # 「부드러운 리오셀 혼방 소재」(badblood)에 폴리에스터가 붙었다 — 무엇과 섞였는지
+        # 페이지는 말하지 않는데 특정 섬유를 단정한 것이다. 324벌이 그 꼴이었다.
+        # 소재는 사람이 옷을 고르는 근거라, 빠진 것보다 틀린 것이 나쁘다.
+
+        # color — 본문이 아니라 이름·대표색·스펙 색상에서만
+        ct = color_text.lower()
+        for b in self.blocklist:
+            ct = ct.replace(b, " " * len(b))
+        for ax, vals in self._scan(self.color_rules, ct).items():
+            hits[ax] |= vals
+
+        # 축 게이트
+        # 치마도 기장을 가진다 — 오히려 가장 중요한 속성이다. 예전엔 축을 통째로 버려서
+        # 「string maxi skirt」·「WOOL MIDI PLEATED SKIRT」·「페이크 스웨이드 미니 스커트」가
+        # 기장 없이 남았다(1,056벌, 2026-09-05). 상의·바지 쪽 값만 걸러 낸다.
+        if category == "Skirts":
+            hits["length"] = {v for v in hits.get("length", set()) if v in SKIRT_LENGTH}
+            if not hits["length"]:
+                hits.pop("length", None)
+        if category not in PANTS:
+            hits.pop("pants_type", None)
+        elif re.search(r"\bshorts\b|반바지|숏팬츠", name, re.I) and not re.search(r"\bmidi\b|미디", name, re.I):
+            # 쇼츠의 「미디 기장감」은 종아리까지 오는 미디 기장이 아니다.
+            hits.get("length", set()).discard("미디")
+        if category in NO_GARMENT_AXES:
+            for ax in GARMENT_AXES:
+                hits.pop(ax, None)
+        # 넥라인·소매는 상의류에만 선다. 바지·스커트·데님에 붙은 것은 코디 문장이나 이름의
+        # 다른 말에서 왔다 — 「더블니 스웨트 팬츠」에 후드(9999archive 의 협업 이름 「후디진호」),
+        # 「belted tuck pants」에 슬리브리스, 「BRUSHED STRAIGHT JEANS」에 카라(2026-09-06).
+        # 원피스·셋업은 상의 쪽에 둔다 — 목선과 소매가 있다.
+        if METAL_PART.search(name) and not LEATHER_NAME.search(name):
+            hits.get("material", set()).difference_update({"가죽", "천연가죽"})
+        if category in NECKLESS:
+            hits.pop("neckline", None)
+            hits.pop("sleeve_length", None)
+        if category not in BOTTOMS | {""}:
+            for ax, val in self.bottoms_only:  # 하의 전용 값이 코디 문장으로 상의에 붙는 것 방지
+                hits.get(ax, set()).discard(val)
+        if category not in SKIRTY:
+            for ax, val in self.skirt_dress_only:
+                hits.get(ax, set()).discard(val)
+        # 옷(상의·하의·아우터·니트·셔츠·스커트·데님·드레스)의 소재가 메탈·진주·황동·유리일 수는 없다.
+        # 「ykk metal buttons」「mother of pearl buttons」가 material/메탈·진주가 됐다 — 부자재 설명이
+        # 소재 축에 앉은 것이다. 판매중·품절 옷에서 메탈 927벌(927벌 다 부자재 태그도 함께 있었다) ·
+        # 진주 104 · 황동 73 · 유리 5(2026-09-08 무작위 감사에서 40벌 중 3벌이 이 꼴). 반지·키링 같은
+        # 잡화와 품목 빈칸은 건드리지 않는다 — 명시한 옷 품목에서만 뺀다.
+        if category in GARMENT_CATEGORIES and self.not_garment_material:
+            for val in self.not_garment_material:
+                hits.get("material", set()).discard(val)
+        # 폴로카라·스프레드카라·오픈카라·스탠드카라·차이나카라·숄카라는 다 카라다. 세부 카라만 있고
+        # 「카라」가 없는 옷이 578벌(2026-09-08: 스프레드 207 · 오픈 163 · 폴로 133 · 스탠드 73 · 차이나 11
+        # · 숄 8) — 「카라」로 걸러 보면 이들이 빠진다. 세부 값이 맞으면 카라는 확실하니 함께 붙인다.
+        nk = hits.get("neckline")
+        if nk and any(v not in {"카라", "노카라"} and v.endswith("카라") for v in nk):
+            nk.add("카라")
+        # 데님 칸에 든 바지는 청바지다 — 이름에 「데님」이라고 안 적은 223벌이 있다.
+        if category == "Denim":
+            hits["pants_type"].add("진")
+        if category in PANTS:
+            # 프린트 모사 데님과 벨벳 팬츠는 상품 분류(Denim)만으로 진을 보증하지 않는다.
+            faux = _FAUX_DENIM.search(name)
+            velvet = re.search(r"velvet|벨벳", name, re.I)
+            denim = re.search(r"\bdenim\b|\bjeans\b|데님", denim_evidence_text(name + "\n" + body), re.I)
+            if faux or (velvet and not denim):
+                hits.get("pants_type", set()).discard("진")
+        if category in SKIRTY and MINI_NAME.search(name):
+            hits["length"].add("미니")
+        # 랩(wrap) 구조는 옷 이야기다 — 폰케이스·목걸이·가방의 「wrap」은 감싸는 동사다(잡화 16벌: 주얼리 11 ·
+        # 잡화 4 · 가방 1, 2026-09-08 after6c).
+        if category in NON_GARMENT | {"Jewelry", "Headwear"}:
+            hits.get("construction", set()).discard("랩")
+        # 로브(robe)는 벨트로 여미는 랩 여밈이다 — 품목 로브코트를 없애고 여밈은 이 태그로 남긴다(사람 결정 2026-10-09).
+        # 「wardrobe」 · 「글로브」가 걸리지 않게 낱말 앞을 본다.
+        elif ROBE_NAME.search(name):
+            hits.setdefault("construction", set()).add("랩")
+        # 웨스턴셔츠도 품목에서 뺐다(사람 결정 2026-10-09) — 웨스턴 느낌은 앞뒤 요크로 남긴다. 스냅은 hardware 가 따로 잡는다.
+        # 바지 · 부츠의 「웨스턴」(부츠컷 · 웨스턴 부츠)은 요크 이야기가 아니라 윗옷만.
+        if category in ("Shirts", "Tops", "Outerwear", "Dresses") and WESTERN_NAME.search(name):
+            hits.setdefault("construction", set()).add("요크")
+        if category not in NON_GARMENT:
+            mats = hits.get("material") or set()
+            if mats & WARM_MATERIALS:
+                hits["function"].add("보온성")
+            if "메쉬" in mats:
+                hits["function"].add("통기성")
+            mp = SPAN_PCT.search(body)
+            negative_stretch = mp and re.search(
+                r"\bnon[ -]?stretch\b|\bno[ -]stretch\b|신축성(?:이|은)?\s*(?:전혀\s*)?없",
+                selected_attribute_text(name + "\n" + body), re.I)
+            if (mp and float(mp.group(1)) >= 3 and not negative_stretch
+                    and not is_coating_pu(mp.group(0), float(mp.group(1)), name)):
+                hits["function"].add("신축성")
+        # 단색은 글에서 찾지 않고 없음으로 안다. 글에 적힌 「단색」·「솔리드」·「무지」는
+        # 이 옷의 무늬가 아니라 견주는 말이거나 라인 전체를 말하는 문장이었다:
+        #   espionage 「멀리서 보면 단색 같지만 가까이서 볼 때 입체감 있는」 → 실은 그리드 체크
+        #   dunst    「솔리드 컬러 및 스트라이프 컬러로 제작되어」        → 이 벌은 스트라이프
+        # 그래서 33벌이 단색이면서 스트라이프·체크였다(2026-09-07).
+        hits.get("pattern", set()).discard("단색")
+        if quality == "ok" and not hits.get("pattern") and not re.search(
+                r"풀\s*프린트|\bfull[ -]print|\ball[ -]over[ -]print", scan_text, re.I):
+            hits["pattern"].add("단색")
+        # 소매 길이는 매장이 글로 안 적는다 — 소매가 빈 상의 12,248벌 중 12,170벌(99.4%)이
+        # 원문 어디에도 없다(2026-09-05). 대신 우리에겐 실측 소매길이가 있다.
+        # 롱슬리브 중앙 61cm · 반팔 중앙 21.6cm 로 뚜렷이 갈린다. 가운데(27~54cm)는 비워 두고
+        # 양 끝만 쓴다 — 글에 아무 말도 없을 때만. 글로 아는 2,709벌에 대 보니 반팔↔롱슬리브
+        # 혼동은 46건(98.1%)이고, 나머지 틀림은 슬리브리스·퍼프소매인데 그것들은 글에 적혀 있어
+        # 애초에 여기까지 오지 않는다.
+        if category in SLEEVED:
+            if NAME_LS.search(name):
+                hits["sleeve_length"] -= {"반팔", "슬리브리스", "칠부소매"}
+                hits["sleeve_length"].add("롱슬리브")
+            elif NAME_SS.search(name):
+                hits["sleeve_length"] -= {"롱슬리브", "슬리브리스", "칠부소매"}
+                hits["sleeve_length"].add("반팔")
+        if sleeve_cm is not None and not hits.get("sleeve_length") and category in SLEEVED:
+            if sleeve_cm <= 26:
+                hits["sleeve_length"].add("반팔")
+            elif sleeve_cm >= 55:
+                hits["sleeve_length"].add("롱슬리브")
+        # 실측도 없고 글에도 없을 때만 품목 이름으로 짐작한다 — 반드시 실측 갈래 다음이다.
+        # 처음에 이 블록을 실측보다 앞에 두었더니 「아웃포켓 하프 블루종」(소매 실측 25.5cm)이
+        # 롱슬리브가 됐다. 실측이 이름보다 낫다(2026-09-06, 46벌).
+        if (not hits.get("sleeve_length") and category in SLEEVED
+                and LONG_SLEEVE_KIND.search(name) and not NOT_LONG_SLEEVE.search(name)):
+            hits["sleeve_length"].add("롱슬리브")
+        self._name_wins(hits, name)
+        out = {ax: sorted(hits[ax]) for ax in AXES if hits.get(ax)}
+        # 소재는 가나다순이 아니라 order_materials 의 차례로(위 FIBERS 주석)
+        nm_text = mask_simile(fake_to_faux(NAME_PART.sub(" ", (name or "").lower())))
+        nm_hits = self._scan(self.text_rules, nm_text).get("material", set())
+        if category in GARMENT_CATEGORIES and self.not_garment_material:
+            nm_hits -= self.not_garment_material
+        low = nm_text
+        name_mats = sorted(nm_hits, key=lambda m: min((low.find(a) for a in self.alias_of("material", m) if a in low), default=10 ** 9))
+        mats = order_materials(set(hits.get("material") or ()), body, name, category, name_mats)
+        if mats:
+            out["material"] = mats
+        else:
+            out.pop("material", None)
+        return out
+
+    def _text(self, name: str, body: str) -> str:
+        body = strip_brand_story(body)
+        body = selected_attribute_text(body)
+        body = ATTRIBUTE_CHOICES.sub(lambda m: " " * len(m.group(0)), body)
+        # blocklist의 '폴리백'만 지우면 지퍼폴리백에 지퍼가 홀로 남는다.
+        body = re.sub(r"지퍼\s*폴리\s*백|지퍼백|\bzip(?:per)?[ -]*(?:poly[ -]*)?bag\b", " ", body, flags=re.I)
+        text = f"{strip_negated(name)}\n{strip_negated(strip_other_products(strip_scale_bar(strip_styling_suggestion(strip_reviews(body)))))}".lower()
+        for b in self.text_blocklist:  # '시어링'→시어, '레이어드 스타일링'→레이어드 같은 오탐을 먼저 지운다
+            text = text.replace(b, " " * len(b))
+        text = LEATHER_TRIM.sub(lambda m: re.sub(r"가죽|레더|leather", lambda w: " " * len(w.group(0)), m.group(0)), text)
+        text = rib_trim_to_ribbing(text)
+        # 「Fake Leather」는 인조가죽이다 — 사전의 「faux leather」로 바꿔 읽힌다(nuosmiq 로퍼, E 판 표본)
+        text = fake_to_faux(text)
+        # 「비건 구스 다운」「vegan down」은 합성 충전재다 — 다운이 아니다(badblood 바라클라바, E5 표본)
+        text = VEGAN_DOWN.sub(lambda m: " " * len(m.group(0)), text)
+        text = mask_stain_victims(text)
+        text = mask_simile(text)
+        text = OCR_SPLIT_DANMYEON.sub(lambda m: m.group(0).replace("면", " "), text)
+        return BUTTON_DOWN.sub(_mask_button_down, text)
+
+    def _name_wins(self, hits: dict, name: str) -> None:
+        """한 축에 서로 반대인 값이 둘 다 붙었는데 상품 이름이 한쪽만 말하면, 이름을 따른다.
+
+        본문에는 이 옷 얘기가 아닌 것이 섞인다. 가장 흔한 것이 사이즈 안내다 —
+        badblood 「PEACE NOT WAR 루즈핏 티」의 본문에 「S size - 슬림한 핏 / L size -
+        레귤러」가 있어서 루즈핏과 슬림핏이 둘 다 붙었다. 옷은 하나고 이름이 루즈핏이라 한다.
+
+        실측으로 넣는 소매는 이 규칙에 안 걸린다 — 그 갈래는 축이 비었을 때만 도는지라
+        모순이 생기지 않는다(위 두 블록의 `not hits.get("sleeve_length")`).
+
+        343건 가운데 92건이 이렇게 풀린다(2026-09-06 실측). 이름이 둘 다 말하거나
+        아무 말도 안 하면 손대지 않는다 — 지어내지 않는다.
+        """
+        low = (name or "").lower()
+        for ax, a, b in CONTRADICT:
+            got = hits.get(ax) or set()
+            if a not in got or b not in got:
+                continue
+            ina = any(x in low for x in self.alias_of(ax, a))
+            inb = any(x in low for x in self.alias_of(ax, b))
+            if ina and not inb:
+                got.discard(b)
+            elif inb and not ina:
+                got.discard(a)
+
+    def alias_of(self, axis: str, value: str) -> list[str]:
+        """어휘에 적힌 별칭 + 값 자신, 전부 소문자."""
+        al = (self.vocab.get(axis) or {}).get(value) or []
+        return [x.lower() for x in [value, *al]]
+
+
+_SLEEVE: dict[str, float] | None = None
+
+
+def sleeve_of(url: str) -> float | None:
+    """실측 소매길이(가장 작은 사이즈 것). data/product_sizes.json 에서 읽는다 —
+    워크플로에서 size_from_ocr 이 tag_items 보다 먼저 돌아 늘 최신이다."""
+    global _SLEEVE
+    if _SLEEVE is None:
+        _SLEEVE = {}
+        p = DATA / "product_sizes.json"
+        if p.exists():
+            try:
+                for u, e in json.loads(p.read_text(encoding="utf-8")).items():
+                    v = [x for x in ((e or {}).get("sizes") or {}).get("소매길이", []) if x is not None]
+                    if v:
+                        _SLEEVE[u] = min(v)
+            except json.JSONDecodeError:
+                pass
+    return _SLEEVE.get(url)
+
+
+_HAN_RUN = re.compile(r"[가-힣]{3,}")
+_HAS_PCT = re.compile(r"\d\s*%")
+_HAN_ANY = re.compile(r"[가-힣]+")
+_TOK_NUM = re.compile(r"^[0-9]+(?:[.,][0-9]+)?[.,)]?$")
+_TOK_ALPHA = re.compile(r"^[A-Za-z]{3,}$")
+_TOK_HAN = re.compile(r"^[가-힣]{2,}$")
+
+
+# 「겉감 면 100」(%를 놓친 혼용률) — 같은 줄에 표 머리 찌꺼기(「On 7S Anh」)가 섞이면 쓰레기 줄로 보여 한글이
+# 다 지워졌다(o-oi 2673 「cm 종장 On 7S 밑단 Anh tes 겉감 면 100」, 2026-10-01). 이름표 + 섬유 + 숫자가 붙은 줄은 남긴다.
+_LABEL_FIBER_NUM = re.compile(r"(?:겉감|안감|혼용률|혼용|소재)\s*[:：]?\s*(?:면|코튼|폴리에스터|폴리|나일론|레이온|울|린넨|"
+                              r"아크릴|스판덱스|스판|모달|텐셀|캐시미어|실크)\s*\d{1,3}(?![\d.])")
+
+
+def _gibberish(line: str) -> bool:
+    """사진 위를 판독기가 훑어 만든 쓰레기 줄인가."""
+    if _HAN_RUN.search(line) or _HAS_PCT.search(line) or _LABEL_FIBER_NUM.search(line):
+        return False                      # 세 글자 이상 이어진 한글이나 「면 100%」는 진짜 글
+    junk = 0
+    for t in line.split():
+        t = t.strip("()[]{}「」『』\"'")
+        if not t or _TOK_HAN.match(t) or _TOK_ALPHA.match(t) or _TOK_NUM.match(t):
+            continue
+        junk += 1
+        if junk >= 2:
+            return True
+    return False
+
+
+def denoise_ocr(text: str) -> str:
+    """판독기 글에서 쓰레기 줄의 한글만 지운다.
+
+    상세 그림의 절반은 사진이라 판독기가 그 위에서 낱자를 주워 온다:
+      「fak oo eg 9 : perc : 「 s : a 077 였0 별 = ¥ 나시 ag 7 + i 00: ~) ee oa the」
+    여기 섞인 「나시」 때문에 카고 팬츠·파카·데님 캡이 슬리브리스가 됐다 —
+    슬리브리스가 붙은 1,340벌 가운데 137벌(10.2%)이 이 한 낱말만 근거였다(2026-09-06).
+    한글 별칭은 한두 글자짜리가 168개라 이런 줄에 늘 걸린다.
+
+    줄 단위로 본다. 세 글자 이상 이어진 한글이 있거나 「… 100%」가 있으면 진짜 글로 보고
+    그대로 둔다. 아니면서 알아볼 수 없는 토막이 둘 이상이면 그 줄의 한글만 지운다 —
+    영문과 숫자는 남긴다(사이즈 표의 「S 48 53」이 여기 걸리지만 치수는 다른 script 가
+    원문에서 읽으므로 영향이 없다). 「지퍼 포켓」·「1. 지퍼 여밈」처럼 깨끗한 짧은 줄은
+    토막이 없어 살아남는다.
+    """
+    if not text:
+        return text
+    # 스펙 그림의 「눈금」: 「신축성 600 0 없음 보통 있음 비침 …」처럼 라벨 뒤에 선택지 셋이 다 적혀 있고
+    # 표시(●)는 판독기가 못 읽는다. 어느 칸에 표시됐는지 모르면서 라벨 「신축성」만 보고 기능 태그를
+    # 붙였다 — 한 매장의 100벌, 그중 94벌은 그 블록 말고 신축성 근거가 없었다(2026-09-08 감사에서
+    # 기능 태그 40개 중 3개). 라벨과 선택지를 통째로 지운다. 「신축성 있음」·「신축성 약간 있음」처럼
+    # 값이 하나만 적힌 줄은 그대로 둔다(서로 다른 선택지가 둘 이상일 때만).
+    text = _SPEC_SCALE.sub(_blank_scale, text)
+    out = []
+    for l in text.split("\n"):
+        if _ENGLISH_FIT_BAR.match(l) or _FIT_VS_FIT.match(l):
+            continue                      # 「slim | crop regular tapered | ankle wide」 — 영문 핏 눈금자 줄
+                                          # 「flare fit vs wide fit」 — 핏 비교 설명 그림의 캡션(한 매장 13벌, 두 핏이 다 붙었다)
+        if _gibberish(l):
+            l = _HAN_ANY.sub(" ", l)
+        # 「FABRIC」 한 낱말 머리줄은 아는 낱말이 하나뿐이라 아래 영문 잡음 검사에 걸려 지워졌다. 그러면
+        # 바로 아랫줄 「- C 100%」가 이름표를 잃어 약자 혼용률을 못 읽는다(포스센스티브 19벌, 2026-09-24).
+        # 약자 혼용률의 이름표 낱말만 한 줄에 홀로 선 것은 남긴다 — 태그 사전에 걸리는 말이 아니다.
+        if _latin_garbage(l) and not _ABBR_HEAD.match(l):
+            continue
+        out.append(l)
+    return "\n".join(out)
+
+
+# ── 영문 잡음 줄 ─────────────────────────────────────────────────────────────
+# 위 규칙은 쓰레기 줄의 **한글**만 지웠다. 영문은 남겼는데, 판독기 잡음이 네 글자 이하 영문 낱말을
+# 우연히 만들어 태그가 된다: 「ee ken oe se aa dart aoe perera eet」의 dart 가 다트(절개)로,
+# 「nanda nur vaan aged 4 iv」의 aged 가 에이징으로. 판매중 옷에서 dart 27/27 · aged 57/57 이
+# 전부 이 꼴이고, span·rib·lace·fur·belt·slit·mesh·midi·polo 까지 천 개 넘는 태그가 잡음이다
+# (2026-09-08 근거 스캔).
+#
+# 그런데 「pure new wool」·「*ykk 2way zipper & parts」·「cotton 95% span 5%」는 라벨 사진의 진짜
+# 글이라 영문을 통째로 버리면 안 된다. 그래서 **사전**으로 가른다 — 매장 HTML 설명글에 다섯 벌
+# 넘게 나온 세 글자 이상 영문 낱말이 「아는 낱말」이다(3,784개). 판독 줄의 영문 토막 가운데 아는
+# 낱말이 둘 이상이고 절반 이상이면 진짜 글, 아니면 잡음으로 보고 줄을 버린다. 두 글자 토막(ee·oe·aa)은
+# 잡음의 재료라서 모르는 것으로 센다. 한글이 두 글자 이상 이어진 줄과 「95%」가 있는 줄은 재지 않고
+# 둔다 — 「앞 중심의 무게감이 있는 ykk 사의 2way 지퍼」가 영문만 재면 잡음으로 보였다.
+#
+# 표본 재본 결과(0.5 기준 줄 삭제 시뮬레이션): dart 93% · aged 85% · belt 81% · slit 80% 지워짐,
+# wool 2% · crop 1% · slim 3% · knit 2% 만 지워짐(그것도 「iia ae a wool &」 같은 줄).
+# 라벨과 선택지 사이, 선택지와 선택지 사이에 다른 한글이 끼면 눈금표가 아니라 「신축성 있음 / 안감 없음」
+# 같은 값 나열이다 — 한글이 아닌 것(OCR 찌꺼기 0·O·@·-·줄바꿈)만 건너뛴다.
+_SPEC_SCALE = re.compile(r"(신축성|안감|기모)(?:[^가-힣]{0,40}?)((?:(?:없음|보통|있음)[^가-힣]{0,12}){2,})")
+_SCALE_TOK = re.compile(r"없음|보통|있음")
+
+
+def _blank_scale(m: re.Match) -> str:
+    if len(set(_SCALE_TOK.findall(m.group(2)))) < 2:
+        return m.group(0)
+    return "".join(c if c == "\n" else " " for c in m.group(0))
+
+
+_ENGLISH_FIT_BAR = re.compile(
+    r"^[\s|./]*(?:(?:slim|regular|tapered|wide|crop|ankle|loose|over\s?sized?|relaxed|straight|flare|skinny|"
+    r"standard|fit|semi|normal|long|short)[\s|./]*){3,}$", re.I)
+_FIT_VS_FIT = re.compile(r"^\s*[a-z-]+\s+fit\s+vs\.?\s+[a-z-]+\s+fit\s*$", re.I)
+_TOK2 = re.compile(r"[a-z]{2,}")
+_TOK3 = re.compile(r"[a-z]{3,}")
+_HAN_RUN2 = re.compile(r"[가-힣]{2,}")
+_PCT = re.compile(r"\d\s*%")
+_WHITE2 = {"of", "to", "in", "on", "at", "by", "or", "xs", "xl", "cm", "mm", "oz", "no", "up", "us", "uk", "eu", "kr"}
+_LEX: set | None = None
+
+
+def ensure_lexicon() -> set:
+    """매장 HTML 설명글에서 영문 사전을 한 번 만든다(다섯 벌 넘게 나온 세 글자 이상 낱말)."""
+    global _LEX
+    if _LEX is not None:
+        return _LEX
+    df: Counter = Counter()
+    for p in sorted(CRAWL.glob("*.jsonl")):
+        if p.name.startswith("_"):
+            continue
+        for d in load_latest(p).values():
+            words = set(_TOK3.findall(((d.get("description") or "") + " " + (d.get("detail_text") or "")
+                                       + " " + (d.get("name") or "")).lower()))
+            for w in words:
+                df[w] += 1
+    _LEX = {w for w, n in df.items() if n >= 5}
+    return _LEX
+
+
+def _latin_garbage(line: str) -> bool:
+    if _HAN_RUN2.search(line) or _PCT.search(line):
+        return False
+    toks = _TOK2.findall(line.lower())
+    if not toks:
+        return False
+    lex = ensure_lexicon()
+    if len(lex) < 500:
+        # 사전이 없거나 너무 작으면(크롤 파일이 안 보이는 자리에서 돌 때) 영문을 통째로 지우게 된다 —
+        # 그럴 땐 이 규칙을 끈다. 잡음을 남기는 쪽이 진짜 글을 다 버리는 쪽보다 낫다.
+        return False
+    known = sum(1 for t in toks if (len(t) >= 3 and t in lex) or t in _WHITE2)
+    return known < 2 or known / len(toks) < 0.5
+
+
+def load_latest(path: Path) -> dict[str, dict]:
+    latest: dict[str, dict] = {}
+    if not path.exists():
+        return latest
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            d = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        latest[str(d["product_no"])] = d
+    return latest
+
+
+def spec_texts(spec, product_no: str | int | None = None) -> tuple[str, str]:
+    """(태깅용 본문, 색상 텍스트)"""
+    if not isinstance(spec, dict):
+        return "", ""
+    body, color = [], []
+    for k, v in spec.items():
+        if not isinstance(v, str) or len(v) > 400:
+            continue
+        # 상품연관색상정보·colorchip_*·상품명/질문에 든 color는 현재 상품 색 칸이 아니다.
+        if COLOR_KEY.fullmatch(str(k).strip()):
+            color.append(v)
+        elif str(k).strip() == "상품연관색상정보" and product_no is not None:
+            # Hatching Room: 번호,색명,순서/번호,색명,순서. 색명 자체의 /는 허용한다.
+            # 번호를 모르면 제외하고, 알면 정확히 이 상품의 값만 남긴다.
+            for m in re.finditer(r"(?:^|/)\s*(\d+)\s*,(.*?),\s*\d+\s*(?=/\s*\d+\s*,|$)", v):
+                if m.group(1) == str(product_no).strip():
+                    color.append(m.group(2).strip())
+        if SPEC_KEY.search(k):
+            body.append(f"{k}: {v}")
+    return "\n".join(body), " ".join(color)
+
+
+def quality_of(body: str) -> str:
+    """CSS 가 섞였다고 글이 없는 것은 아니다.
+
+    매장이 설명 안에 <style> 블록을 넣어 두면 진짜 글은 그 뒤에 온다 —
+    「details.fa { border-top: 1px solid #e5e5e5; … }」 다음에
+    「▪ Material: Cotton 100% ▪ Color: Washed Black ▪ Size (…)」가 이어진다.
+    그런데 본문 어디든 CSS 가 보이면 css_fragment 로 낙인을 찍고 있었다. 621벌이 그렇게
+    묶였는데 594벌은 CSS 를 걷어 내면 50자 넘는 글이 남고, 376벌은 400자가 넘는다.
+    단색 추론이 「quality == ok」일 때만 도는 탓에 500벌이 패턴을 통째로 못 받았다
+    (badblood 102 · siyazu 82 · far-from-what 72 · mardi-mercredi 64, 2026-09-06).
+
+    CSS 를 걷어 내고 남은 글로 판정한다. 남은 것이 짧으면 그때 css_fragment 다."""
+    clean = CSS_RX.sub(" ", body)
+    letters = re.sub(rf"[^{HANGUL}A-Za-z]", "", clean)
+    if len(letters) >= SHORT_TEXT:
+        return "ok"
+    return "css_fragment" if CSS_RX.search(body) else "too_short"
+
+
+COLOR_TAIL = re.compile(
+    r"[\s_\-]+(?:black|white|ivory|beige|navy|grey|gray|brown|charcoal|khaki|olive|cream|"
+    r"blue|green|pink|red|burgundy|melange.*)$", re.I)
+
+
+_SHELL_W = 8      # 낱말 몇 개 묶음으로 「같은 글」을 셀지
+_JS_CSS = re.compile(r"\bvar\s+\w+\s*=|\{\s*margin\s*:|font-family\s*:", re.I)
+
+
+_MAT_LABEL_TOK = re.compile(r"(?i)^(?:fabric|material|materials|composition|소재|혼용률|혼용|겉감|shell|outshell)[:：|]?$")
+
+
+def _material_spans(toks: list[str]) -> list[tuple[int, int]]:
+    """낱말 목록에서 소재를 적은 구간(「FABRIC Cotton 100%」「소재 : 면 95% 스판 5%」) → [(시작, 끝)]."""
+    starts, pos = [], 0
+    for t in toks:
+        starts.append(pos)
+        pos += len(t) + 1
+    text = " ".join(toks)
+    spans: list[tuple[int, int]] = []
+    for m in _SG_FIBER_PCT.finditer(text):
+        i = max(k for k, s0 in enumerate(starts) if s0 <= m.start())
+        j = max(k for k, s0 in enumerate(starts) if s0 < m.end()) + 1
+        # 앞의 이름표(「FABRIC」「소재 :」) 하나를 같이 남긴다
+        b = i - 1
+        while b >= 0 and toks[b] in (":", "：", "|", "-"):
+            b -= 1
+        if b >= 0 and _MAT_LABEL_TOK.match(toks[b]):
+            i = b
+        if spans and i <= spans[-1][1]:
+            spans[-1] = (spans[-1][0], max(j, spans[-1][1]))
+        else:
+            spans.append((i, j))
+    return spans
+
+
+def strip_shell(brw: dict[str, str], items: list[dict]) -> tuple[int, int]:
+    """브라우저 글에서 매장 껍데기를 낱말 묶음 단위로 걷어낸다.
+
+    drop_boilerplate 는 글 전체가 같을 때만 버린다. 그런데 브라우저 글은 상품 글 앞뒤로 메뉴
+    (「긴팔티셔츠 반팔/슬리브리스 데님팬츠」)·장바구니 단추·꼬리말·「함께 보면 좋은 상품」 목록이
+    붙어 와서 글마다 조금씩 다르다. 브랜드마다 브라우저 글의 25~93% 가 이런 껍데기였고(2026-09-08,
+    20개 매장 실측), 한 매장의 후디에 반팔·슬리브리스·니트·데님·가죽이 메뉴에서 붙었다.
+
+    같은 8낱말 묶음이 그 브랜드 상품 max(5, 10%) 벌 이상에 나오고, 그 상품들의 이름 줄기(색 뗀 것)가
+    둘 이상이면 껍데기 후보다 — 색만 다른 같은 옷의 설명은 줄기가 하나라 남는다.
+
+    **가장자리만 뺀다.** 껍데기는 글의 앞(메뉴)과 뒤(장바구니·꼬리말·「함께 보면 좋은 상품」·케어 안내)에
+    붙고, 상품 글은 가운데 있다. 가운데에서 반복되는 글은 브랜드가 시리즈마다 같이 쓰는 진짜 사양이다 —
+    처음 판이 전부를 뺐더니 한 가방 브랜드 80벌의 로고·버클·코튼, 한 신발 브랜드의 소가죽·안감, 한 매장의
+    YKK 30벌이 사라졌다(after6 측정). 가장자리만 빼면 그 셋은 0 이 사라지고 메뉴 198 낱말은 그대로 빠진다.
+    자바스크립트·CSS 를 담아 온 기록(「var sAuthSSLDomain = …」)은 통째로 버린다.
+    돌려주는 것: (덮어서 뺀 낱말 수, 통째로 버린 기록 수).
+    """
+    dropped = 0
+    for u in [u for u, t in brw.items() if _JS_CSS.search(t[:600])]:
+        brw.pop(u, None)
+        dropped += 1
+    if len(brw) < 5:
+        return 0, dropped
+    stem = {r["source_url"]: COLOR_TAIL.sub("", (r["name"] or "").strip().lower()) for r in items}
+    toks_of = {u: t.split() for u, t in brw.items()}
+    seen: dict[str, set] = {}
+    for u, toks in toks_of.items():
+        for i in range(max(0, len(toks) - _SHELL_W + 1)):
+            seen.setdefault(" ".join(toks[i:i + _SHELL_W]), set()).add(u)
+    need = max(5, int(0.1 * len(brw)))
+    shell = set()
+    for w, us in seen.items():
+        if len(us) < need:
+            continue
+        if len({stem.get(x, x) for x in us}) < 2:
+            continue      # 색만 다른 같은 옷 — 설명이 같은 게 맞다
+        shell.add(w)
+    if not shell:
+        return 0, dropped
+    # 껍데기 가장자리에 소재 줄이 끼어 있으면 그 줄은 남긴다. badblood 는 상품 글 끝이
+    # 「두께감 보통 / 비침 없음 / 신축성 없음 / 안감 없음 FABRIC Cotton 100% CARE * 반드시 찬물에 …」인데,
+    # 두께감 줄 · 세탁 안내가 상품마다 똑같아 그 사이의 「FABRIC Cotton 100%」까지 꼬리 껍데기로 잘려 나갔다
+    # (badblood 13723 · 13790 · 13820, 2026-10-01 — 살아 있는 페이지에도 FABRIC COTTON 100% 가 있다).
+    # 다만 그 매장 기록 60% 넘게(10벌 넘게) 똑같이 붙은 소재 줄은 매장 공용 안내로 보고 지키지 않는다.
+    keep_spans: dict[str, list[tuple[int, int]]] = {}
+    seen_stmt: Counter = Counter()
+    for u, toks in toks_of.items():
+        spans = _material_spans(toks)
+        if spans:
+            keep_spans[u] = spans
+            seen_stmt.update({" ".join(toks[i:j]).lower() for i, j in spans})
+    if len(brw) >= 10:
+        common = {t for t, c in seen_stmt.items() if c >= 0.6 * len(brw)}
+        for u in list(keep_spans):
+            keep_spans[u] = [(i, j) for i, j in keep_spans[u] if " ".join(toks_of[u][i:j]).lower() not in common]
+    removed = 0
+    for u, toks in toks_of.items():
+        mark = [False] * len(toks)
+        for i in range(max(0, len(toks) - _SHELL_W + 1)):
+            if " ".join(toks[i:i + _SHELL_W]) in shell:
+                for j in range(i, i + _SHELL_W):
+                    mark[j] = True
+        # 앞에서 이어진 표시 구간과 뒤에서 이어진 표시 구간만 뺀다
+        a = 0
+        while a < len(mark) and mark[a]:
+            a += 1
+        b = len(mark)
+        while b > a and mark[b - 1]:
+            b -= 1
+        mark = [i < a or i >= b for i in range(len(toks))]
+        for i, j in keep_spans.get(u, ()):
+            for k in range(i, j):
+                mark[k] = False
+        if any(mark):
+            removed += sum(mark)
+            kept = " ".join(t for t, m in zip(toks, mark) if not m)
+            if kept.strip():
+                brw[u] = kept
+            else:
+                brw.pop(u, None)
+    return removed, dropped
+
+
+def drop_boilerplate(brw: dict[str, str], items: list[dict]) -> int:
+    """브라우저가 설명글 대신 매장 껍데기를 담아 온 것을 버린다.
+
+    브라우저 수집은 탭을 눌러 설명을 펴는데, 안 펴진 채로 화면에 있던 글을 담는 수가 있다.
+    그러면 상품마다 똑같은 글이 붙는다.
+
+      insilence 31벌  「뒤로 메뉴 닫기 남성복 카테고리 … 긴팔티셔츠 반팔/슬리브리스 …」  (메뉴)
+      low-classic 14벌 「Details 주문 - 주문 후 품절 재고는 취소 처리될 수 있습니다 …」   (배송 안내)
+
+    메뉴가 붙은 탓에 「울 개버딘 스트럭쳐 팬츠」에 반팔·슬리브리스·롱슬리브가 다 붙었다.
+    insilence 는 남은 태그 모순 249건 가운데 45건을 혼자 이고 있었다(2026-09-06).
+
+    다만 「같은 글이 여러 벌에 붙었다」만으로는 못 가른다 — 색만 다른 같은 옷은 설명이
+    정말로 같다(213벌이 그렇다). 그래서 이름에서 색을 뗀 줄기나 품목이 여럿일 때만 버린다.
+    """
+    same: dict[str, list[str]] = {}
+    for u, t in brw.items():
+        if len(t) > 40:
+            same.setdefault(t, []).append(u)
+    info = {r["source_url"]: (COLOR_TAIL.sub("", (r["name"] or "").strip().lower()), r["category"])
+            for r in items}
+    n = 0
+    for t, us in same.items():
+        if len(us) < 3:
+            continue
+        # 목록에 남은 것만 본다 — 같은 글이 붙은 열넷 가운데 둘만 상품일 수 있다
+        # (low-classic 의 배송 안내가 그렇다: 카디건 하나와 키링 하나).
+        known = [info[u] for u in us if u in info]
+        if len(known) < 2:
+            continue
+        if len({k[0] for k in known}) == 1 and len({k[1] for k in known}) == 1:
+            continue          # 색만 다른 같은 옷 — 설명이 같은 게 맞다
+        for u in us:
+            brw.pop(u, None)
+            n += 1
+    return n
+
+
+# 사이즈가이드 창(/product/sizeguide.html?product_no=N, fetch_sizeguide.py 가 받는다)에 소재를 적는 매장이 있다.
+# saintpain 은 상품 설명글이 결제 · 배송 안내뿐이고(판매중 의류 444벌 중 소재 84벌, 18.9%), 소재는
+# 이 창의 맨 끝, 매장 공용 환산표(KR/US/JP …)와 그 상품 실측 뒤에 「MATERIAL / 면 92% / 폴리에스터 8%」로
+# 적혀 있다 — 빈칸 360벌 중 111벌이 받아 둔 창 글에 소재가 있었다(2026-10-01, saintpain 4642 「COTTON 100%」
+# · 4083 「나일론 100%」를 살아 있는 창으로도 확인). 태거는 이 글을 안 읽고 있었다.
+# 창 글을 통째로 붙이지 않는다 — 앞머리가 매장 공용 환산표 · 「측정기준 … 유의하시기 바랍니다」라서 다른
+# 축(기장 · 핏)에 엉뚱한 낱말이 붙을 수 있다. 섬유 + 퍼센트 줄과 바로 앞 이름표 줄(MATERIAL · FABRIC · 소재 …)만
+# 가져온다. 같은 소재 줄이 그 매장 창 글 대부분(60% · 10벌 넘게)에 똑같이 나오면 상품 글이 아니라 매장 공용
+# 안내로 보고 버린다(창 글에 소재를 적는 매장 넷 — saintpain · freckle · lememe · shirter — 중 그런 곳은 아직 없다).
+_SG_FIBER_PCT = re.compile(
+    r"(?<![가-힣A-Za-z])(?:면|코튼|cotton|폴리에스[터테]르?|폴리|polyester|poly|나일론|nylon|polyamide|레이온|rayon|"
+    r"비스코스|viscose|울|wool|양모|아크릴|acrylic|린넨|linen|마|실크|silk|캐시미어|cashmere|스판덱스|스판|spandex|"
+    r"elastane|폴리우레탄|polyurethane|텐셀|tencel|모달|modal|아세테이트|acetate|리오셀|lyocell|큐프라|cupro|"
+    r"알파카|alpaca|모헤어|mohair|앙고라|angora|가죽|leather|소가죽|양가죽|cow\s*leather|lamb\s*leather|"
+    r"오리털|거위털|덕다운|구스다운|duck\s*down|goose\s*down|다운|down|페더|feather)"
+    r"\s*[:：]?\s*\d{1,3}(?:\.\d+)?\s*%"
+    r"|\d{1,3}(?:\.\d+)?\s*%\s*(?:cotton|polyester|poly|nylon|rayon|wool|acrylic|linen|silk|cashmere|spandex|"
+    r"elastane|polyurethane|tencel|modal|acetate|lyocell|cupro|leather|면|코튼|폴리에스터|나일론|레이온|울|린넨|스판)", re.I)
+_SG_LABEL = re.compile(r"(?i)^\s*(?:material|fabric|composition|소재|혼용률|혼용|원단|겉감|안감|배색|shell|lining)\s*[:：|]?\s*$")
+
+
+def sizeguide_materials(sg: dict[str, dict]) -> dict[str, str]:
+    """product_no → 사이즈가이드 창 글에서 뽑은 소재 줄(위 주석)."""
+    out: dict[str, str] = {}
+    for no, d in sg.items():
+        lines = [ln.strip() for ln in (d.get("size_text") or "").splitlines()]
+        keep = []
+        for i, ln in enumerate(lines):
+            if ln and len(ln) <= 120 and _SG_FIBER_PCT.search(ln):
+                if i and _SG_LABEL.match(lines[i - 1]) and lines[i - 1] not in keep:
+                    keep.append(lines[i - 1])
+                keep.append(ln)
+        if keep:
+            out[str(no)] = "\n".join(keep)
+    if len(out) >= 10:
+        cnt = Counter(out.values())
+        common = {t for t, c in cnt.items() if c >= 0.6 * len(sg)}
+        out = {k: v for k, v in out.items() if v not in common}
+    return out
+
+
+def prepare_brand(slug: str, items: list[dict]) -> tuple[list[tuple], frozenset]:
+    """한 매장 상품마다 태거가 읽을 글을 모은다 → ([(행, 본문, 출처, 품질, 색 글)], 매장 되풀이 문장).
+    main 과 시험 도구(전후 대조)가 같은 글을 보게 따로 뺐다(2026-10-01)."""
+    crawl = load_latest(CRAWL / f"{slug}.jsonl")
+    ocr = load_latest(OCR / f"{slug}.jsonl")
+    # 브라우저로 거둔 설명글 — 탭 안에 있어 requests 로는 빈 껍데기만 오는 매장이 있다.
+    # perenn 은 설명글이 8자였는데 탭을 누르고 내려서 받으니 40벌이 치수·소재까지 들어
+    # 있었다(2026-09-04). 주소로 맞춘다 — product_no 는 브라우저 기록에 없을 수 있다.
+    brw: dict[str, str] = {}
+    bp = BROWSER / f"{slug}.jsonl"
+    if bp.exists():
+        for l in bp.read_text(encoding="utf-8").splitlines():
+            if l.strip():
+                b = json.loads(l)
+                t = (b.get("description") or "").strip()
+                if b.get("source_url") and len(t) > len(brw.get(b["source_url"], "")):
+                    brw[b["source_url"]] = t
+    # strip_shell 을 먼저 — 껍데기 빈도는 메뉴만 담긴 기록까지 세어야 문턱(10%)을 넘는다. 그 기록들은
+    # drop_boilerplate 가 버릴 것들인데, 먼저 버리면 메뉴가 섞인 나머지 기록이 문턱 아래로 떨어져
+    # 후디의 메뉴가 그대로 남았다(after6b 에서 확인, 2026-09-08).
+    strip_shell(brw, items)
+    drop_boilerplate(brw, items)
+    sgmat = sizeguide_materials(load_latest(SIZEGUIDE / f"{slug}.jsonl"))
+    prepared = []
+    for r in items:
+        d = crawl.get(str(r["product_no"]), {})
+        o = ocr.get(str(r["product_no"]), {})
+        desc = d.get("description") or ""
+        dt = d.get("detail_text") or ""
+        if dt and dt[:200] != desc[:200]:
+            desc = desc + "\n" + dt   # JSON-LD 요약과 본문 글이 다르면 둘 다 읽는다(2026-09-03)
+        sbody, scolor = spec_texts(d.get("spec"), r.get("product_no"))
+        # 글자 상한(12,000자)에 걸려 잘린 기록은 그림별 글을 따로 남긴다(ocr_detail_images).
+        # 태거가 그걸 안 보고 잘린 ocr_text 만 읽고 있었다 — 상세 그림은 대개
+        # 「착장 → 사이즈 표 → 소재·세탁」 차례라, 잘리는 자리가 바로 소재다.
+        # 지금은 잘린 기록이 137건뿐이지만(소재를 잃는 것 5벌), 빈 축을 채우는 판이
+        # 표를 찾아도 안 멈추게 바뀌어 글이 길어진다. 그 판을 돌리기 전에 막는다.
+        _raw = o.get("ocr_text") or ""
+        _per = "\n".join(t for t in ((i or {}).get("text") or "" for i in (o.get("images") or [])) if t)
+        otext = denoise_ocr(_per if len(_per) > len(_raw) else _raw)
+        btext = brw.get(r["source_url"], "")
+        if btext and btext[:200] != desc[:200]:
+            pass          # 브라우저 글은 따로 붙인다 — 원래 글과 겹치면 아래에서 무시된다
+        else:
+            btext = ""
+        gtext = sgmat.get(str(r["product_no"]), "")
+        body = strip_nav_menu("\n".join(t for t in (desc, sbody, otext, btext, gtext) if t))
+        sources = [s for s, t in (("json-ld" if d.get("description_source") == "json-ld" else "html", desc), ("spec", sbody), ("ocr", otext), ("browser", btext), ("sizeguide", gtext)) if t]
+        quality = quality_of(body)
+        # 상품 이름은 색을 고르는 데 쓰지 않는다. 수집기의 pick_color 가 이미 이름을
+        # 읽되 「끝 괄호 → 이름 → 설명 → 스펙」 순서를 지켜 representative_color 를
+        # 정해 두었다. 이름을 다시 통째로 훑으면 그 순서가 무너진다 — 수집기 어휘로
+        # 갈아탄 뒤 kirsh 「CHERRY」 상품이 전부 레드가 되어 75 → 602 로 뛰었다
+        # (체리는 이 브랜드의 마스코트지 옷 색이 아니다, 2026-09-05).
+        color_text = " ".join(t for t in (r.get("representative_color", ""), scolor) if t)
+        prepared.append((r, body, sources, quality, color_text))
+    # 매장이 되풀이하는 문장은 소재의 근거로 안 쓴다 — store_repeats 주석
+    store_lines = store_repeats([p[1] for p in prepared])
+    return prepared, store_lines
+
+
+# ── 혼용률 칸(mat) ───────────────────────────────────────────────────────────
+# 앱 상세의 「소재」 줄은 mat(부위 구조 그대로의 혼용률)이 있으면 그걸 쓴다. 예전엔 export_app_data 가 설명글 한 칸에서만
+# 읽어(product_desc.blend) 판매중 의류 102,509벌 중 13,909벌(13.6%)뿐이었다(2026-10-02). 혼용률은 설명 · detail_text ·
+# 스펙 칸 · 사이즈가이드 창 · 브라우저 글 · 상세 그림 글(OCR)에 흩어져 있고, 그 글을 다 모으는 곳이 여기라 여기서 만든다.
+# 결과는 product_tags_full.json 의 "mat" 으로 싣고 export 가 그대로 옮긴다(앱이 받는 모양은 같다).
+#
+# 해석은 product_desc.mix_cands(합이 100 이어야 · 아는 섬유만 · 부위를 안 섞게 · % 오독은 그림 글에서만, 해석이 하나뿐일
+# 때만). 여기서는 상품 하나의 여러 출처 · 한 매장의 여러 상품을 함께 봐야 가릴 수 있는 것을 가린다:
+#   ① 매장 공용 줄 — 그 매장에서 같은 출처 글을 가진 상품의 60% 넘게(10벌 이상) 혼용률 앞뒤 글까지 똑같으면 상품 글이
+#      아니라 매장 안내다(noice 는 모든 상품 설명 끝에 영문 견본 「fabric :MERINO WOOL 50%NYLON 30%ACRYLIC 20%」를 붙인다).
+#   ② 베껴 붙인 매장 글 — 같은 혼용률 글을 5벌 넘게 나눠 쓰는데, 그림 글이 있는 상품(3벌 이상)의 절반 넘게에서 그림과
+#      어긋나면 그 글 묶음을 버린다. the-coldest-moment 「9/21 RELEASE」 77벌은 다운 재킷 · 패딩 · 시어링 코트 할 것 없이 설명이
+#      「Shell : Linen30% Rayon 20% Cotton 30% Polyester 20% Lining : Polyester 100%」였고 그림 글이 있는 49벌이 모두 달랐다.
+#   ③ 출처끼리 — 부위가 가장 많은 후보를 고르고, 나머지가 다 그 부분집합일 때만 받는다(product_desc.mix_pick). 매장 글과
+#      그림 글이 서로 다른 값을 말하면(noirer 1709 「COTTON 100%」 대 「COTTON 97% SPAN 3%」) 어느 쪽인지 모르므로 비운다.
+#   ④ 못 읽은 부위 — 검산에서 떨어진 줄기에 고른 결과에 없는 부위 이름이 적혀 있으면 비운다(아래 본문).
+#   ⑤ 떨어진 매장 글의 섬유 — 매장 글에서 검산에 떨어진 줄기의 섬유를 결과가 하나도 안 담으면 비운다(아래 본문).
+#   그리고 겉감(또는 이름 없는 부위)이 없는 결과 — 안감만 · 배색만 — 는 product_desc.mix_pick 이 버린다.
+_MAT_SRC = ("desc", "dt", "spec", "sizeguide", "browser", "ocr")
+_MAT_SHOP = {"desc", "dt", "spec"}
+
+
+def _mat_ctx(text: str, span: tuple[int, int]) -> str:
+    a, b = span
+    return re.sub(r"\s+", " ", text[max(0, a - 25):b + 25]).strip().lower()
+
+
+MANUAL_MAT = DATA / "manual_mat.csv"   # 사람(또는 코덱스 비전)이 그림을 보고 옮겨 적은 혼용률 — 무엇보다 앞선다
+
+
+_MAT_SYN = {"비스코스": "레이온", "폴리아미드": "나일론", "엘라스테인": "스판덱스", "엘라스탄": "스판덱스", "면": "코튼", "폴리": "폴리에스터", "메탈 섬유": "메탈섬유", "메탈": "메탈섬유", "PAPER": "종이", "종이사": "종이", "젠트라": "ZENTRA",
+            "폴리부틸렌 테레프탈레이트": "PBT", "대나무 섬유": "대나무", "종이섬유": "종이", "한지사": "종이",
+            "메탈사": "메탈섬유", "메탈린": "메탈섬유", "메탈릭 원사": "메탈섬유", "메탈릭": "메탈섬유", "기타 섬유": "기타", "AIR POLY": "AIRPOLY",
+            "뱀부": "대나무", "한지": "종이", "페이퍼": "종이", "모": "울", "앙고라 벨벳": "앙고라", "셀룰로스 섬유(별도 지정 외)": "기타",
+            "GOAT WOOL": "기타", "PBT": "PBT",
+            # 코덱스 그림 비전이 원문 꾸밈말째 옮겨 적는 이름(2026-10-03 부탁 296~) — 함량은 상위 섬유로
+            "재생 폴리에스터": "폴리에스터", "리사이클 폴리에스터": "폴리에스터", "리사이클 나일론": "나일론", "재생 나일론": "나일론",
+            "오가닉 코튼": "코튼", "유기농 면": "코튼", "모시": "라미",
+            "메리노 울": "울", "메리노울": "울", "램스울": "울", "라이오셀": "텐셀", "리오셀": "텐셀", "라이크라": "스판덱스",
+            "캐시 나일론": "나일론", "캐시 폴리에스터": "폴리에스터", "재생 울": "울", "재생 모헤어": "모헤어", "야크 울": "야크",
+            "버진 울": "울", "버진울": "울", "엑스트라파인 울": "울", "엑스트라파인 메리노 울": "울", "슈퍼파인 메리노 울": "울",
+            "리사이클 울": "울", "캐시미어 울": "울", "앙고라 울": "앙고라", "유기농 코튼": "코튼", "수피마 코튼": "코튼", "피마 코튼": "코튼"}
+
+MANUAL_MAT_RAW: dict[str, list[str]] = {}   # 링크 → 옮겨 적힌 그대로(「겉감 메리노 울 70%」) — mat_raw
+
+
+def load_manual_mat() -> dict[str, list]:
+    """data/manual_mat.csv — 한 줄이 한 섬유: 브랜드,링크,부위,섬유,퍼센트,왜.
+
+    판독기가 못 읽는 그림(혼용률이 상세 그림 맨 아래 작은 글씨 · 고시 표에만 있는 상품)을 사람이나 코덱스가 보고 적는다
+    (사람 2026-10-02 「코덱스 사용해서 토큰 많이드는 일 시켜봐」 · 부탁 053~062). manual_sizes.csv 와 같은 자리다.
+    부위마다 합이 99~101 일 때만 받는다 — 옮겨 적다 한 섬유를 빠뜨린 상품은 통째로 안 쓴다. 「없음」 줄은 건너뛴다.
+    """
+    if not MANUAL_MAT.exists():
+        return {}
+    acc: dict[str, dict[str, list]] = {}
+    incomplete: set[str] = set()
+    for r in csv.DictReader(MANUAL_MAT.open(encoding="utf-8-sig")):
+        u, f = (r.get("링크") or "").strip(), (r.get("섬유") or "").strip()
+        if not u or not f or f == "없음":
+            continue
+        try:
+            v = float(r.get("퍼센트") or "")
+        except ValueError:
+            incomplete.add(u)
+            continue
+        if not (0 < v <= 100):
+            incomplete.add(u)
+            continue
+        part = (r.get("부위") or "").strip() or "겉감"
+        part = re.sub(r"^(겉감|안감|배색|충전재|시보리|포켓감|부분)\s*(\d)$", r"\1 \2", part)   # 「겉감1」 → 「겉감 1」(코덱스 표기)
+        # 설명글 해석(product_desc)과 같은 이름으로 — 반이 안 되는 폴리우레탄은 늘어나는 실(스판덱스)이고, 비스코스 ·
+        # 폴리아미드 · 엘라스테인은 우리 표준 이름이 따로 있다(코덱스가 원문 그대로 옮긴 belier 3801 「폴리우레탄 16」).
+        # 코덱스는 섬유 칸을 표준 이름으로 적고 원문을 왜 칸에 남길 때가 많다(「상품 페이지 소재 표기의 LAMBS WOOL」) — 그 꼬리도 싣는다
+        why = re.sub(r"\s*[—-]\s*코덱스.*$", "", (r.get("왜") or "").strip())
+        MANUAL_MAT_RAW.setdefault(u, []).append(
+            f"{part} {f} {int(v) if v == int(v) else v}%".strip() + (f" [{why}]" if why else ""))
+        f = _MAT_SYN.get(f, f)
+        if f == "폴리우레탄" and v < 50:
+            f = "스판덱스"
+        acc.setdefault(u, {}).setdefault(part, []).append([f, int(v) if v == int(v) else v])
+    out = {}
+    for u, parts in acc.items():
+        secondary_only = all(re.match(r"^(?:안감|배색|충전재|시보리|포켓감|부분)(?:\s*\d)?$", p) for p in parts)
+        if u not in incomplete and not secondary_only and all(99 <= sum(x for _, x in vs) <= 101 for vs in parts.values()):
+            # 부위가 겉감 하나면 앱이 부위 이름을 떼고 보여 준다 — 설명글 해석(blend)과 같은 모양
+            out[u] = [{"p": "" if (p == "겉감" and len(parts) == 1) else p, "v": vs} for p, vs in parts.items()]
+    return out
+
+
+_PADDLE: dict[str, str] | None = None
+
+
+def load_paddle() -> dict[str, str]:
+    """crawl/ocr_paddle/*.jsonl → {source_url: 글}(scripts/ocr_paddle.py). 한 번만 읽는다."""
+    global _PADDLE
+    if _PADDLE is None:
+        _PADDLE = {}
+        for p in sorted((CRAWL / "ocr_paddle").glob("*.jsonl")):
+            for l in p.read_text(encoding="utf-8").splitlines():
+                if l.strip():
+                    o = json.loads(l)
+                    if o.get("text"):
+                        _PADDLE[o["source_url"]] = o["text"]
+    return _PADDLE
+
+
+_LLM_MAT: dict[str, str] | None = None
+
+
+def load_llm_mat() -> dict[str, str]:
+    """data/llm/mat.jsonl — 상세 그림에서 옮겨 적은 혼용률 글."""
+    global _LLM_MAT
+    if _LLM_MAT is None:
+        _LLM_MAT = {}
+        p = DATA / "llm" / "mat.jsonl"
+        if p.exists():
+            for l in p.read_text(encoding="utf-8").splitlines():
+                if l.strip():
+                    o = json.loads(l)
+                    c = ((o.get("out") or {}).get("composition") or "").strip()
+                    if c:
+                        _LLM_MAT[o["u"]] = c
+    return _LLM_MAT
+
+
+def blend_of_brand(slug: str, items: list[dict], why: dict | None = None, raw: dict | None = None) -> dict[str, list]:
+    """source_url → 혼용률(mat). 못 읽었거나 버린 상품은 없다. why 를 주면 상품마다 (까닭, 고른 출처)를 적는다(전후 대조용).
+    raw 를 주면 고른 혼용률을 읽어 낸 원문 줄을 적는다(mat_raw — 표준 이름으로 합치기 전 「Superfine Merino Wool 100%」)."""
+    import product_desc
+    crawl = load_latest(CRAWL / f"{slug}.jsonl")
+    ocr = load_latest(OCR / f"{slug}.jsonl")
+    sg = load_latest(SIZEGUIDE / f"{slug}.jsonl")
+    brw: dict[str, str] = {}
+    bp = BROWSER / f"{slug}.jsonl"
+    if bp.exists():
+        for l in bp.read_text(encoding="utf-8").splitlines():
+            if l.strip():
+                b = json.loads(l)
+                t = (b.get("description") or "").strip()
+                if b.get("source_url") and len(t) > len(brw.get(b["source_url"], "")):
+                    brw[b["source_url"]] = t
+    strip_shell(brw, items)              # 브라우저 글의 메뉴 · 꼬리말을 걷는 것은 태거와 같다(소재 줄은 지킨다)
+    drop_boilerplate(brw, items)
+    cands: dict[str, list[dict]] = {}
+    lost_parts: dict[str, dict] = {}
+    lost_soles: dict[str, set] = {}
+    shoe_urls = {r["source_url"] for r in items if r.get("category") == "Shoes"}
+    ev: dict[str, list] = defaultdict(list)
+    ev_seen: Counter = Counter()
+    have = Counter()
+    for r in items:
+        no = str(r["product_no"])
+        d, o = crawl.get(no, {}), ocr.get(no, {})
+        desc = d.get("description") or ""
+        dt = d.get("detail_text") or ""
+        if dt.strip() == desc.strip():
+            dt = ""
+        _raw = o.get("ocr_text") or ""
+        _per = "\n".join(t for t in ((i or {}).get("text") or "" for i in (o.get("images") or [])) if t)
+        btext = brw.get(r["source_url"], "")
+        if btext.strip() == desc.strip():
+            btext = ""
+        # 그림 글은 denoise_ocr 를 거치지 않은 원문을 쓴다 — 쓰레기 줄 거르기가 「COTTON 100」처럼 영문 한 낱말 + 숫자인 줄을
+        # 통째로 버린다(아는 낱말이 둘 미만). 해석기의 검산(합 100 · 아는 섬유 · 이름표)이 그 거르기보다 엄격하다.
+        # 소재 전용 경로에서는 신발 부위별 spec과 긴 소재 값도 보존한다. 일반 태그의 길이 제한과 분리한다.
+        mspec = "\n".join(f"{k}: {v}" for k, v in (d.get("spec") or {}).items()
+                          if isinstance(v, str) and (SPEC_KEY.search(k) or product_desc._MIX_PART_RX.fullmatch(k))) \
+            if isinstance(d.get("spec"), dict) else ""
+        texts = {"desc": desc, "dt": dt, "spec": mspec,
+                 "sizeguide": (sg.get(no) or {}).get("size_text") or "", "browser": btext,
+                 "ocr": _per if len(_per) > len(_raw) else _raw}
+        # PaddleOCR 로 다시 읽은 그림 글(scripts/ocr_paddle.py — 혼용률이 빈 옷만)은 같은 그림 글 출처 뒤에 붙인다.
+        # 판독기가 깨뜨리는 「1O0」 「COT TON」 「72NYLON」은 product_desc.ocr_fix 로 바로잡는다.
+        _pd = load_paddle().get(r["source_url"])
+        if _pd:
+            texts["ocr"] = (texts["ocr"] + "\n" if texts["ocr"] else "") + product_desc.ocr_fix(_pd)
+        _lm = load_llm_mat().get(r["source_url"])
+        if _lm:
+            texts["ocr"] = (texts["ocr"] + "\n" if texts["ocr"] else "") + "소재: " + _lm
+        cs, lost, soles = [], {}, set()
+        for k in _MAT_SRC:
+            t = texts[k]
+            if not t:
+                continue
+            have[k] += 1
+            got, _, lp = product_desc.mix_cands(t, ocr=(k == "ocr"))
+            lost[k] = lp["parts"]
+            if k == "ocr":
+                # 신발의 깨진 부위명 때문에 버린 줄에도 밑창 소재 NN%가 명시돼 있을 수 있다.
+                # 뒤에 붙인 LLM의 「Polyester100」만으로 그 신발을 완성하면 안 된다(drawfit 방한 부츠).
+                for fib, _ in lp["ev"]:
+                    soles.update(fib & {"TPR", "고무", "합성고무", "EVA"})
+            if k in _MAT_SHOP:
+                ev[r["source_url"]] += lp["ev"]
+                ev_seen.update({key for _, key in lp["ev"]})
+            for c in got:
+                c["src"], c["ctx"] = k, _mat_ctx(t, c["span"])
+                c["raw"] = re.sub(r"\s+", " ", t[c["span"][0]:c["span"][1]]).strip()
+                cs.append(c)
+        cands[r["source_url"]] = cs
+        lost_parts[r["source_url"]] = lost
+        lost_soles[r["source_url"]] = soles
+    # ① 매장 공용 줄
+    seen: Counter = Counter()
+    for cs in cands.values():
+        seen.update({(c["src"], c["ctx"]) for c in cs})
+    frequent = {key for key, n in seen.items() if have[key[0]] >= 10 and n >= 0.6 * have[key[0]]}
+    # 한 가지 옷감만 쓰는 매장은 열 벌 모두 「COTTON 100%」라 반복만으로 공용 줄이 된다 — 검산을 통과한 진짜 혼용률이
+    # 매장째 사라졌다(코덱스 리뷰 c47ea38 P2 · 067, 영향 33벌). 다른 출처(그림 글 · 사이즈가이드 창 …)가 있는 상품을 셋 넘게
+    # 대 보아 절반 넘게 같은 혼용률을 말하면 공용 안내가 아니라 매장의 진짜 옷감으로 본다. 근거가 없거나 어긋나면 예전처럼 뺀다.
+    common = set()
+    for key in frequent:
+        checked = agree = 0
+        for cs in cands.values():
+            shop = [c for c in cs if (c["src"], c["ctx"]) == key]
+            other = [c for c in cs if (c["src"], c["ctx"]) != key and (c["src"], c["ctx"]) not in frequent]
+            if not shop or not other:
+                continue
+            checked += 1
+            a = shop[0]["m"]
+            if any(product_desc._mix_sub(a, c["m"]) or product_desc._mix_sub(c["m"], a) for c in other):
+                agree += 1
+        if not (checked >= 3 and agree > 0.5 * checked):
+            common.add(key)
+    # ② 베껴 붙인 매장 글
+    groups: dict[tuple, list[str]] = defaultdict(list)
+    for u, cs in cands.items():
+        for key in {(c["src"], c["ctx"]) for c in cs if c["src"] in _MAT_SHOP}:
+            groups[key].append(u)
+    copied = set()
+    for key, us in groups.items():
+        if len(us) < 5 or key in common:
+            continue
+        checked = agree = 0
+        for u in us:
+            shop = [c for c in cands[u] if (c["src"], c["ctx"]) == key]
+            pics = [c for c in cands[u] if c["src"] == "ocr"]
+            if not shop or not pics:
+                continue
+            checked += 1
+            a = shop[0]["m"]
+            if any(product_desc._mix_sub(a, c["m"]) or product_desc._mix_sub(c["m"], a) for c in pics):
+                agree += 1
+        if checked >= 3 and agree < 0.5 * checked:
+            copied.add(key)
+    out = {}
+    for u, cs in cands.items():
+        kept = [c for c in cs if (c["src"], c["ctx"]) not in common and (c["src"], c["ctx"]) not in copied]
+        m, st = product_desc.mix_pick(kept)
+        # ④ 못 읽은 부위 — 고른 결과가 나온 출처에서 버린 줄기에 그 결과에 없는 부위 이름(안감 · 배색 …)이 있으면 그 부위를
+        # 빠뜨린 것이다(product_desc._mix_runs 의 lost_parts 주석, tillidie 2645 · known-better 60). **같은 출처만** 본다 —
+        # the-coldest-moment 티셔츠 460벌은 설명에 깨진 견본 「SHELL : COTTON 46% … CONTRAST : … POLYURETHANE 1020%」이 붙어 있고
+        # 그림 글은 「Cotton 100%」다. 출처를 가리지 않으면 견본의 부위 이름 때문에 그림 글까지 버린다.
+        src = next((c["src"] for c in kept if c["m"] == m), kept[0]["src"] if kept else "") if m else ""
+        if m and lost_parts[u].get(src, set()) - {p["p"] for p in m}:
+            m, st = [], "partial"
+        if m and u in shoe_urls and src == "ocr" and lost_soles[u] - {f for p in m for f, _ in p["v"]}:
+            m, st = [], "partial"
+        # ⑤ 매장 글이 말한(그러나 검산에서 떨어진) 섬유를 결과가 하나도 안 담으면 어긋난다 — 비운다(product_desc._mix_runs 주석,
+        # atlm 1608). 그 매장 5벌 넘게에 숫자만 바꿔 붙은 글은 견본이라 안 센다 — the-coldest-moment 티셔츠는 설명에
+        # 「SHELL : COTTON 46% … POLYURETHANE 1020%」(뒤 숫자만 상품마다 다름)이 붙어 있고 그림 글은 「Cotton 100%」다.
+        if m:
+            got = {f for p in m for f, _ in p["v"]}
+            if any(not (fib & got) for fib, key in ev[u] if ev_seen[key] < 5):
+                m, st = [], "conflict"
+        if m:
+            out[u] = m
+            if raw is not None:
+                raw[u] = next((c["raw"] for c in kept if c["m"] == m and c.get("raw")), "")
+        if why is not None:
+            if not m and len(kept) < len(cs) and not kept:
+                st = "common" if any((c["src"], c["ctx"]) in common for c in cs) else "copied"
+            why[u] = (st, src, [(c["src"], c["m"]) for c in cs])
+    return out
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--brands", nargs="*")
+    ap.add_argument("--out", default=str(OUT))
+    ap.add_argument("--report", action="store_true")
+    args = ap.parse_args()
+
+    t0 = time.time()
+    print(f"영문 사전 {len(ensure_lexicon()):,}개 낱말 ({time.time() - t0:.0f}s)")
+    tagger = Tagger(json.loads(VOCAB.read_text(encoding="utf-8")))
+    rows = list(csv.DictReader(open(DATA / "products_full.csv", encoding="utf-8-sig")))
+    if args.brands:
+        rows = [r for r in rows if r["brand_slug"] in set(args.brands)]
+    by_brand: dict[str, list] = defaultdict(list)
+    for r in rows:
+        by_brand[r["brand_slug"]].append(r)
+
+    out: dict[str, dict] = {}
+    q_count, src_count = Counter(), Counter()
+    mat_count = grade_count = origin_count = 0
+    feel_count: Counter = Counter()
+    ax_count, cat_count = Counter(), Counter()
+    manual_mat = load_manual_mat()
+    if manual_mat:
+        print(f"사람 · 코덱스가 옮겨 적은 혼용률 {len(manual_mat)}벌 (data/manual_mat.csv)")
+    for slug, items in sorted(by_brand.items()):
+        prepared, store_lines = prepare_brand(slug, items)
+        mat_raw: dict[str, str] = {}
+        mats = {**blend_of_brand(slug, items, raw=mat_raw),
+                **{r["source_url"]: manual_mat[r["source_url"]] for r in items if r["source_url"] in manual_mat}}
+        for r, body, sources, quality, color_text in prepared:
+            tags = tagger.tag(r["category"], r["name"], body, color_text, quality,
+                              sleeve_cm=sleeve_of(r["source_url"]), store_lines=store_lines)
+            out[r["source_url"]] = {
+                "brand_slug": slug, "category": r["category"], "source_quality": quality,
+                "text_sources": sources, "tags": tags,
+            }
+            # 혼용률 — blend_of_brand 주석. 못 읽은 것도 빈 목록으로 싣는다: export 는 열쇠가 있으면 그대로 쓰고, 없을 때만(옛 판
+            # 태그 파일) 설명글에서 읽는다 — 새 판이 버린 것이 되살아나지 않게.
+            out[r["source_url"]]["mat"] = mats.get(r["source_url"]) or []
+            # 혼용률을 읽은 원문 — 함량(mat)은 표준 이름(메리노 울 → 울)으로 합치지만 원래 이름은 여기 남긴다(사람 2026-10-04
+            # 「섬유이름은 통일해도 코파일럿을 위해서 기록은 해둬야 돼」). 사람 · 코덱스가 옮겨 적은 것이 이기면 그 기록을 싣는다.
+            if r["source_url"] in manual_mat:
+                out[r["source_url"]]["mat_raw"] = " / ".join(MANUAL_MAT_RAW.get(r["source_url"], []))
+            elif out[r["source_url"]]["mat"]:
+                out[r["source_url"]]["mat_raw"] = mat_raw.get(r["source_url"], "")
+            mat_count += bool(mats.get(r["source_url"]))
+            # 소재 등급 · 원단 출처 — grade_origin 주석. 매장 되풀이 줄을 걷은 글 + 상품명에서 뽑고, 상품 증거(혼용률 · 소재 태그)와
+            # 어긋나는 것은 버린다. 혼용률의 섬유 함량(mat)은 그대로 — 등급은 별도 칸이다(코파일럿 세션 부탁 2026-10-03).
+            gtext = without_lines(body, store_lines) + "\n" + (r.get("name") or "")
+            gr = grade_origin.with_evidence(grade_origin.grades(gtext), out[r["source_url"]]["mat"],
+                                            (tags.get("material") if isinstance(tags, dict) else None) or [], r.get("name") or "")
+            og = grade_origin.origins(gtext)
+            out[r["source_url"]]["grade"] = gr
+            out[r["source_url"]]["origin"] = og
+            grade_count += bool(gr)
+            origin_count += bool(og)
+            # 착용감 · 계절감 — wear_feel 주석. 매장이 「신축성 없음」 「안감 없음」이라 적었으면 그 태그를 걷는다(「신축성이 전혀
+            # 없는 원단」이 function 신축성으로 붙었다). 이름이 스트레치라 하면 이름을 따른다.
+            fl = wear_feel.feel_of(gtext)
+            st = wear_feel.season_of(gtext)
+            if fl:
+                out[r["source_url"]]["feel"] = fl
+            if st:
+                out[r["source_url"]]["season_txt"] = st
+            feel_count.update(fl.keys())
+            feel_count["계절"] += bool(st)
+            if isinstance(tags, dict):
+                low_name = (r.get("name") or "").lower()
+                for k, ax, val, name_rx in (("신축성", "function", "신축성", r"stretch|스트레치|신축"), ("안감", "construction", "안감", r"lin(?:ed|ing)|안감")):
+                    if fl.get(k) == "없음" and val in (tags.get(ax) or []) and not re.search(name_rx, low_name):
+                        tags[ax] = [v for v in tags[ax] if v != val]
+                        if not tags[ax]:
+                            tags.pop(ax)
+            q_count[quality] += 1
+            for s in sources:
+                src_count[s] += 1
+            cat_count[r["category"] or "(없음)"] += 1
+            for ax in tags:
+                ax_count[ax] += 1
+
+    # --brands 로 몇 곳만 돌렸으면 나머지 브랜드의 태그를 지우면 안 된다. 예전엔 통째로
+    # 덮어써서 「--brands kirsh」 한 번에 파일이 38,341벌 → 1,796벌이 됐다. 그 순간에
+    # Actions 가 커밋했으면 36,545벌의 태그가 사라졌을 것이다(2026-09-05에 실제로 밟았다).
+    n_run = len(out)
+    if args.brands:
+        keep = set(args.brands)
+        prev = {}
+        if Path(args.out).exists():
+            try:
+                prev = json.loads(Path(args.out).read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                prev = {}
+        merged = {u: e for u, e in prev.items() if (e or {}).get("brand_slug") not in keep}
+        merged.update(out)
+        print(f"  --brands 로 {len(keep)}곳만 돌렸다 — 나머지 {len(merged) - len(out)}벌은 그대로 둔다")
+        out = merged
+    Path(args.out).write_text(json.dumps(out, ensure_ascii=False, indent=0), encoding="utf-8")
+    n = n_run             # 축 커버리지는 이번에 돌린 만큼으로 잰다(--brands 일 때 헷갈리지 않게)
+    print(f"상품 {len(out)} (이번에 돌린 것 {n}) → {args.out}")
+    print("품질:", dict(q_count))
+    print("본문 출처:", dict(src_count))
+    print(f"혼용률(mat) {mat_count} ({mat_count / max(n, 1):5.1%}) · 소재 등급(grade) {grade_count} · 원단 출처(origin) {origin_count}")
+    print("착용감 · 계절감:", " · ".join(f"{k} {c}" for k, c in feel_count.most_common()))
+    print("축 커버리지:")
+    for ax in AXES:
+        print(f"  {ax:15s} {ax_count[ax]:6d} ({ax_count[ax] / n:5.1%})")
+    if args.report:
+        val = {ax: Counter() for ax in AXES}
+        for e in out.values():
+            for ax, vs in e["tags"].items():
+                val[ax].update(vs)
+        for ax in AXES:
+            print(f"\n[{ax}]", ", ".join(f"{v} {c}" for v, c in val[ax].most_common(12)))
+
+
+if __name__ == "__main__":
+    main()

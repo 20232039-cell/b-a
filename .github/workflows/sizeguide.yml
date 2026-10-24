@@ -1,0 +1,103 @@
+# 눌러야 나오는 사이즈표 그림 거두기 — 브라우저 없이.
+#
+# 왜 있는가(2026-09-17, 사람이 상품 페이지를 직접 눌러 보고 알려 줬다): 사이즈표가
+# 「사이즈 가이드」 버튼이나 「SIZE CHART」 아코디언 뒤에 있는 매장이 많다. 그런데 그 둘 다
+# 자바스크립트가 필요 없었다 —
+#   · 버튼은 /product/sizeguide.html?product_no=N 을 레이어로 띄울 뿐이라 주소로 받아진다
+#   · 아코디언은 내용을 서버 HTML 에 두고 CSS 로 숨길 뿐이라 머리말 뒤를 보면 된다
+# 전수 조사에서 사이즈 없는 7,347벌 가운데 3,091벌(42%)에 읽을 그림이 생겼다.
+#
+# 비용: 상품 하나에 요청 두 번. 러너 하나로 30분 안팎.
+# 결과는 data/crawl/{sizeguide,pagesize}/<slug>.jsonl — ocr_detail_images 가 읽을 목록
+# 맨 앞에 끼워 읽는다. 그림을 새로 넣어도 OCR 판을 redo=true 로 띄워야 이미 읽은 상품이 열린다.
+
+name: sizeguide-images
+
+on:
+  schedule:
+    - cron: "20 5 * * *"       # 하루 한 번
+  workflow_dispatch:
+    inputs:
+      brands:
+        description: "쉼표로 나눈 slug 목록. 비우면 사이즈 없는 옷이 있는 매장 전부"
+        required: false
+        default: ""
+      source:
+        description: "sizeguide | page | both"
+        required: false
+        default: "both"
+      retext:
+        description: "true 면 그림만 받아 둔 상품도 다시 받아 **글**을 거둔다(글 거두기는 나중에 붙었다)"
+        required: false
+        default: "false"
+      force:
+        description: "true 면 이미 받아 둔 기록도 무시하고 전부 다시 받는다(파일을 새로 쓴다)"
+        required: false
+        default: "false"
+
+env:
+  DATA_BRANCH: crawl/cafe24-full-catalog
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sizeguide-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    # 매장 목록을 여섯 몫으로 나눠 러너 여섯 대가 동시에 돈다(2026-10-08 — 한 대로는 덜 채워진 옷 1만 벌에 세 시간 가까이 걸렸다).
+    # 매장 하나는 한 러너만 맡으므로 매장마다 요청 간격은 그대로다. 몫마다 다른 파일(매장별 jsonl)만 쓰니 푸시가 엉키지 않는다.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5]
+    defaults:
+      run:
+        working-directory: work
+    steps:
+      - uses: actions/checkout@v4
+      - name: 데이터 저장소(비공개) 받기
+        uses: ./.github/actions/data-repo
+        with:
+          token: ${{ secrets.DATA_TOKEN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -q requests beautifulsoup4 lxml
+      - name: 사이즈표 그림 받기
+        shell: bash
+        run: |
+          SRC="${{ inputs.source }}"; SRC="${SRC:-both}"
+          RT=""; [ "${{ inputs.retext }}" = "true" ] && RT="--retext"
+          [ "${{ inputs.force }}" = "true" ] && RT="$RT --force"
+          if [ -n "${{ inputs.brands }}" ]; then
+            python scripts/fetch_sizeguide.py --brands "${{ inputs.brands }}" \
+              --source "$SRC" --workers 4 --delay 0.2 $RT --shard "${{ matrix.shard }}/6"
+          else
+            python scripts/fetch_sizeguide.py --all-missing \
+              --source "$SRC" --workers 4 --delay 0.2 $RT --shard "${{ matrix.shard }}/6"
+          fi
+      # 크리마 핏 위젯이 실측표를 따로 들고 있는 매장(2026-09-25 전수: roem 184벌 · insilence).
+      # 주소 하나에 GET 한 번 — 사이즈 없는 옷만 본다. 받아 둔 상품은 건너뛴다.
+      - name: 크리마 핏 실측표 받기
+        if: matrix.shard == 0
+        shell: bash
+        run: python scripts/fetch_cremafit.py --brands "roem,insilence" --only-missing --delay 1
+      # 이미 받아 둔 상품은 건너뛰므로(sidecar 에 있으면 skip) 매번 돌려도 새것만 받는다.
+      - name: commit & push (rebase 후, 3회 재시도)
+        shell: bash
+        run: |
+          git add data/crawl/sizeguide/ data/crawl/pagesize/ data/crawl/cremafit/ 2>/dev/null || true
+          git diff --cached --quiet && { echo "새로 받은 것 없음"; exit 0; }
+          git commit -m "사이즈표 그림 (Actions, 몫 ${{ matrix.shard }}/6)"
+          # 몫 여섯이 거의 같은 때 끝나므로 푸시가 부딪친다 — 다시 받아 얹고, 기다리는 시간을 조금씩 어긋나게
+          for i in 1 2 3 4 5 6; do
+            git pull --rebase --autostash origin "$DATA_BRANCH" && git push && exit 0
+            git rebase --abort 2>/dev/null || true
+            echo "푸시 실패, 재시도 $i"; sleep $((10 + RANDOM % 30))
+          done
+          exit 1
