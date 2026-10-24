@@ -1,0 +1,131 @@
+# 브랜드 하나를 처음부터 수집한다 — 씨앗에는 있는데 상품이 0인 매장을 살리려고 만들었다.
+# 기존 워크플로는 전부 「이미 있는 상품」을 갱신하는 것이라, 새 매장을 들일 길이 없었다.
+# 필요한 것: Settings → Secrets and variables → Actions 에 DATA_TOKEN.
+name: crawl-brand
+
+on:
+  workflow_dispatch:
+    inputs:
+      brands:
+        description: "공백으로 나눈 slug 목록 (예: opus-0012 pog-service)"
+        required: true
+      workers:
+        description: "동시에 볼 매장 수 — 한 매장에는 언제나 초당 하나만 간다"
+        required: false
+        default: "2"
+      refresh:
+        description: "true 면 그 매장 파일을 비우고 새로 받는다"
+        required: false
+        default: "false"
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      DATA_BRANCH: crawl/cafe24-full-catalog
+    steps:
+      - uses: actions/checkout@v4
+      - name: 데이터 저장소(비공개) 받기
+        uses: ./.github/actions/data-repo
+        with: {token: "${{ secrets.DATA_TOKEN }}"}
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: pip install -q requests beautifulsoup4 lxml numpy
+      - name: 수집
+        working-directory: work
+        shell: bash   # pipefail — 매장이 예외로 죽으면 크롤러가 1로 끝나고, 이 단계가 빨갛게 남는다
+        run: |
+          python scripts/crawl_cafe24.py --brands ${{ inputs.brands }} \
+            --workers ${{ inputs.workers }} \
+            ${{ inputs.refresh == 'true' && '--refresh' || '' }} | tail -40
+      # 원본(jsonl)을 먼저 민다. 매장마다 파일이 따로라 겹칠 일이 없다.
+      - name: 원본 밀기
+        if: ${{ !cancelled() }}
+        working-directory: work
+        shell: bash
+        run: |
+          git config user.name "layer-crawl-bot"
+          git config user.email "crawl@layer.invalid"
+          git add data/crawl/
+          git diff --cached --quiet && { echo "새 원본 없음"; exit 0; }
+          git commit -m "새 매장 수집 $(date -u +%Y-%m-%d) — ${{ inputs.brands }} (Actions)"
+          for i in 1 2 3; do
+            git pull --rebase --autostash origin "$DATA_BRANCH" && git push && exit 0
+            # 매장별 jsonl 은 서로 겹칠 일이 없지만, 판마다 통째로 다시 쓰는 보고 파일
+            # (_summary.json · _members_only.json)은 동시에 돌면 반드시 부딪힌다.
+            # 그것 때문에 이번 수집을 버릴 이유가 없다 — 저쪽 것을 받고 이어간다.
+            if [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ]; then
+              for f in $(git diff --name-only --diff-filter=U | grep -E '^data/crawl/_[^/]*\.json$' || true); do
+                git checkout --ours -- "$f" && git add "$f"
+              done
+              if [ -z "$(git diff --name-only --diff-filter=U)" ]; then
+                git -c core.editor=true rebase --continue && git push && exit 0
+              fi
+              git rebase --abort 2>/dev/null || true
+            fi
+            echo "원본 푸시 실패, 재시도 $i"; sleep 10
+          done
+          exit 1
+      # 생성물은 원본에서 다시 만들면 그만이라, 부딪히면 저쪽 것을 버리고 새로 만든다.
+      - name: CSV · 사이즈 · 태그 재생성해 밀기
+        if: ${{ !cancelled() }}
+        working-directory: work
+        shell: bash
+        run: |
+          build() {
+            # 그림에서 읽어 둔 글을 먼저 뽑는다 — build-csv 가 「보여 줄 설명이 있나」를
+            # 여기 결과로 가린다(2026-09-20). 앞서는 이걸 ocr 판에서만 돌려서, OCR 은
+            # 189곳을 읽어 뒀는데 뽑아 둔 것은 121곳뿐이었다.
+            python scripts/detail_from_ocr.py | tail -3
+            python scripts/crawl_cafe24.py --build-csv | tail -3
+            python scripts/size_from_ocr.py | tail -4
+            python scripts/tag_items.py | tail -3   # 태그가 사진보다 먼저 — photo_fill 이 넥라인을 태그에 채우므로(2026-10-05)
+            python scripts/photo_fill.py | tail -4   # 사진으로 소매 · 넥라인 채우기(확신 ≥0.8, 2026-10-05)
+            python scripts/refine_items.py | tail -2   # 소매 실측 · 태그로 반팔 · 롱슬리브 · 하프셔츠 다듬기(2026-10-05)
+          }
+          GEN="data/products_full.csv data/product_sizes.json data/product_tags_full.json data/gender_basis.json data/photo_pred.json"
+          # 생성물을 만든 원본의 자리. 밀기가 막혔을 때 그 사이 원본이 바뀌었는지 이것과 견준다.
+          BASE=$(git rev-parse HEAD)
+          INPUTS="data/crawl data/manual_sizes.csv data/manual_items.csv data/size_labels.json data/vocab_aliases.json"
+          build
+          for i in 1 2 3; do
+            git add $GEN data/crawl/detail
+            git diff --cached --quiet && { echo "변화 없음"; exit 0; }
+            git commit -m "생성물 재생성 $(date -u +%Y-%m-%d) (Actions)"
+            git push && exit 0
+            # 밀기가 막혔다 — 그 사이 다른 판(fill-gaps·ocr)이 밀었다는 뜻이다.
+            #
+            # 예전엔 여기서 reset --hard 하고 **처음부터 두 시간을 다시 만들었다.** 정기 판이 몇 시간마다
+            # 밀기 때문에 두 시간짜리 재생성은 거의 언제나 한 번은 막힌다 — 2026-09-20 에 세 판이 내리
+            # 헛돌고 350분 제한에 걸렸다. 그래서 남의 커밋 위에 **우리 생성물을 그대로 얹었다.**
+            #
+            # 그런데 얹기가 맞는 것은 **그 사이 원본이 안 바뀌었을 때뿐이다.** 원본이 바뀌었으면 우리 것은
+            # 옛 원본의 함수라, 남이 새 원본으로 만든 생성물을 뒤로 돌린다 — 2026-09-29 밤 gongdreen 판
+            # (19:03 에 원본을 받음)이 20:01 OCR 판이 민 사이즈 위에 얹혀 실측 +424벌이 네 시간 빠졌다.
+            # 그때는 합친 나무에서 **CSV · 사이즈만 다시 만든다**(20~30분). 태그(80분 넘음)는 우리 것을
+            # 얹고 다음 판에 맡긴다 — 태그는 설명글이 주로 정하고 우리 새 매장 몫이 거기 들어 있다.
+            git fetch origin "$DATA_BRANCH"
+            rm -rf /tmp/gen && mkdir -p /tmp/gen
+            cp $GEN /tmp/gen/
+            cp -r data/crawl/detail /tmp/gen/detail
+            if git diff --quiet "$BASE" "origin/$DATA_BRANCH" -- $INPUTS; then
+              echo "밀기 막힘 $i — 원본은 그대로다. 남의 커밋을 받고 **우리 생성물을 그 위에 얹는다**"
+              git reset --hard "origin/$DATA_BRANCH"
+              cp /tmp/gen/products_full.csv /tmp/gen/product_sizes.json /tmp/gen/product_tags_full.json /tmp/gen/gender_basis.json data/
+              mkdir -p data/crawl/detail && cp -r /tmp/gen/detail/. data/crawl/detail/
+            else
+              echo "밀기 막힘 $i — 그 사이 원본이 바뀌었다. 합친 나무에서 CSV · 사이즈를 다시 만든다"
+              git diff --stat "$BASE" "origin/$DATA_BRANCH" -- $INPUTS | tail -3
+              git reset --hard "origin/$DATA_BRANCH"
+              BASE=$(git rev-parse HEAD)
+              python scripts/detail_from_ocr.py | tail -3
+              python scripts/crawl_cafe24.py --build-csv | tail -3
+              python scripts/size_from_ocr.py | tail -4
+              python scripts/photo_fill.py | tail -4   # 사진으로 소매 · 넥라인 채우기(확신 ≥0.8, 2026-10-05)
+              python scripts/refine_items.py | tail -2   # 소매 실측 · 태그로 반팔 · 롱슬리브 · 하프셔츠 다듬기(2026-10-05)
+              cp /tmp/gen/product_tags_full.json data/
+            fi
+            sleep 5
+          done
+          exit 1

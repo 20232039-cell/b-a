@@ -1,0 +1,56 @@
+# 이 저장소는 공개라 Actions 아티팩트를 누구나 내려받는다(2026-10-04 확인 — 수집 조각이 그대로 열려 있었다).
+# 조각은 잠가서 올리고, 합치는 잡에서 풀어 쓴다. 열쇠는 DATA_TOKEN 에서 뽑으니 새 비밀값이 필요 없다.
+name: 조각 잠그기 · 풀기
+description: 잡 사이에 넘기는 수집 조각(아티팩트)을 암호로 잠그고 푼다
+inputs:
+  mode:
+    description: lock 또는 unlock
+    required: true
+  dir:
+    description: lock — 잠글 파일이 있는 폴더 / unlock — 내려받은 폴더 (작업공간 기준)
+    required: true
+  files:
+    description: lock — dir 안에서 잠글 파일 패턴(공백으로 여럿)
+    required: false
+    default: "*"
+  out:
+    description: lock — 만들 .enc 파일 (작업공간 기준)
+    required: false
+    default: ""
+  key:
+    description: secrets.DATA_TOKEN
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        K: ${{ inputs.key }}
+        MODE: ${{ inputs.mode }}
+        DIR: ${{ inputs.dir }}
+        FILES: ${{ inputs.files }}
+        OUT: ${{ inputs.out }}
+      run: |
+        set -euo pipefail
+        shopt -s nullglob
+        [ -n "$K" ] || { echo "열쇠(DATA_TOKEN)가 없다 — 잠그지 않은 조각은 올리지 않는다"; exit 1; }
+        ENC=(openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -md sha256)
+        if [ "$MODE" = lock ]; then
+          [ -n "$OUT" ] || { echo "out 이 비었다"; exit 1; }
+          OUT="$GITHUB_WORKSPACE/$OUT"; mkdir -p "$(dirname "$OUT")"
+          cd "$GITHUB_WORKSPACE/$DIR" 2>/dev/null || { echo "잠글 것 없음 ($DIR 없음)"; exit 0; }
+          files=( $FILES )
+          [ ${#files[@]} -gt 0 ] || { echo "잠글 것 없음"; exit 0; }
+          tar czf - "${files[@]}" | "${ENC[@]}" -salt -pass env:K -out "$OUT"
+          echo "잠금 — 파일 ${#files[@]}개 → $(basename "$OUT") ($(du -h "$OUT" | cut -f1))"
+        elif [ "$MODE" = unlock ]; then
+          cd "$GITHUB_WORKSPACE/$DIR" 2>/dev/null || { echo "풀 것 없음 ($DIR 없음)"; exit 0; }
+          n=0
+          for f in *.enc; do
+            "${ENC[@]}" -d -pass env:K -in "$f" | tar xzf -
+            rm -f "$f"; n=$((n + 1))
+          done
+          echo "풂 — 조각 $n개"
+        else
+          echo "mode 는 lock 또는 unlock"; exit 1
+        fi

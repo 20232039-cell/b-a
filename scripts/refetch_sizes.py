@@ -1,0 +1,329 @@
+"""상세를 다시 열어 고른 필드만 갱신한다 — 기본은 사이즈 표, --fields text 를 주면 설명(description·detail_text·spec·detail_images)도.
+
+왜: 파서가 놓치던 표 모양(rssc 의 행렬 표, 2026-09-03)을 고친 뒤 그 브랜드의 표만 채우려고. 전체 재수집은
+설명·이미지까지 다시 받아 무겁고, 사람 결정으로 설명은 갱신하지 않는다.
+사용: py scripts/refetch_sizes.py --brands rssc [--only-missing]
+      py scripts/refetch_sizes.py --brands all --fields size,text --select short-desc-or-no-size   # 2026-09-03 1회 보정
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import re
+import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from urllib.parse import urlparse
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import crawl_cafe24 as cc  # noqa: E402
+from weekly_update import load_rows, save_rows  # noqa: E402
+
+
+GARMENT_CATS = {"Tops", "Pants", "Outerwear", "Knitwear", "Shirts", "Denim", "Skirts", "Dresses", ""}
+
+
+# 파이썬 str.splitlines() 는 U+0085(NEL)·U+2028·U+2029 도 줄바꿈으로 센다. json.dumps 는
+# ensure_ascii=False 면 그것들을 그대로 흘리므로, 그런 글자가 든 줄은 **읽는 쪽에서
+# 조각나고 통째로 버려진다** — 아무 소리 없이. 2026-09-15 에 wiggle-wiggle 에서 잡았다:
+# 매장이 준 그림 주소에 잘못 디코드된 한글 자모가 섞여 0x85 바이트가 U+0085 로 들어갔고,
+# 상품 한 벌이 조각 셋으로 흩어져 사라졌다. 쓸 때 escape 해 둔다 — 읽는 쪽 서른두 자리를
+# 전부 고치는 것보다 한 자리를 막는 쪽이 확실하다.
+_LINE_SEPS = str.maketrans({"\u0085": "\\u0085", "\u2028": "\\u2028", "\u2029": "\\u2029"})
+
+
+def jsonl_line(obj) -> str:
+    """JSONL 한 줄 — 줄바꿈으로 세어지는 글자를 escape 해서 낸다."""
+    return json.dumps(obj, ensure_ascii=False).translate(_LINE_SEPS)
+
+
+def _epoch(stamp: str) -> float:
+    try:
+        return time.mktime(time.strptime(stamp[:19], "%Y-%m-%dT%H:%M:%S"))
+    except Exception:
+        return 0.0
+
+
+_GAPS: set | None = None
+
+
+def _gap_urls() -> set:
+    """사이즈·소재·색·디테일 가운데 하나라도 빈 상품. 판독기의 --select gaps 와 같은 잣대다.
+
+    사람 지시(2026-09-05): 「html에 소재 디테일 있으면 그걸로 끝. 없으면 이미지 받아서 찾고」.
+    그래서 채우기 한 바퀴는 HTML 을 먼저 다시 열고, 그러고도 빈 것만 판독기로 넘긴다.
+    """
+    global _GAPS
+    if _GAPS is None:
+        root = cc.CRAWL_DIR.parent
+        sp, tp = root / "product_sizes.json", root / "product_tags_full.json"
+        have = set(json.loads(sp.read_text(encoding="utf-8"))) if sp.exists() else set()
+        tg = json.loads(tp.read_text(encoding="utf-8")) if tp.exists() else {}
+        _GAPS = {u for u, p in tg.items()
+                 if (u not in have or not (p or {}).get("tags", {}).get("material")
+                     or not (p or {}).get("tags", {}).get("color")
+                     or not ((p or {}).get("tags", {}).get("design_element")
+                             or (p or {}).get("tags", {}).get("construction")
+                             or (p or {}).get("tags", {}).get("hardware")))}
+    return _GAPS
+
+
+_NONAME: set | None = None
+
+
+def _noname_urls() -> set:
+    """사이즈 표는 두 칸 이상인데 이름이 없는 상품. 그 이름은 구매 옵션에만 있다.
+
+    수집기가 `<select>` 만 보던 탓에 옵션이 아예 안 걷힌 상품이 3,685벌이다(2026-09-07,
+    커밋 e01917d). 단추 목록을 읽도록 고쳤지만 채우기 한 바퀴가 훑는 것은 「빈 축이 있는
+    상품」이라 이 옷들에는 좀처럼 닿지 않는다 — run #16 에서 옵션이 새로 붙은 것이 25벌뿐이었다.
+    그래서 이 옷들만 골라 한 번 다시 열 갈래를 둔다.
+    """
+    global _NONAME
+    if _NONAME is None:
+        sp = cc.CRAWL_DIR.parent / "product_sizes.json"
+        out = json.loads(sp.read_text(encoding="utf-8")) if sp.exists() else {}
+        _NONAME = {u for u, e in out.items()
+                   if not (e or {}).get("size_names")
+                   and max((len(v) for v in ((e or {}).get("sizes") or {}).values()), default=0) > 1}
+    return _NONAME
+
+
+_DUPS: set | None = None
+
+
+def _dup_urls() -> set:
+    """브랜드·이름·색·값이 같은데 접히지 않고 남은 상품. 구매 옵션이 갈라 준다.
+
+    coor 「머드 다잉 패디드 데님 자켓 (워시드인디고)」 288,000원 두 벌을 실제로 열어 보니
+    no=2453 은 사이즈가 S·M·L·XL 이고 no=2610 은 「WOMEN FREE」였다. 같은 옷의 남성 사이즈와
+    여성 프리 사이즈를 따로 올린 것이다 — 접으면 한쪽을 잃는다(어깨 54.0 대 50.0 이 그래서다).
+    그런데 이 옷들은 사이즈 표가 한 칸이라 no-size-name 갈래에 안 걸려 옵션을 못 받았다.
+    옵션을 받아 두면 접을지 말지가 짐작이 아니라 근거로 갈린다(2026-09-07).
+    """
+    global _DUPS
+    if _DUPS is None:
+        import collections
+        g = collections.defaultdict(list)
+        with (cc.DATA / "products_full.csv").open(encoding="utf-8-sig") as f:
+            for r in csv.DictReader(f):
+                g[(r["brand_slug"], (r["name"] or "").strip().casefold(),
+                   (r.get("representative_color") or "").strip().casefold(), r["price"])].append(r["source_url"])
+        _DUPS = {u for v in g.values() if len(v) > 1 for u in v}
+    return _DUPS
+
+
+def wants(d: dict, select: str, cat: str) -> bool:
+    if select == "all":
+        return True
+    if select == "gaps":
+        # 매장에 예의: 한 번 다시 열어 보고도 안 채워진 상품을 네 시간마다 또 두드리지 않는다.
+        # 사흘은 지나야 다시 본다(그 사이 매장이 상세를 고쳤을 수 있다). 처음 도는 판에서는
+        # 아무도 이 표시가 없으니 전부 대상이 되고, 두 바퀴째부터는 새로 빈 것만 남는다.
+        seen = d.get("gaps_seen_at") or ""
+        if seen and (time.time() - _epoch(seen)) < 3 * 86400:
+            return False
+        return cat in GARMENT_CATS and d.get("source_url") in _gap_urls()
+    if select == "garments":
+        return cat in GARMENT_CATS          # 옷 전부(액세서리·가방·신발 제외) — 파서를 고친 뒤 한 번 다시 받을 때
+    if select == "no-size":
+        return not d.get("size_table")
+    if select == "soldout-unmarked":
+        # 매장 딱지는 품절인데 옵션에 품절 표시가 없어 판매중으로 내보낸 상품 — 재고 숫자로 다시 가린다(2026-10-04)
+        return bool(d.get("soldout")) and not d.get("delisted") and not cc.is_soldout(d)
+    if select == "dups":
+        # 같은 이름·색·값으로 여러 벌 남은 상품 — 옵션을 받아 접을지 말지를 가린다
+        return d.get("source_url") in _dup_urls()
+    if select == "no-size-name":
+        # 표는 있는데 이름이 없는 옷 — 구매 옵션을 다시 받아 이름을 채운다
+        return d.get("source_url") in _noname_urls()
+    if select == "no-detail-images":
+        # 상세 그림을 한 장도 못 건진 상품 — 수집기가 그림을 버렸던 자리다
+        # (2026-09-05: 이름에 「logo」가 든 옷 611벌이 그랬다)
+        return not d.get("detail_images")
+    # short-desc-or-no-size: JSON-LD 요약(≤300자)만 있거나, 옷인데 사이즈 표가 없는 것
+    short = d.get("description_source") == "json-ld" and len(d.get("description") or "") <= 300
+    nosize = not d.get("size_table") and cat in GARMENT_CATS
+    return short or nosize
+
+
+def refetch(http: cc.PoliteSession, shop: cc.Shop, only_missing: bool, log, fields=("size",), select="no-size", cats=None,
+            shard=(0, 1), out_dir: Path | None = None, max_minutes: float = 0) -> dict:
+    """shard=(k, n): 대상을 product_no 순으로 n등분해 k번째만. out_dir 를 주면 본 파일을 건드리지 않고 갱신한 행만
+    out_dir/<slug>.<k>.jsonl 에 쓴다 — Actions 러너 여럿이 같은 브랜드를 나눠 받을 때(collect 가 합친다)."""
+    path = cc.CRAWL_DIR / f"{shop.slug}.jsonl"
+    rows = load_rows(path)
+    cc.load_robots(http, shop)
+    home = http.get(shop.base + "/", retries=1)
+    if home is not None and home.status_code == 200:
+        fin = urlparse(home.url)
+        shop.base = f"{fin.scheme}://{fin.netloc}"
+    cats = cats or {}
+    sel = "no-size" if only_missing else select
+    todo = sorted(no for no, d in rows.items() if (d.get("price") or 0) > 1000 and wants(d, sel, cats.get(no, "")))
+    k, n = shard
+    todo = todo[k::n]
+    touched: list[int] = []
+    got = fail = 0
+    started = time.time()
+    # 한 매장이 유독 느리면 그 브랜드만 접고 나머지를 살린다 — amomento 는 259건에 요청당 25초가 걸려
+    # (우리 대기는 1초다) 묶음 하나가 전체 run 을 108분 붙잡았다(2026-09-04). 나머지 11묶음은 32분 안에 끝났다.
+    for i, no in enumerate(todo, 1):
+        if max_minutes and (time.time() - started) / 60 > max_minutes:
+            log(f"[{shop.slug}] 시간 상한 {max_minutes:.0f}분 초과 — {i - 1}/{len(todo)} 에서 접는다(나머지는 다음 실행에)")
+            break
+        # 진행 줄을 여기서 찍는다. 예전에는 이 print 가 고리 맨 끝에 있었는데, --fields 에 text 가
+        # 들면 상세를 새로 읽고 성공한 자리에서 곧바로 continue 하기 때문에 절대 닿지 못했다.
+        # 그래서 큰 매장(insilence 1,035 · xlim 689)을 두 시간 돌려도 로그가 한 줄도 안 나와
+        # 멈춘 것처럼 보였다 — 실은 잘 돌고 있었다(2026-09-07).
+        if i % 100 == 1 and i > 1:
+            log(f"[{shop.slug}] … {i - 1}/{len(todo)} · 표 {got}")
+        d = rows[no]
+        url = d.get("source_url", "")
+        url = url if cc.product_no_of(url) else f"{shop.base}/product/detail.html?product_no={no}"
+        if not shop.allowed(url):
+            continue
+        r = http.get(url, retries=2)
+        if r is None or r.status_code != 200:
+            fail += 1
+            continue
+        if "stock" in fields and "text" not in fields:
+            # 가벼운 판: 품절 딱지와 재고 숫자만 다시 읽는다(설명·표는 건드리지 않는다)
+            m = re.search(r"(?:is_)?soldout_icon\s*=\s*'(\w)'", r.text)
+            if m:
+                d["soldout"] = m.group(1) == "T"
+            d["stock"] = cc.stock_state(r.text)
+            d["stock_checked_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+            touched.append(no)
+            if d["stock"] == "all0":
+                got += 1
+            continue
+        if "text" in fields:
+            nd = cc.parse_detail(r.text, url, shop)
+            # 예전에는 「값이 있을 때만」 받아 적었다. 값이 사라진 줄은 통째로 건너뛰었으니
+            # 두 시간마다 도는 이 일이 품절도, 값 변동도 적지 못했다(창고 40,880줄에
+            # price_log 0줄, 실측 2026-09-06). 여기 오는 것은 이미 값 1,000원 넘게 받아 둔
+            # 진짜 상품이라, 이름은 읽히는데 값만 없으면 매장이 품절 상품의 값을 내린 것이다.
+            if nd and (nd.get("price") or nd.get("name")):
+                prev = dict(d)          # 덮어쓰기 전 옛 줄 — carry_over 가 이걸 본다
+                # options 도 받아 적는다 — 사이즈 표에 이름을 붙이는 유일한 출처인데
+                # 이 목록에 없어서, 수집기를 고쳐도 창고에는 영원히 안 들어왔다(2026-09-07).
+                # gallery 도 받아 적는다 — 수집기가 갤러리에서 남의 상품 사진을 걷어 내게
+                # 고쳤는데(b-a 173d670), 이 목록에 없어서 창고에는 영영 안 들어왔다.
+                # 빈 값은 안 받으므로(아래 조건) 새로 읽어 한 장도 못 얻으면 옛것이 남는다 —
+                # 줄어드는 쪽으로만 바뀌니 안전하다(2026-09-21 사람 제보로 고침).
+                for key in ("description", "description_source", "detail_text", "spec", "detail_images",
+                            "gallery", "size_table", "soldout", "price", "options", "soldout_options", "options_all", "stock"):
+                    if nd.get(key) not in (None, "", [], {}):
+                        d[key] = nd[key]
+                if not nd.get("price"):
+                    d["price_missing"] = True
+                    d["soldout"] = True
+                d["refetched_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+                if sel == "gaps":
+                    d["gaps_seen_at"] = d["refetched_at"]
+                cc.carry_over(prev, d, d["refetched_at"])
+                touched.append(no)
+                if nd.get("size_table"):
+                    got += 1
+                continue
+        # 「size」만 받을 때도 <table> 파서를 먼저 태운다 — 글자열 파서만 쓰면 칸 이름을 못 만들고
+        # 「소매기장」을 「기장」으로 잘라 읽는다. 그리고 이미 있는 표보다 나쁘면 덮지 않는다
+        # (2026-09-11 select=all 한 판에 6매장 1,396벌이 사이즈 이름을, 436벌이 라벨을 잃었다).
+        st = cc.extract_size_any(r.text)
+        if cc.table_is_better(st, d.get("size_table") or {}):
+            d["size_table"] = st
+            d["size_source"] = "html"
+            touched.append(no)
+            got += 1
+    if out_dir:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        with (out_dir / f"{shop.slug}.{k}.jsonl").open("w", encoding="utf-8") as f:
+            for no in touched:
+                f.write(jsonl_line(rows[no]) + "\n")
+    else:
+        save_rows(path, rows)
+    log(f"[{shop.slug}] 끝 — 대상 {len(todo)} (조각 {k + 1}/{n}) · 표 얻음 {got} · 갱신 {len(touched)} · 실패 {fail}")
+    return {"slug": shop.slug, "todo": len(todo), "got": got, "failed": fail}
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--brands", nargs="+", required=True)
+    ap.add_argument("--only-missing", action="store_true")
+    ap.add_argument("--workers", type=int, default=6)
+    ap.add_argument("--fields", default="size", help="size · size,text · stock(품절 딱지와 재고 숫자만)")
+    ap.add_argument("--select", default="no-size", choices=["no-size", "no-size-name", "dups", "short-desc-or-no-size", "no-detail-images", "garments", "gaps", "soldout-unmarked", "all"])
+    ap.add_argument("--shard", default="1/1", help="k/n (Actions 샤딩)")
+    ap.add_argument("--out-dir", help="갱신 행만 조각 파일로 (collect 가 합침)")
+    ap.add_argument("--max-minutes", type=float, default=0, help="브랜드 하나에 쓸 시간 상한(분) — 넘으면 그 브랜드만 접는다")
+    ap.add_argument("--plan", action="store_true", help="브랜드별 대상 수만 JSON 으로 출력 (매트릭스 계획용)")
+    ap.add_argument("--units", help="러너 하나가 동시에 맡을 (브랜드:k/n) 묶음, 쉼표로 — 계정 동시 실행 한도(20잡) 안에서 처리량을 올린다")
+    args = ap.parse_args()
+    k, n = (int(x) for x in args.shard.split("/"))
+    shard = (k - 1, n)
+    out_dir = Path(args.out_dir) if args.out_dir else None
+    fields = tuple(x.strip() for x in args.fields.split(","))
+    cats: dict[str, dict[int, str]] = {}
+    for r in csv.DictReader(open(cc.DATA / "products_full.csv", encoding="utf-8-sig")):
+        cats.setdefault(r["brand_slug"], {})[int(r["product_no"])] = r["category"]
+    if args.brands == ["all"]:
+        args.brands = sorted(p.stem for p in cc.CRAWL_DIR.glob("*.jsonl") if not p.name.startswith("_"))
+    # 카페24 가 아닌 매장(platforms.py)은 다시 받지 않는다. 그 수집기가 판마다 표·설명을 새로
+    # 읽고, 이 스크립트는 카페24 상세 페이지 모양으로 읽으므로 멀쩡한 값을 덮어쓴다.
+    import platforms
+    args.brands = [b for b in args.brands if b not in platforms.NOT_CAFE24]
+    with cc.BRANDS_CSV.open(encoding="utf-8-sig") as f:
+        brands = {r["slug"]: r for r in csv.DictReader(f)}
+    shops = []
+    for s in args.brands:
+        if s not in brands or not brands[s].get("official_url"):
+            continue
+        u = urlparse(brands[s]["official_url"].strip())
+        shops.append(cc.Shop(slug=s, base=f"{u.scheme or 'https'}://{u.netloc}", brand_gender="UNISEX"))
+    if args.units:
+        # 묶음 실행: 서로 다른 호스트를 스레드로 동시에(호스트당 1초 예의는 PoliteSession 이 지킨다)
+        units = []
+        for u in args.units.split(","):
+            brand, sh = u.strip().split(":")
+            if brand in platforms.NOT_CAFE24:
+                continue
+            k, n = (int(x) for x in sh.split("/"))
+            if brand in brands and brands[brand].get("official_url"):
+                pu = urlparse(brands[brand]["official_url"].strip())
+                units.append((cc.Shop(slug=brand, base=f"{pu.scheme or 'https'}://{pu.netloc}", brand_gender="UNISEX"), (k - 1, n)))
+        http = cc.PoliteSession(delay=1.0)
+        lock = threading.Lock()
+
+        def ulog(m):
+            with lock:
+                print(f"{time.strftime('%H:%M:%S')} {m}", flush=True)
+        with ThreadPoolExecutor(max_workers=max(1, len(units))) as ex:
+            for fut in as_completed([ex.submit(refetch, http, sh, False, ulog, fields, args.select, cats.get(sh.slug), shard_u, out_dir, args.max_minutes) for sh, shard_u in units]):
+                fut.result()
+        return
+    if args.plan:
+        plan = {}
+        for sh in shops:
+            rows = load_rows(cc.CRAWL_DIR / f"{sh.slug}.jsonl")
+            c = cats.get(sh.slug, {})
+            plan[sh.slug] = sum(1 for no, d in rows.items() if (d.get("price") or 0) > 1000 and wants(d, args.select, c.get(no, "")))
+        print(json.dumps(plan, ensure_ascii=False))
+        return
+    http = cc.PoliteSession(delay=1.0)
+    lock = threading.Lock()
+
+    def log(m):
+        with lock:
+            print(f"{time.strftime('%H:%M:%S')} {m}", flush=True)
+
+    with ThreadPoolExecutor(max_workers=args.workers) as ex:
+        for fut in as_completed([ex.submit(refetch, http, sh, args.only_missing, log, fields, args.select, cats.get(sh.slug), shard, out_dir, args.max_minutes) for sh in shops]):
+            fut.result()
+
+
+if __name__ == "__main__":
+    main()

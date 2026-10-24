@@ -1,0 +1,33 @@
+name: rep-images
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: work
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/data-repo
+        with:
+          token: ${{ secrets.DATA_TOKEN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -q pillow requests
+      - run: python -u scripts/check_rep_images.py
+      - name: commit & push
+        shell: bash
+        run: |
+          git add data/rep_image_fix.json
+          git diff --cached --quiet && exit 0
+          git commit -qm "대표 사진 색 칩 → 갤러리 사진 (Actions)"
+          for i in 1 2 3 4 5; do
+            git pull -q --rebase --autostash origin crawl/cafe24-full-catalog && git push -q && exit 0
+            git rebase --abort 2>/dev/null || true; sleep $((10 + RANDOM % 30))
+          done
+          exit 1

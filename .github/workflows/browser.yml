@@ -1,0 +1,233 @@
+# 브라우저 수집 — 자바스크립트가 그리는 것을 거둔다.
+#
+# 왜 필요한가(2026-09-04 확인): requests + BeautifulSoup 로는 안 보이는 것이 있다.
+#   · diafvine 사이즈표 — 페이지는 200 으로 받아지고 상품명·가격도 있는데 「어깨/가슴/총장」이
+#     0개다. 표를 자바스크립트가 그린다. 사이즈 22% 에 머문 원인이고, 얻은 23개는 전부 표가
+#     그림으로 들어간 상품에서 OCR 로 건진 것이었다.
+#   · perenn 소재 — 소재 없는 62벌 중 53벌이 설명글에 소재 낱말이 아예 없다.
+#
+# coor 는 여기 넣지 않는다 — 사진 주소가 HTML 글 안에 있어서(img 태그가 아니라 스크립트 안)
+# 크롤러 정규식으로 해결했다. 브라우저까지 쓸 필요가 없었다.
+#
+# 왜 Actions 인가: 에이전트 세션의 프록시로는 크로미움이 못 나간다(ws_closed_mid_exchange —
+# requests 는 되는데 브라우저 연결만 중간에 끊긴다). 러너는 그 제약이 없다.
+#
+# 비용: 상품당 4초 안팎(페이지 열고 2.5초 기다림 + 예절 간격). 브랜드마다 러너 하나.
+
+name: browser-collect
+
+on:
+  workflow_dispatch:
+    inputs:
+      brands:
+        description: "공백으로 나눈 slug 목록"
+        required: true
+        default: "diafvine perenn"
+      limit:
+        description: "브랜드마다 최대 상품 수"
+        required: false
+        default: "60"
+      only_missing:
+        description: "size(사이즈 없는 것) | material(소재 없는 것) | any | none"
+        required: false
+        default: "any"
+      mode:
+        description: "collect(상품 수집) | lookbook(룩북에 상품 링크가 있는지 조사)"
+        required: false
+        default: "collect"
+
+env:
+  DATA_BRANCH: crawl/cafe24-full-catalog
+
+permissions:
+  contents: read
+  actions: write   # 이 판의 아티팩트를 지운다
+
+concurrency:
+  group: browser-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: work
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 데이터 저장소(비공개) 받기
+        uses: ./.github/actions/data-repo
+        with:
+          token: ${{ secrets.DATA_TOKEN }}
+      - id: plan
+        shell: bash
+        run: |
+          matrix=$(LIST="${{ inputs.brands }}" python3 -c '
+          import json, os
+          print(json.dumps({"include": [{"brand": b} for b in os.environ["LIST"].split()]}))')
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "브랜드: ${{ inputs.brands }}"
+
+  collect:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    defaults:
+      run:
+        working-directory: work
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 데이터 저장소(비공개) 받기
+        uses: ./.github/actions/data-repo
+        with:
+          token: ${{ secrets.DATA_TOKEN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: playwright + chromium
+        run: |
+          pip install -q playwright
+          python -m playwright install --with-deps chromium
+      - name: ${{ matrix.brand }} 열기
+        run: |
+          if [ "${{ inputs.mode }}" = "lookbook" ]; then
+            python scripts/browser_collect.py --brands "${{ matrix.brand }}" --lookbook
+            exit 0
+          fi
+          ONLY=""
+          case "${{ inputs.only_missing }}" in
+            size|material|any) ONLY="--only-missing ${{ inputs.only_missing }}" ;;
+          esac
+          python scripts/browser_collect.py --brands "${{ matrix.brand }}" \
+            --limit "${{ inputs.limit }}" $ONLY
+      # 조각이 시간 상한에 걸려 취소되면 이 단계가 건너뛰어져, 이미 모아 둔 결과가
+      # 러너와 함께 버려진다 — 부분 결과도 그 자체로 온전한 기록이라 합치면 그만큼 이득이다.
+      # 공개 저장소라 아티팩트는 누구나 받는다 — 잠가서 올리고 합치는 잡에서 푼다(2026-10-04).
+      - name: 조각 잠그기
+        if: always()
+        uses: ./.github/actions/parts-lock
+        with:
+          mode: lock
+          dir: work/data/crawl/browser
+          files: "*.jsonl lookbook_survey.json"
+          out: _enc/browser-${{ matrix.brand }}.enc
+          key: ${{ secrets.DATA_TOKEN }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-${{ matrix.brand }}
+          path: _enc/*.enc
+          if-no-files-found: ignore
+          retention-days: 1
+
+  merge:
+    needs: collect
+    if: always()
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: work
+    steps:
+      - uses: actions/checkout@v4
+      - name: 데이터 저장소(비공개) 받기
+        uses: ./.github/actions/data-repo
+        with:
+          token: ${{ secrets.DATA_TOKEN }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: browser-*
+          path: work/_parts
+          merge-multiple: true
+      - name: 조각 풀기
+        uses: ./.github/actions/parts-lock
+        with:
+          mode: unlock
+          dir: work/_parts
+          key: ${{ secrets.DATA_TOKEN }}
+      - name: data/crawl/browser 로 합치기
+        shell: bash
+        run: |
+          mkdir -p data/crawl/browser
+          python3 - <<'PY'
+          import json, glob, os
+          n = t = i = g = bad = 0
+          def load_into(path, have):
+              """깨진 줄 하나에 합치기 전체가 죽지 않게 한다 — 러너가 시간 제한으로 잘리면
+              마지막 줄이 반 토막으로 남는다(2026-09-10 merge 잡 JSONDecodeError)."""
+              global bad
+              if not os.path.exists(path):
+                  return
+              for l in open(path, encoding="utf-8"):
+                  if not l.strip():
+                      continue
+                  try:
+                      d = json.loads(l)
+                  except json.JSONDecodeError:
+                      bad += 1
+                      continue
+                  if d.get("source_url"):
+                      have[d["source_url"]] = d
+          for p in sorted(glob.glob("_parts/*.jsonl")):
+              brand = os.path.basename(p)[:-6]
+              dst = f"data/crawl/browser/{brand}.jsonl"
+              have = {}
+              load_into(dst, have)
+              load_into(p, have)
+              with open(dst, "w", encoding="utf-8") as f:
+                  for d in have.values():
+                      f.write(json.dumps(d, ensure_ascii=False) + "\n")
+              n += len(have)
+              t += sum(1 for d in have.values() if d.get("size_table_raw"))
+              i += sum(1 for d in have.values() if d.get("images"))
+              g += sum(1 for d in have.values() if d.get("size_images"))
+          named = 0
+          for p in sorted(glob.glob("_parts/*.jsonl")):
+              dst = f"data/crawl/browser/{os.path.basename(p)[:-6]}.jsonl"
+              h = {}
+              load_into(dst, h)
+              named += sum(1 for d in h.values() if (d.get("size_table_raw") or {}).get("_names"))
+          print(f"브라우저로 본 상품 {n} · 표 얻은 것 {t} · 그중 사이즈 이름까지 {named}"
+                + f" · 눌러서 그림이 나온 것 {g} · 사진 얻은 것 {i}"
+                + (f" · 깨진 줄 {bad}개 건너뜀" if bad else ""))
+          PY
+      - name: commit & push (rebase 후, 3회 재시도)
+        shell: bash
+        run: |
+          git add data/crawl/browser/
+          git diff --cached --quiet && { echo "변화 없음"; exit 0; }
+          git commit -m "브라우저 수집 결과 (Actions)"
+          for i in 1 2 3; do
+            git pull --rebase --autostash origin "$DATA_BRANCH" && git push && exit 0
+            # 생성물이 부딪히면 저쪽 것을 받는다 — 원본에서 다시 만들면 그만이고,
+            # 여기서 멈추면 이번 수집이 통째로 날아간다.
+            if [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ]; then
+              # 판마다 통째로 다시 만드는 것들 — 생성물 셋과 보고 파일. 부딪히면 저쪽 것을
+              # 받는다. 원본에서 다시 만들면 그만이라, 이것 때문에 수확을 버릴 이유가 없다.
+              for f in $(git diff --name-only --diff-filter=U \
+                         | grep -E '^data/(products_full\.csv|product_sizes\.json|product_tags_full\.json|_audit\.(json|csv)|_issues[^/]*\.csv|size_unavailable\.csv|_missing[^/]*\.csv)$|^data/crawl/_[^/]*\.json$' || true); do
+                git checkout --ours -- "$f" && git add "$f"
+              done
+              # 수확(매장별 jsonl)이 하나라도 안 풀리면 abort — 저쪽 것으로 덮지 않는다.
+              if [ -z "$(git diff --name-only --diff-filter=U)" ]; then
+                git -c core.editor=true rebase --continue && git push && exit 0
+              fi
+              git rebase --abort 2>/dev/null || true
+            fi
+            echo "푸시 실패, 재시도 $i"; sleep 10
+          done
+          exit 1
+      # 잠근 조각이라도 남겨 둘 까닭이 없다 — 합쳐 밀고 나면 이 판의 아티팩트를 지운다.
+      # (실패한 판은 다시 돌릴 수 있게 남기고, 하루 뒤 저절로 사라진다.)
+      - name: 이 판의 조각(아티팩트) 지우기
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts" --jq '.artifacts[].id' |
+            while read -r id; do gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$id" >/dev/null && echo "지움 $id"; done
