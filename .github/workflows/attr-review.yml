@@ -1,0 +1,86 @@
+# 상품 속성 사진 판독(2026-11-16) — scripts/attr_review.py 머리말.
+# 손으로만 돈다. 비용이 드는 판이라 max_usd 를 넘을 것 같으면 보내지 않고 끝난다.
+# 필요한 것: Settings → Secrets and variables → Actions 에 ANTHROPIC_API_KEY.
+name: attr-review
+
+on:
+  workflow_dispatch:
+    inputs:
+      n:
+        description: "판독할 상품 수"
+        required: false
+        default: "500"
+      max_usd:
+        description: "어림 비용이 이 달러를 넘으면 보내지 않는다"
+        required: false
+        default: "30"
+      model:
+        description: "모델"
+        required: false
+        default: "claude-opus-5-5"
+      effort:
+        description: "effort (low · medium · high)"
+        required: false
+        default: "medium"
+      name:
+        description: "결과 파일 이름 꼬리"
+        required: false
+        default: "sample"
+      all:
+        description: "true 면 표본 대신 판매 중 옷 전부에서 아직 안 한 것 n 벌"
+        required: false
+        default: "false"
+
+env:
+  DATA_BRANCH: crawl/cafe24-full-catalog
+
+permissions:
+  contents: read
+
+concurrency:
+  group: attr-review-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    defaults:
+      run:
+        working-directory: work
+    steps:
+      - uses: actions/checkout@v4
+      - name: 데이터 저장소(비공개) 받기
+        uses: ./.github/actions/data-repo
+        with:
+          token: ${{ secrets.DATA_TOKEN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: 설치
+        run: pip install -q anthropic pillow requests
+      - name: 판독
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          N: ${{ inputs.n }}
+          MAX_USD: ${{ inputs.max_usd }}
+          MODEL: ${{ inputs.model }}
+          EFFORT: ${{ inputs.effort }}
+          NAME: ${{ inputs.name }}
+          ALL: ${{ inputs.all }}
+        run: |
+          extra=""; [ "$ALL" = "true" ] && extra="--all"
+          python -u scripts/attr_review.py --n "$N" --max-usd "$MAX_USD" --model "$MODEL" --effort "$EFFORT" --name "$NAME" --hours 4.5 $extra
+      - name: 결과 커밋
+        if: always()
+        shell: bash
+        run: |
+          git add data/llm/attr_review/ 2>/dev/null || true
+          git diff --cached --quiet && { echo "올릴 것 없음"; exit 0; }
+          git commit -qm "속성 사진 판독 ${{ inputs.name }} (Actions)"
+          for i in 1 2 3 4 5; do
+            git pull -q --rebase --autostash origin "$DATA_BRANCH" && git push -q && exit 0
+            git rebase --abort 2>/dev/null || true
+            sleep $((10 + RANDOM % 30))
+          done
+          exit 1

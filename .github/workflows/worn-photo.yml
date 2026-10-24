@@ -1,0 +1,79 @@
+# 대표 사진 착용컷 판정용 옷 분할 넓이 — scripts/worn_photo.py 머리말. 앱 세션 부탁(2026-10-11).
+# 결과 data/worn_photo/<조각>.jsonl 은 export_app_data.worn 이 index 의 wn 칸으로 쓴다(publish 때 반영). 이미 잰 사진은 건너뛴다.
+# 비용: 사진 한 장 약 1.6초 — 판매중 10만 장을 20조각으로 나눠 조각마다 2~3시간.
+
+name: worn-photo
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "조각마다 사진 수 상한(0 이면 전부)"
+        required: false
+        default: "0"
+
+env:
+  DATA_BRANCH: crawl/cafe24-full-catalog
+
+permissions:
+  contents: read
+
+concurrency:
+  group: worn-photo-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+    defaults:
+      run:
+        working-directory: work
+    steps:
+      - uses: actions/checkout@v4
+      - name: 데이터 저장소(비공개) 받기
+        uses: ./.github/actions/data-repo
+        with:
+          token: ${{ secrets.DATA_TOKEN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: 설치(CPU torch · transformers)
+        run: |
+          pip install -q torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          pip install -q transformers pillow requests numpy
+      - name: 판독 · 조금씩 커밋
+        # 러너가 GitHub 쪽 종료 신호로 한꺼번에 꺼진 적이 있다(2026-10-11 ocr-paddle 12조각 중 11조각이 13분 만에, 끝 커밋도 못 하고).
+        # 그래서 640개씩 끊어 돌고 그때마다 커밋한다 — 꺼져도 잃는 것은 한 토막뿐이고, 다시 돌리면 읽은 것은 건너뛴다.
+        shell: bash
+        run: |
+          mkdir -p data/worn_photo
+          LOG=data/worn_photo/${{ matrix.shard }}.log
+          push() {
+            git add data/worn_photo/ 2>/dev/null || true
+            git diff --cached --quiet && return 0
+            git commit -qm "착용컷 판정 조각 ${{ matrix.shard }} (Actions)"
+            for i in 1 2 3 4 5; do
+              git pull -q --rebase --autostash origin "$DATA_BRANCH" && git push -q && return 0
+              git rebase --abort 2>/dev/null || true
+              sleep $((10 + RANDOM % 40))
+            done
+            return 1
+          }
+          start=$(date +%s); cap=${{ inputs.limit }}; cap=${cap:-0}; did=0
+          while [ $(( $(date +%s) - start )) -lt 18000 ]; do
+            n=640; if [ "$cap" -gt 0 ]; then n=$(( cap - did )); [ $n -gt 640 ] && n=640; [ $n -le 0 ] && break; fi
+            rc=0; python -u scripts/worn_photo.py --shard "${{ matrix.shard }}/20" --limit $n --hours 5 > /tmp/raw 2>&1 || rc=$?
+            grep -v "Loading weights\|download https\|iB/s" /tmp/raw > /tmp/round || true
+            cat /tmp/round >> "$LOG"; tail -3 /tmp/round
+            push || true
+            did=$(( did + n ))
+            grep -q "대상 0" /tmp/round && break
+            # 스크립트가 죽으면(설치 빠짐 등) 멈춘다 — 2026-10-11 worn-photo 가 torchvision 없이 5시간 헛돌며 로그만 커밋했다
+            if [ "$rc" != 0 ] && grep -q "Traceback" /tmp/round; then echo "스크립트 실패 — 멈춤"; exit 1; fi
+          done
+          push
