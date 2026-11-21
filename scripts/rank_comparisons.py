@@ -1,5 +1,9 @@
 """One-time, restartable ranking comparisons. The three private ledgers share a $220 ceiling."""
 import argparse
+import base64
+import io
+import threading
+from PIL import Image, ImageOps
 import csv
 import hashlib
 import json
@@ -22,7 +26,7 @@ NANO = 1_000_000_000
 PRICE = {"gpt-5.4-mini": (750, 75, 4500), "gpt-5.4": (2500, 250, 15000)}
 OUTPUT_MAX = 512
 # Three low-detail images and up to 3 x 45 characters of garment names.
-INPUT_MAX = 8192
+INPUT_MAX = 16384
 QUESTIONS = {
     "s": "Which candidate better matches the anchor garment's silhouette, cut, proportions and length?",
     "cp": "Which candidate better matches the anchor garment's color, print and pattern?",
@@ -96,6 +100,48 @@ def similar_cases(catalog):
                        "catalog": axes["version"]}
 
 
+_host_lock = threading.Lock()
+_host_next = {}
+_image_locks = [threading.Lock() for _ in range(257)]
+_IMAGE_CACHE = Path(tempfile.mkdtemp())
+
+
+def download_photo(url):
+    host = urlsplit(url).hostname
+    with _host_lock:
+        start = max(time.monotonic(), _host_next.get(host, 0))
+        _host_next[host] = start + 1
+    time.sleep(max(0, start - time.monotonic()))
+    with requests.get(url, stream=True, timeout=(6, 12), headers={"User-Agent": "Mozilla/5.0"}) as response:
+        response.raise_for_status()
+        buf = bytearray()
+        for chunk in response.iter_content(65536):
+            buf.extend(chunk)
+            if len(buf) > 12_000_000:
+                raise ValueError("oversize")
+    with Image.open(io.BytesIO(buf)) as source:
+        if source.width * source.height > 32_000_000:
+            raise ValueError("oversize")
+        im = ImageOps.exif_transpose(source).convert("RGB")
+        im.thumbnail((640, 768), Image.Resampling.LANCZOS)
+        stream = io.BytesIO()
+        im.save(stream, "JPEG", quality=83)
+        return stream.getvalue()
+
+
+def photo(url):
+    key = hashlib.sha256(url.encode()).hexdigest()
+    path = _IMAGE_CACHE / key
+    with _image_locks[int(key[:8],16) % len(_image_locks)]:
+        if not path.exists():
+            try:
+                data = download_photo(url)
+            except (OSError, ValueError, requests.RequestException, Image.DecompressionBombError):
+                data = b""
+            path.write_bytes(data)
+        return path.read_bytes()
+
+
 def request(case, catalog, model):
     axis = case["axis"]
     ids = case["ids"]
@@ -105,7 +151,11 @@ def request(case, catalog, model):
     for i in ids:
         row = catalog[i]
         asset.append({"type": "text", "text": (row.get("subtype") or row["category"])[:45]})
-        asset.append({"type": "image_url", "image_url": {"url": row["image_url"], "detail": "low"}})
+        data = photo(row["image_url"])
+        if not data:
+            return dict(case, model=model, known=0, uncertain=0, error="photo_unavailable")
+        url = "data:image/jpeg;base64," + base64.b64encode(data).decode()
+        asset.append({"type": "image_url", "image_url": {"url": url, "detail": "low"}})
     body = {"model": model, "service_tier": "default", "store": False, "max_completion_tokens": OUTPUT_MAX,
             "reasoning_effort": "low", "messages": [{"role": "user", "content": asset}],
             "response_format": {"type": "json_schema", "json_schema": {"name": "rank", "strict": True, "schema": SCHEMA}}}
@@ -206,7 +256,7 @@ def run(phase):
     with ThreadPoolExecutor(36) as pool:
         while time.monotonic() < deadline and not exhausted:
             remain = cap - state["known_cost_nano"] - state["uncertain_nano"]
-            slots = min(24 if state["next"] == 0 else 480, remain // reserve)
+            slots = min(24 if state["next"] < 2 else 256, remain // reserve)
             if not slots:
                 break
             batch = []
