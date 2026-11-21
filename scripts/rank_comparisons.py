@@ -18,6 +18,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import requests
+from platforms import APP_HOLD
 
 DATA = Path.cwd() / "data"
 PLAN = "layer-rank-credit-20261122"
@@ -73,7 +74,7 @@ class Ledger:
 def read_catalog():
     with (DATA / "products_full.csv").open(encoding="utf-8-sig") as f:
         return {f"{r['brand_slug']}-{r['product_no']}": r for r in csv.DictReader(f)
-                if r.get("status") == "ON_SALE" and public_image(r.get("image_url") or "")}
+                if r["brand_slug"] not in APP_HOLD and r.get("status") == "ON_SALE" and public_image(r.get("image_url") or "")}
 
 
 def public_image(url):
@@ -90,8 +91,11 @@ def similar_cases(catalog):
     for depth in (0, 1, 2):
         for anchor in anchors:
             for axis in ("s", "cp", "m"):
-                ranks = [index[j] for j in items[anchor].get(axis, [])[::2] if index[j] in catalog]
-                if len(ranks) < 2:
+                raw = items[anchor].get(axis, [])
+                # export_app_data.ax_pairs applies 0.70 and requires three eligible products.
+                ranks = [index[j] for j, score in zip(raw[::2], raw[1::2])
+                         if score >= 700 and index[j] in catalog]
+                if len(ranks) < 3:
                     continue
                 rival = 1 + (int.from_bytes(hashlib.sha256((anchor + axis).encode()).digest()[:2], "big") + depth) % min(5, len(ranks) - 1)
                 if depth >= min(5, len(ranks) - 1):
