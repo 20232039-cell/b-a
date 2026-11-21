@@ -25,6 +25,7 @@ PLAN = "layer-rank-credit-20261122"
 CAP = {"similar": 120, "outfit": 70, "review": 30}
 NANO = 1_000_000_000
 PRICE = {"gpt-5.4-mini": (750, 75, 4500), "gpt-5.4": (2500, 250, 15000)}
+CUTOFF = datetime(2026, 11, 22, 3, 50, tzinfo=timezone.utc).timestamp()
 OUTPUT_MAX = 512
 # Three low-detail images and up to 3 x 45 characters of garment names.
 INPUT_MAX = 16384
@@ -48,7 +49,7 @@ def git(root, *args, capture=False):
             break
         if attempt + 1 == retries:
             # The clone URL contains the data token. Never print git's raw stderr.
-            reasons = ("non-fast-forward", "stale info", "cannot lock ref", "403", "500", "502", "503", "timed out", "rejected")
+            reasons = ("shallow update not allowed", "non-fast-forward", "stale info", "cannot lock ref", "403", "500", "502", "503", "timed out", "rejected")
             diagnostic = next((k for k in reasons if k.encode() in p.stderr), "remote or local error")
             raise RuntimeError(f"git {args[0]} failed ({p.returncode}, {diagnostic})")
         time.sleep(min(30, 2 ** attempt))
@@ -63,6 +64,11 @@ class Ledger:
         git(self.root, "config", "user.name", "layer-runner-bot")
         git(self.root, "config", "user.email", "runner@layer.invalid")
         git(self.root, "remote", "add", "origin", git(".", "remote", "get-url", "origin", capture=True))
+        # Fetch training inputs into a separate git object store. Result pushes must
+        # never negotiate with the shallow boundaries of unrelated input branches.
+        self.inputs = Path(tempfile.mkdtemp())
+        git(self.inputs, "init", "-q", "--bare")
+        git(self.inputs, "remote", "add", "origin", git(".", "remote", "get-url", "origin", capture=True))
         if git(self.root, "ls-remote", "--heads", "origin", self.branch, capture=True):
             git(self.root, "fetch", "--depth=1", "origin", self.branch)
             git(self.root, "checkout", "-q", "--detach", "FETCH_HEAD")
@@ -172,6 +178,8 @@ def request(case, catalog, model):
             "reasoning_effort": "low", "messages": [{"role": "user", "content": asset}],
             "response_format": {"type": "json_schema", "json_schema": {"name": "rank", "strict": True, "schema": SCHEMA}}}
     result = dict(case, model=model, known=0, uncertain=0)
+    if time.time() >= CUTOFF:
+        return dict(result, error="deadline")
     try:
         resp = requests.post("https://api.openai.com/v1/chat/completions", json=body,
                              headers={"Authorization": "Bearer " + os.environ["OPENAI_API_KEY"]},
@@ -205,15 +213,15 @@ def request(case, catalog, model):
 
 def private_rows(ledger, phase, consumed):
     branch = f"results/{PLAN}-{phase}"
-    if not git(ledger.root, "ls-remote", "--heads", "origin", branch, capture=True):
+    if not git(ledger.inputs, "ls-remote", "--heads", "origin", branch, capture=True):
         return
-    git(ledger.root, "fetch", "--depth=1", "origin", branch)
-    sha = git(ledger.root, "rev-parse", "FETCH_HEAD", capture=True)
-    paths = git(ledger.root, "ls-tree", "--name-only", sha, capture=True).splitlines()
+    git(ledger.inputs, "fetch", "--depth=1", "origin", branch)
+    sha = git(ledger.inputs, "rev-parse", "FETCH_HEAD", capture=True)
+    paths = git(ledger.inputs, "ls-tree", "--name-only", sha, capture=True).splitlines()
     for p in sorted(paths):
         if p.endswith(".jsonl") and (phase, p) not in consumed:
             consumed.add((phase, p))
-            for line in git(ledger.root, "show", f"{sha}:{p}", capture=True).splitlines():
+            for line in git(ledger.inputs, "show", f"{sha}:{p}", capture=True).splitlines():
                 yield json.loads(line)
 
 
@@ -237,16 +245,16 @@ def review_cases(ledger, consumed):
 
 def outfit_cases(ledger, consumed):
     branch = f"inputs/{PLAN}"
-    if not git(ledger.root, "ls-remote", "--heads", "origin", branch, capture=True):
+    if not git(ledger.inputs, "ls-remote", "--heads", "origin", branch, capture=True):
         return
-    git(ledger.root, "fetch", "--depth=1", "origin", branch)
-    sha = git(ledger.root, "rev-parse", "FETCH_HEAD", capture=True)
-    files = git(ledger.root, "ls-tree", "--name-only", sha, capture=True).splitlines()
+    git(ledger.inputs, "fetch", "--depth=1", "origin", branch)
+    sha = git(ledger.inputs, "rev-parse", "FETCH_HEAD", capture=True)
+    files = git(ledger.inputs, "ls-tree", "--name-only", sha, capture=True).splitlines()
     for name in sorted(p for p in files if p.startswith("outfits-") and p.endswith(".jsonl")):
         if name in consumed:
             continue
         consumed.add(name)
-        for line in git(ledger.root, "show", f"{sha}:{name}", capture=True).splitlines():
+        for line in git(ledger.inputs, "show", f"{sha}:{name}", capture=True).splitlines():
             yield json.loads(line)
 
 
@@ -266,8 +274,7 @@ def run(phase):
             seen.add(json.loads(line)["key"])
     rng = random.Random(2287)
     # Allow ten minutes for in-flight completions before the provisional 13:00 KST expiry.
-    cutoff = datetime(2026, 11, 22, 3, 50, tzinfo=timezone.utc).timestamp()
-    deadline = time.monotonic() + min(5.3 * 3600, cutoff - time.time())
+    deadline = time.monotonic() + min(5.3 * 3600, CUTOFF - time.time())
     consumed = set()
     def input_cases():
         if phase == "similar":
