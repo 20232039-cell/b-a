@@ -85,6 +85,9 @@ def main():
                 f.write("\n".join(report)+"\n")
             if not done and now < CUTOFF:
                 dispatch("monitor")
+            else:
+                with Path(os.environ["GITHUB_OUTPUT"]).open("a") as f:
+                    f.write("finalize=true\n")
             break
         time.sleep(180)
 

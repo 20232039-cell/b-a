@@ -44,7 +44,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Follow paid comparisons through the Seoul deadline
+        id: watch
         env:
           DATA_TOKEN: ${{ secrets.DATA_TOKEN }}
           JOB_TOKEN: ${{ github.token }}
         run: python -u scripts/monitor_rank_credit.py
+      - name: Combine judgments in the private data repository
+        if: steps.watch.outputs.finalize == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.DATA_TOKEN }}
+        run: python -u scripts/summarize_rank_credit.py
