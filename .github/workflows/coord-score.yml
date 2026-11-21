@@ -1,79 +1,35 @@
-# 코디 조합 채점(2026-11-20) — scripts/coord_score.py 머리말.
-# 손으로만 돈다. 비용이 드는 판이라 max_usd 를 넘을 것 같으면 보내지 않고 끝난다.
-# 필요한 것: Settings → Secrets and variables → Actions 에 OPENAI_API_KEY.
-name: coord-score
-
+name: LAYER recommendation comparisons
 on:
   workflow_dispatch:
     inputs:
-      n:
-        description: "채점할 조합 수"
-        required: false
-        default: "200"
-      model:
-        description: "모델(쉼표로 여럿)"
-        required: false
-        default: "gpt-6.1-sol"
-      effort:
-        description: "reasoning_effort"
-        required: false
-        default: "medium"
-      name:
-        description: "결과 파일 이름 꼬리"
-        required: false
-        default: "sample"
-      resume:
-        description: "<시각>_<이름> 이면 새로 보내지 않고 그 판의 배치를 거두기만"
-        required: false
-        default: ""
-
-env:
-  DATA_BRANCH: crawl/cafe24-full-catalog
-
+      phase:
+        description: Comparison dataset
+        required: true
+        type: choice
+        options: [similar, outfit, review]
 permissions:
   contents: read
-
 concurrency:
-  group: coord-score-${{ github.ref }}
+  group: layer-credit-20261122-${{ inputs.phase }}
   cancel-in-progress: false
-
 jobs:
-  review:
+  compare:
+    if: github.ref == 'refs/heads/codex/layer-rank-credit-20261122'
     runs-on: ubuntu-latest
-    timeout-minutes: 340
-    defaults:
-      run:
-        working-directory: work
+    timeout-minutes: 345
     steps:
       - uses: actions/checkout@v4
-      - name: 데이터 저장소(비공개) 받기
+      - name: Prepare private catalog
         uses: ./.github/actions/data-repo
         with:
           token: ${{ secrets.DATA_TOKEN }}
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-      - name: 설치
-        run: pip install -q pillow requests
-      - name: 판독
+          python-version: '3.11'
+      - run: pip install -q requests pillow
+      - name: Compare and checkpoint private results
+        working-directory: work
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          N: ${{ inputs.n }}
-          MODEL: ${{ inputs.model }}
-          EFFORT: ${{ inputs.effort }}
-          NAME: ${{ inputs.name }}
-          RESUME: ${{ inputs.resume }}
-        run: python -u scripts/coord_score.py --n "$N" --model "$MODEL" --effort "$EFFORT" --name "$NAME" --hours 4.5 --resume "$RESUME"
-      - name: 결과 커밋
-        if: always()
-        shell: bash
-        run: |
-          git add data/llm/coord_score/ 2>/dev/null || true
-          git diff --cached --quiet && { echo "올릴 것 없음"; exit 0; }
-          git commit -qm "코디 채점 ${{ inputs.name }} (Actions)"
-          for i in 1 2 3 4 5; do
-            git pull -q --rebase --autostash origin "$DATA_BRANCH" && git push -q && exit 0
-            git rebase --abort 2>/dev/null || true
-            sleep $((10 + RANDOM % 30))
-          done
-          exit 1
+          PHASE: ${{ inputs.phase }}
+        run: python -u scripts/rank_comparisons.py "$PHASE"
