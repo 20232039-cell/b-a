@@ -205,8 +205,12 @@ def private_rows(ledger, phase):
 
 
 def review_cases(ledger):
-    for phase in ("similar", "outfit"):
-        for row in private_rows(ledger, phase):
+    from itertools import zip_longest
+    streams = [private_rows(ledger, phase) for phase in ("similar", "outfit")]
+    for pair in zip_longest(*streams):
+        for row in pair:
+            if row is None:
+                continue
             choice = row.get("choice")
             if not choice:
                 continue
