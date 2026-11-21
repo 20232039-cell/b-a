@@ -1,4 +1,5 @@
 name: LAYER recommendation comparisons
+run-name: LAYER credit · ${{ inputs.phase }}
 on:
   workflow_dispatch:
     inputs:
@@ -6,7 +7,7 @@ on:
         description: Comparison dataset
         required: true
         type: choice
-        options: [similar, outfit, review]
+        options: [similar, outfit, review, monitor]
 permissions:
   contents: read
 concurrency:
@@ -14,7 +15,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   compare:
-    if: github.ref == 'refs/heads/codex/layer-rank-credit-20261122'
+    if: github.ref == 'refs/heads/codex/layer-rank-credit-20261122' && inputs.phase != 'monitor'
     runs-on: ubuntu-latest
     timeout-minutes: 345
     steps:
@@ -33,3 +34,17 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           PHASE: ${{ inputs.phase }}
         run: python -u scripts/rank_comparisons.py "$PHASE"
+  monitor:
+    if: github.ref == 'refs/heads/codex/layer-rank-credit-20261122' && inputs.phase == 'monitor'
+    permissions:
+      contents: read
+      actions: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 345
+    steps:
+      - uses: actions/checkout@v4
+      - name: Follow paid comparisons through the Seoul deadline
+        env:
+          DATA_TOKEN: ${{ secrets.DATA_TOKEN }}
+          JOB_TOKEN: ${{ github.token }}
+        run: python -u scripts/monitor_rank_credit.py
