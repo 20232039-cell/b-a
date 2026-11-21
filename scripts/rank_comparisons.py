@@ -195,7 +195,7 @@ def request(case, catalog, model):
     return result
 
 
-def private_rows(ledger, phase):
+def private_rows(ledger, phase, consumed):
     branch = f"results/{PLAN}-{phase}"
     if not git(ledger.root, "ls-remote", "--heads", "origin", branch, capture=True):
         return
@@ -203,14 +203,15 @@ def private_rows(ledger, phase):
     sha = git(ledger.root, "rev-parse", "FETCH_HEAD", capture=True)
     paths = git(ledger.root, "ls-tree", "--name-only", sha, capture=True).splitlines()
     for p in sorted(paths):
-        if p.endswith(".jsonl"):
+        if p.endswith(".jsonl") and (phase, p) not in consumed:
+            consumed.add((phase, p))
             for line in git(ledger.root, "show", f"{sha}:{p}", capture=True).splitlines():
                 yield json.loads(line)
 
 
-def review_cases(ledger):
+def review_cases(ledger, consumed):
     from itertools import zip_longest
-    streams = [private_rows(ledger, phase) for phase in ("similar", "outfit")]
+    streams = [private_rows(ledger, phase, consumed) for phase in ("similar", "outfit")]
     for pair in zip_longest(*streams):
         for row in pair:
             if row is None:
@@ -226,12 +227,17 @@ def review_cases(ledger):
                    "original_winner": row.get("winner"), "original_choice": choice}
 
 
-def outfit_cases(ledger):
+def outfit_cases(ledger, consumed):
     branch = f"inputs/{PLAN}"
+    if not git(ledger.root, "ls-remote", "--heads", "origin", branch, capture=True):
+        return
     git(ledger.root, "fetch", "--depth=1", "origin", branch)
     sha = git(ledger.root, "rev-parse", "FETCH_HEAD", capture=True)
     files = git(ledger.root, "ls-tree", "--name-only", sha, capture=True).splitlines()
     for name in sorted(p for p in files if p.startswith("outfits-") and p.endswith(".jsonl")):
+        if name in consumed:
+            continue
+        consumed.add(name)
         for line in git(ledger.root, "show", f"{sha}:{name}", capture=True).splitlines():
             yield json.loads(line)
 
@@ -241,12 +247,6 @@ def run(phase):
         raise RuntimeError("Missing OPENAI_API_KEY")
     ledger = Ledger(phase)
     catalog = read_catalog()
-    if phase == "similar":
-        cases = similar_cases(catalog)
-    elif phase == "outfit":
-        cases = outfit_cases(ledger)
-    else:
-        cases = review_cases(ledger)
     model = "gpt-5.4" if phase == "review" else "gpt-5.4-mini"
     inp, _, out = PRICE[model]
     reserve = INPUT_MAX * inp + OUTPUT_MAX * out
@@ -260,6 +260,14 @@ def run(phase):
     # Allow ten minutes for in-flight completions before the provisional 13:00 KST expiry.
     cutoff = datetime(2026, 11, 22, 3, 50, tzinfo=timezone.utc).timestamp()
     deadline = time.monotonic() + min(5.3 * 3600, cutoff - time.time())
+    consumed = set()
+    def input_cases():
+        if phase == "similar":
+            return similar_cases(catalog)
+        if phase == "outfit":
+            return outfit_cases(ledger, consumed)
+        return review_cases(ledger, consumed)
+    cases = input_cases()
     exhausted = False
     with ThreadPoolExecutor(36) as pool:
         while time.monotonic() < deadline and not exhausted:
@@ -283,9 +291,14 @@ def run(phase):
                 if len(batch) == slots:
                     break
             else:
-                exhausted = True
+                exhausted = phase == "similar"
+                if not exhausted:
+                    cases = input_cases()
             if not batch:
-                break
+                if exhausted:
+                    break
+                time.sleep(30)
+                continue
             seq = state["next"]
             state.update(next=seq + 1, reserved_nano=reserve * len(batch))
             ledger.push(f"Reserve comparison group {seq}")
