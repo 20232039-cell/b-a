@@ -41,9 +41,17 @@ SCHEMA = {"type": "object", "additionalProperties": False,
 
 
 def git(root, *args, capture=False):
-    p = subprocess.run(["git", *args], cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if p.returncode:
-        raise RuntimeError(f"git {args[0]} failed ({p.returncode})")
+    retries = 6 if args[0] in ("push", "fetch", "ls-remote") else 1
+    for attempt in range(retries):
+        p = subprocess.run(["git", *args], cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if p.returncode == 0:
+            break
+        if attempt + 1 == retries:
+            # The clone URL contains the data token. Never print git's raw stderr.
+            reasons = ("non-fast-forward", "stale info", "cannot lock ref", "403", "500", "502", "503", "timed out", "rejected")
+            diagnostic = next((k for k in reasons if k.encode() in p.stderr), "remote or local error")
+            raise RuntimeError(f"git {args[0]} failed ({p.returncode}, {diagnostic})")
+        time.sleep(min(30, 2 ** attempt))
     return p.stdout.decode().strip() if capture else None
 
 
