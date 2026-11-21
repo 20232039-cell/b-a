@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -167,6 +168,16 @@ def review_cases(ledger):
                    "original_winner": row.get("winner"), "original_choice": choice}
 
 
+def outfit_cases(ledger):
+    branch = f"inputs/{PLAN}"
+    git(ledger.root, "fetch", "--depth=1", "origin", branch)
+    sha = git(ledger.root, "rev-parse", "FETCH_HEAD", capture=True)
+    files = git(ledger.root, "ls-tree", "--name-only", sha, capture=True).splitlines()
+    for name in sorted(p for p in files if p.startswith("outfits-") and p.endswith(".jsonl")):
+        for line in git(ledger.root, "show", f"{sha}:{name}", capture=True).splitlines():
+            yield json.loads(line)
+
+
 def run(phase):
     if not os.environ.get("OPENAI_API_KEY"):
         raise RuntimeError("Missing OPENAI_API_KEY")
@@ -175,7 +186,7 @@ def run(phase):
     if phase == "similar":
         cases = similar_cases(catalog)
     elif phase == "outfit":
-        cases = (json.loads(l) for l in Path("outfit-candidates.jsonl").open())
+        cases = outfit_cases(ledger)
     else:
         cases = review_cases(ledger)
     model = "gpt-5.4" if phase == "review" else "gpt-5.4-mini"
@@ -188,7 +199,9 @@ def run(phase):
         for line in file.open():
             seen.add(json.loads(line)["key"])
     rng = random.Random(2287)
-    deadline = time.monotonic() + 5.3 * 3600
+    # Allow ten minutes for in-flight completions before the provisional 13:00 KST expiry.
+    cutoff = datetime(2026, 11, 22, 3, 50, tzinfo=timezone.utc).timestamp()
+    deadline = time.monotonic() + min(5.3 * 3600, cutoff - time.time())
     exhausted = False
     with ThreadPoolExecutor(36) as pool:
         while time.monotonic() < deadline and not exhausted:
